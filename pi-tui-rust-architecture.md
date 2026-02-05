@@ -353,3 +353,4 @@ These are documented parity risks in the current snapshot. Either port the exact
 
 - **Width logic:** Rust uses `unicode-width` + `emojis` while pi‑tui uses East‑Asian width + regex-based default‑ignorable handling. Options: port pi‑tui rules or add targeted width tests that codify the divergence.
 - **Markdown parsing:** Rust uses the `markdown` crate while pi‑tui uses `marked`. Options: add compatibility fixtures/tests or pursue deeper token‑level parity.
+- **Image max-height:** Rust enforces `max_height_cells` sizing in `src/core/terminal_image.rs::render_image`, while pi‑tui TS currently ignores `maxHeightCells` in `packages/tui/src/terminal-image.ts::renderImage` and `packages/tui/src/components/image.ts`. Impact: callers that set a max height will see smaller images (and fewer reserved rows) in Rust than in TS.

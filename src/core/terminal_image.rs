@@ -33,7 +33,6 @@ pub struct ImageDimensions {
 #[derive(Debug, Clone, Default)]
 pub struct ImageRenderOptions {
     pub max_width_cells: Option<u32>,
-    #[allow(dead_code)]
     pub max_height_cells: Option<u32>,
     pub preserve_aspect_ratio: Option<bool>,
     pub image_id: Option<u32>,
@@ -427,15 +426,17 @@ pub fn render_image(
     let caps = get_capabilities();
     let images = caps.images?;
 
-    let max_width = options.max_width_cells.unwrap_or(80);
-    let rows = calculate_image_rows(image_dimensions, max_width, Some(get_cell_dimensions()));
+    let max_width = options.max_width_cells.unwrap_or(80).max(1);
+    let cell_dimensions = get_cell_dimensions();
+    let (width_cells, rows) =
+        fit_image_within_cells(image_dimensions, cell_dimensions, max_width, options.max_height_cells);
 
     match images {
         ImageProtocol::Kitty => {
             let sequence = encode_kitty(
                 base64_data,
                 &KittyEncodeOptions {
-                    columns: Some(max_width),
+                    columns: Some(width_cells),
                     rows: Some(rows),
                     image_id: options.image_id,
                 },
@@ -450,7 +451,7 @@ pub fn render_image(
             let sequence = encode_iterm2(
                 base64_data,
                 &Iterm2EncodeOptions {
-                    width: Some(max_width.to_string()),
+                    width: Some(width_cells.to_string()),
                     height: Some("auto".to_string()),
                     name: None,
                     preserve_aspect_ratio: Some(options.preserve_aspect_ratio.unwrap_or(true)),
@@ -464,6 +465,50 @@ pub fn render_image(
             })
         }
     }
+}
+
+fn fit_image_within_cells(
+    image_dimensions: ImageDimensions,
+    cell_dimensions: CellDimensions,
+    max_width_cells: u32,
+    max_height_cells: Option<u32>,
+) -> (u32, u32) {
+    let max_width_cells = max_width_cells.max(1);
+
+    if image_dimensions.width_px == 0
+        || image_dimensions.height_px == 0
+        || cell_dimensions.width_px == 0
+        || cell_dimensions.height_px == 0
+    {
+        return (max_width_cells, 1);
+    }
+
+    let mut width_cells = max_width_cells;
+
+    if let Some(max_height_cells) = max_height_cells {
+        let max_height_cells = max_height_cells.max(1);
+
+        let scale_w = (max_width_cells as f64 * cell_dimensions.width_px as f64)
+            / image_dimensions.width_px as f64;
+        let scale_h = (max_height_cells as f64 * cell_dimensions.height_px as f64)
+            / image_dimensions.height_px as f64;
+        let scale = scale_w.min(scale_h);
+
+        let scaled_width_cells =
+            ((image_dimensions.width_px as f64 * scale) / cell_dimensions.width_px as f64).floor() as u32;
+        width_cells = scaled_width_cells.clamp(1, max_width_cells);
+
+        let mut rows = calculate_image_rows(image_dimensions, width_cells, Some(cell_dimensions));
+        while rows > max_height_cells && width_cells > 1 {
+            width_cells -= 1;
+            rows = calculate_image_rows(image_dimensions, width_cells, Some(cell_dimensions));
+        }
+
+        return (width_cells, rows);
+    }
+
+    let rows = calculate_image_rows(image_dimensions, width_cells, Some(cell_dimensions));
+    (width_cells, rows)
 }
 
 pub fn image_fallback(
@@ -820,6 +865,43 @@ mod tests {
         assert!(result.sequence.starts_with("\x1b_G"));
         assert_eq!(result.rows, 5);
         assert_eq!(result.image_id, Some(9));
+
+        set_cell_dimensions(original);
+        super::reset_capabilities_cache();
+    }
+
+    #[test]
+    fn render_image_respects_max_height_cells() {
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _term = set_env_guard("TERM", Some("xterm-256color"));
+        let _term_program = set_env_guard("TERM_PROGRAM", Some("kitty"));
+        let _kitty = set_env_guard("KITTY_WINDOW_ID", Some("1"));
+        let _wezterm = set_env_guard("WEZTERM_PANE", None);
+        let _iterm = set_env_guard("ITERM_SESSION_ID", None);
+        let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
+        super::reset_capabilities_cache();
+
+        let original = get_cell_dimensions();
+        set_cell_dimensions(CellDimensions {
+            width_px: 10,
+            height_px: 10,
+        });
+
+        let dims = ImageDimensions {
+            width_px: 100,
+            height_px: 100,
+        };
+        let options = ImageRenderOptions {
+            max_width_cells: Some(10),
+            max_height_cells: Some(3),
+            preserve_aspect_ratio: None,
+            image_id: Some(9),
+        };
+        let result = render_image("AAAA", dims, &options).expect("kitty render");
+        assert!(result.rows <= 3);
+        assert_eq!(result.rows, 3);
+        assert!(result.sequence.contains("c=3"));
+        assert!(result.sequence.contains("r=3"));
 
         set_cell_dimensions(original);
         super::reset_capabilities_cache();

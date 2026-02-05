@@ -27,7 +27,7 @@ impl Input {
             value: String::new(),
             cursor: 0,
             focused: false,
-            prompt: String::new(),
+            prompt: "> ".to_string(),
             on_submit: None,
             on_escape: None,
             paste_buffer: String::new(),
@@ -478,10 +478,10 @@ mod tests {
     }
 
     #[test]
-    fn input_has_no_prompt_by_default() {
+    fn input_has_prompt_by_default() {
         let mut input = Input::new();
         let lines = input.render(10);
         assert_eq!(lines.len(), 1);
-        assert!(!lines[0].starts_with("> "));
+        assert!(lines[0].starts_with("> "));
     }
 }

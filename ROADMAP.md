@@ -457,8 +457,9 @@ This roadmap breaks the port into concrete milestones with per‑phase checklist
 
 **Checklist**
 - [x] Implement `EnvConfig` parsing + tests (`PI_HARDWARE_CURSOR`, `PI_CLEAR_ON_SHRINK`, `PI_TUI_WRITE_LOG`, `PI_TUI_DEBUG`, `PI_DEBUG_REDRAW`)
-- [x] Remove/make optional Input prompt to match pi-tui
+- [x] Align Input prompt default with pi-tui (`"> "`), keep configurable
 - [x] Align `allocate_image_id()` to random ID semantics
+- [x] Enforce `max_height_cells` in image rendering (intentional divergence: TS currently ignores `maxHeightCells`)
 - [x] Add `timeout` alias in `StdinBufferOptions`
 - [x] Add Editor getters for padding + autocomplete max visible
 - [x] Resolve `render/frame.rs` (implement or remove)
@@ -468,4 +469,5 @@ This roadmap breaks the port into concrete milestones with per‑phase checklist
 - [x] Unit: config/env parsing defaults + flags
 - [x] Unit: StdinBufferOptions timeout alias (if added)
 - [x] Unit: Editor getters (if added)
-- [x] Integration: Input render without prompt (if tests exist)
+- [x] Unit: Input render includes default prompt
+- [x] Unit: `render_image` respects `max_height_cells` (rows <= max height; Kitty c/r params updated)
