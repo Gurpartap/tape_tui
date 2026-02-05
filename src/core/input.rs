@@ -7,6 +7,120 @@ use std::sync::{Mutex, OnceLock};
 
 static KITTY_PROTOCOL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Helper for building key identifiers.
+pub struct Key;
+
+#[allow(non_upper_case_globals)]
+impl Key {
+    // Special keys
+    pub const escape: &'static str = "escape";
+    pub const esc: &'static str = "esc";
+    pub const enter: &'static str = "enter";
+    pub const r#return: &'static str = "return";
+    pub const tab: &'static str = "tab";
+    pub const space: &'static str = "space";
+    pub const backspace: &'static str = "backspace";
+    pub const delete: &'static str = "delete";
+    pub const insert: &'static str = "insert";
+    pub const clear: &'static str = "clear";
+    pub const home: &'static str = "home";
+    pub const end: &'static str = "end";
+    pub const page_up: &'static str = "pageUp";
+    pub const page_down: &'static str = "pageDown";
+    pub const up: &'static str = "up";
+    pub const down: &'static str = "down";
+    pub const left: &'static str = "left";
+    pub const right: &'static str = "right";
+    pub const f1: &'static str = "f1";
+    pub const f2: &'static str = "f2";
+    pub const f3: &'static str = "f3";
+    pub const f4: &'static str = "f4";
+    pub const f5: &'static str = "f5";
+    pub const f6: &'static str = "f6";
+    pub const f7: &'static str = "f7";
+    pub const f8: &'static str = "f8";
+    pub const f9: &'static str = "f9";
+    pub const f10: &'static str = "f10";
+    pub const f11: &'static str = "f11";
+    pub const f12: &'static str = "f12";
+
+    // Symbol keys
+    pub const backtick: &'static str = "`";
+    pub const hyphen: &'static str = "-";
+    pub const equals: &'static str = "=";
+    pub const leftbracket: &'static str = "[";
+    pub const rightbracket: &'static str = "]";
+    pub const backslash: &'static str = "\\";
+    pub const semicolon: &'static str = ";";
+    pub const quote: &'static str = "'";
+    pub const comma: &'static str = ",";
+    pub const period: &'static str = ".";
+    pub const slash: &'static str = "/";
+    pub const exclamation: &'static str = "!";
+    pub const at: &'static str = "@";
+    pub const hash: &'static str = "#";
+    pub const dollar: &'static str = "$";
+    pub const percent: &'static str = "%";
+    pub const caret: &'static str = "^";
+    pub const ampersand: &'static str = "&";
+    pub const asterisk: &'static str = "*";
+    pub const leftparen: &'static str = "(";
+    pub const rightparen: &'static str = ")";
+    pub const underscore: &'static str = "_";
+    pub const plus: &'static str = "+";
+    pub const pipe: &'static str = "|";
+    pub const tilde: &'static str = "~";
+    pub const leftbrace: &'static str = "{";
+    pub const rightbrace: &'static str = "}";
+    pub const colon: &'static str = ":";
+    pub const lessthan: &'static str = "<";
+    pub const greaterthan: &'static str = ">";
+    pub const question: &'static str = "?";
+
+    // Single modifiers
+    pub fn ctrl<K: AsRef<str>>(key: K) -> String {
+        format!("ctrl+{}", key.as_ref())
+    }
+
+    pub fn shift<K: AsRef<str>>(key: K) -> String {
+        format!("shift+{}", key.as_ref())
+    }
+
+    pub fn alt<K: AsRef<str>>(key: K) -> String {
+        format!("alt+{}", key.as_ref())
+    }
+
+    // Combined modifiers
+    pub fn ctrl_shift<K: AsRef<str>>(key: K) -> String {
+        format!("ctrl+shift+{}", key.as_ref())
+    }
+
+    pub fn shift_ctrl<K: AsRef<str>>(key: K) -> String {
+        format!("shift+ctrl+{}", key.as_ref())
+    }
+
+    pub fn ctrl_alt<K: AsRef<str>>(key: K) -> String {
+        format!("ctrl+alt+{}", key.as_ref())
+    }
+
+    pub fn alt_ctrl<K: AsRef<str>>(key: K) -> String {
+        format!("alt+ctrl+{}", key.as_ref())
+    }
+
+    pub fn shift_alt<K: AsRef<str>>(key: K) -> String {
+        format!("shift+alt+{}", key.as_ref())
+    }
+
+    pub fn alt_shift<K: AsRef<str>>(key: K) -> String {
+        format!("alt+shift+{}", key.as_ref())
+    }
+
+    // Triple modifiers
+    pub fn ctrl_shift_alt<K: AsRef<str>>(key: K) -> String {
+        format!("ctrl+shift+alt+{}", key.as_ref())
+    }
+}
+
 pub fn set_kitty_protocol_active(active: bool) {
     KITTY_PROTOCOL_ACTIVE.store(active, Ordering::SeqCst);
 }
@@ -46,7 +160,7 @@ const KEY_HOME: i32 = -14;
 const KEY_END: i32 = -15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyEventType {
+pub enum KeyEventType {
     Press,
     Repeat,
     Release,
@@ -76,6 +190,21 @@ pub fn is_key_release(data: &str) -> bool {
         || data.contains(":3D")
         || data.contains(":3H")
         || data.contains(":3F")
+}
+
+pub fn is_key_repeat(data: &str) -> bool {
+    if data.contains("\x1b[200~") {
+        return false;
+    }
+
+    data.contains(":2u")
+        || data.contains(":2~")
+        || data.contains(":2A")
+        || data.contains(":2B")
+        || data.contains(":2C")
+        || data.contains(":2D")
+        || data.contains(":2H")
+        || data.contains(":2F")
 }
 
 pub fn matches_key(data: &str, key_id: &str) -> bool {
@@ -991,7 +1120,10 @@ const LEGACY_CTRL_END: [&str; 1] = ["\x1b[8^"];
 
 #[cfg(test)]
 mod tests {
-    use super::{is_key_release, kitty_test_lock, matches_key, parse_key, set_kitty_protocol_active};
+    use super::{
+        is_key_release, is_key_repeat, kitty_test_lock, matches_key, parse_key,
+        set_kitty_protocol_active, Key,
+    };
 
     #[test]
     fn kitty_shift_enter_vs_alt_enter() {
@@ -1024,5 +1156,21 @@ mod tests {
         let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         assert!(!is_key_release("\x1b[200~90:62:3F\x1b[201~"));
         assert!(is_key_release("\x1b[65;1:3u"));
+    }
+
+    #[test]
+    fn key_repeat_ignores_paste() {
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        assert!(!is_key_repeat("\x1b[200~90:62:2F\x1b[201~"));
+        assert!(is_key_repeat("\x1b[65;1:2u"));
+    }
+
+    #[test]
+    fn key_helper_builds_identifiers() {
+        assert_eq!(Key::escape, "escape");
+        assert_eq!(Key::backtick, "`");
+        assert_eq!(Key::ctrl("c"), "ctrl+c");
+        assert_eq!(Key::shift_ctrl("p"), "shift+ctrl+p");
+        assert_eq!(Key::ctrl_shift_alt("x"), "ctrl+shift+alt+x");
     }
 }
