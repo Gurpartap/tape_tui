@@ -9,9 +9,11 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::core::input::set_kitty_protocol_active;
 use crate::core::terminal::Terminal;
+use crate::platform::stdin_buffer::{StdinBuffer, StdinEvent};
 
 #[cfg(unix)]
 use libc::{self, c_int};
@@ -36,30 +38,12 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn strip_kitty_response(input: &str) -> (String, bool) {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    let mut detected = false;
-
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 2 < bytes.len() && bytes[i + 1] == b'[' && bytes[i + 2] == b'?' {
-            let mut j = i + 3;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j < bytes.len() && bytes[j] == b'u' && j > i + 3 {
-                detected = true;
-                i = j + 1;
-                continue;
-            }
-        }
-
-        out.push(bytes[i]);
-        i += 1;
+fn is_kitty_response(sequence: &str) -> bool {
+    if !sequence.starts_with("\x1b[?") || !sequence.ends_with('u') {
+        return false;
     }
-
-    (String::from_utf8_lossy(&out).to_string(), detected)
+    let inner = &sequence[3..sequence.len() - 1];
+    !inner.is_empty() && inner.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(unix)]
@@ -227,40 +211,63 @@ impl ProcessTerminal {
 
         self.input_thread = Some(thread::spawn(move || {
             let mut buffer = [0u8; 4096];
+            let mut stdin_buffer = StdinBuffer::new(10);
+
             while !stop_flag.load(Ordering::SeqCst) {
-                if !poll_readable(stdin_fd, 50) {
-                    continue;
-                }
-
-                let read_len =
-                    unsafe { libc::read(stdin_fd, buffer.as_mut_ptr() as *mut _, buffer.len()) };
-                if read_len <= 0 {
-                    continue;
-                }
-
-                last_input_time.store(now_ms(), Ordering::SeqCst);
-
-                let mut data = String::from_utf8_lossy(&buffer[..read_len as usize]).to_string();
-                if data.is_empty() {
-                    continue;
-                }
-
-                if !kitty_protocol_active.load(Ordering::SeqCst) {
-                    let (stripped, detected) = strip_kitty_response(&data);
-                    if detected {
-                        kitty_protocol_active.store(true, Ordering::SeqCst);
-                        write_fd(stdout_fd, KITTY_ENABLE);
+                let now = Instant::now();
+                let timeout_ms = stdin_buffer.next_timeout_ms(now, 50);
+                let readable = poll_readable(stdin_fd, timeout_ms);
+                let events = if readable {
+                    let read_len = unsafe {
+                        libc::read(stdin_fd, buffer.as_mut_ptr() as *mut _, buffer.len())
+                    };
+                    if read_len <= 0 {
+                        Vec::new()
+                    } else {
+                        last_input_time.store(now_ms(), Ordering::SeqCst);
+                        stdin_buffer.process(&buffer[..read_len as usize])
                     }
-                    data = stripped;
-                }
+                } else {
+                    stdin_buffer.flush_due(now)
+                };
 
-                if data.is_empty() || drain_mode.load(Ordering::SeqCst) {
+                if events.is_empty() {
                     continue;
                 }
 
-                let mut state = input_state.lock().expect("input handler lock poisoned");
-                if let Some(handler) = state.handler.as_mut() {
-                    handler(data);
+                for event in events {
+                    match event {
+                        StdinEvent::Data(sequence) => {
+                            if !kitty_protocol_active.load(Ordering::SeqCst)
+                                && is_kitty_response(&sequence)
+                            {
+                                kitty_protocol_active.store(true, Ordering::SeqCst);
+                                set_kitty_protocol_active(true);
+                                write_fd(stdout_fd, KITTY_ENABLE);
+                                continue;
+                            }
+
+                            if drain_mode.load(Ordering::SeqCst) {
+                                continue;
+                            }
+
+                            let mut state =
+                                input_state.lock().expect("input handler lock poisoned");
+                            if let Some(handler) = state.handler.as_mut() {
+                                handler(sequence);
+                            }
+                        }
+                        StdinEvent::Paste(content) => {
+                            if drain_mode.load(Ordering::SeqCst) {
+                                continue;
+                            }
+                            let mut state =
+                                input_state.lock().expect("input handler lock poisoned");
+                            if let Some(handler) = state.handler.as_mut() {
+                                handler(format!("\x1b[200~{}\x1b[201~", content));
+                            }
+                        }
+                    }
                 }
             }
         }));
@@ -328,6 +335,7 @@ impl Terminal for ProcessTerminal {
         self.drain_mode.store(false, Ordering::SeqCst);
         self.last_input_time.store(now_ms(), Ordering::SeqCst);
         self.kitty_protocol_active.store(false, Ordering::SeqCst);
+        set_kitty_protocol_active(false);
 
         self.enable_raw_mode();
         self.write_control(BRACKETED_PASTE_ENABLE);
@@ -347,6 +355,7 @@ impl Terminal for ProcessTerminal {
         if self.kitty_protocol_active.load(Ordering::SeqCst) {
             self.write_control(KITTY_DISABLE);
             self.kitty_protocol_active.store(false, Ordering::SeqCst);
+            set_kitty_protocol_active(false);
         }
 
         self.stop_input_thread();
@@ -381,6 +390,7 @@ impl Terminal for ProcessTerminal {
         if self.kitty_protocol_active.load(Ordering::SeqCst) {
             self.write_control(KITTY_DISABLE);
             self.kitty_protocol_active.store(false, Ordering::SeqCst);
+            set_kitty_protocol_active(false);
         }
 
         self.drain_mode.store(true, Ordering::SeqCst);
@@ -637,8 +647,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        get_termios, poll_readable, strip_kitty_response, ProcessTerminal, StopTestHooks,
-        BRACKETED_PASTE_DISABLE, BRACKETED_PASTE_ENABLE,
+        get_termios, poll_readable, ProcessTerminal, StopTestHooks, BRACKETED_PASTE_DISABLE,
+        BRACKETED_PASTE_ENABLE,
     };
     use crate::core::terminal::Terminal;
 
@@ -871,23 +881,33 @@ mod tests {
     }
 
     #[test]
-    fn strip_kitty_response_removes_sequence() {
-        let (out, detected) = strip_kitty_response("\x1b[?1u");
-        assert!(detected);
-        assert!(out.is_empty());
-    }
+    fn bracketed_paste_is_rewrapped_for_input_handler() {
+        let _guard = test_lock().lock().expect("test lock poisoned");
+        let pty = open_pty();
 
-    #[test]
-    fn strip_kitty_response_preserves_other_data() {
-        let (out, detected) = strip_kitty_response("a\x1b[?123u b");
-        assert!(detected);
-        assert_eq!(out, "a b");
-    }
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
 
-    #[test]
-    fn strip_kitty_response_ignores_incomplete() {
-        let (out, detected) = strip_kitty_response("\x1b[?");
-        assert!(!detected);
-        assert_eq!(out, "\x1b[?");
+        terminal.start(Box::new(move |data| {
+            let _ = tx.send(data);
+        }), Box::new(|| {}));
+
+        let payload = b"\x1b[200~hello\x1b[201~";
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                payload.as_ptr() as *const libc::c_void,
+                payload.len(),
+            )
+        };
+
+        let received = rx
+            .recv_timeout(Duration::from_millis(200))
+            .expect("missing paste event");
+        assert_eq!(received, "\x1b[200~hello\x1b[201~");
+
+        terminal.stop();
     }
 }
