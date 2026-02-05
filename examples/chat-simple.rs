@@ -1,0 +1,346 @@
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use pi_tui::core::autocomplete::CommandEntry;
+use pi_tui::core::component::{Component, Focusable};
+use pi_tui::widgets::select_list::SelectListTheme;
+use pi_tui::{
+    matches_key, CombinedAutocompleteProvider, Editor, EditorOptions, EditorTheme, Loader, Markdown,
+    MarkdownTheme, ProcessTerminal, SlashCommand, Text, TUI,
+};
+
+const WELCOME_TEXT: &str =
+    "Welcome to Simple Chat!\n\nType your messages below. Type '/' for commands. Press Ctrl+C to exit.";
+
+const RESPONSES: [&str; 8] = [
+    "That's interesting! Tell me more.",
+    "I see what you mean.",
+    "Fascinating perspective!",
+    "Could you elaborate on that?",
+    "That makes sense to me.",
+    "I hadn't thought of it that way.",
+    "Great point!",
+    "Thanks for sharing that.",
+];
+
+struct PendingResponse {
+    due: Instant,
+    message: String,
+}
+
+struct ChatState {
+    messages: Vec<Markdown>,
+    loader: Option<Loader>,
+    responding: bool,
+    pending: Option<PendingResponse>,
+}
+
+impl ChatState {
+    fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            loader: None,
+            responding: false,
+            pending: None,
+        }
+    }
+}
+
+struct ChatApp {
+    welcome: Text,
+    state: Rc<RefCell<ChatState>>,
+    editor: Rc<RefCell<Editor>>,
+}
+
+impl Component for ChatApp {
+    fn render(&mut self, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.extend(self.welcome.render(width));
+
+        {
+            let mut state = self.state.borrow_mut();
+            for message in state.messages.iter_mut() {
+                lines.extend(message.render(width));
+            }
+            if let Some(loader) = state.loader.as_mut() {
+                lines.extend(loader.render(width));
+            }
+        }
+
+        lines.extend(self.editor.borrow_mut().render(width));
+        lines
+    }
+
+    fn invalidate(&mut self) {
+        self.welcome.invalidate();
+        let mut state = self.state.borrow_mut();
+        for message in state.messages.iter_mut() {
+            message.invalidate();
+        }
+        if let Some(loader) = state.loader.as_mut() {
+            loader.invalidate();
+        }
+        self.editor.borrow_mut().invalidate();
+    }
+
+    fn set_terminal_rows(&mut self, rows: usize) {
+        self.editor.borrow_mut().set_terminal_rows(rows);
+    }
+}
+
+struct EditorWrapper {
+    editor: Rc<RefCell<Editor>>,
+    exit_flag: Rc<RefCell<bool>>,
+    state: Rc<RefCell<ChatState>>,
+}
+
+impl EditorWrapper {
+    fn new(
+        editor: Rc<RefCell<Editor>>,
+        exit_flag: Rc<RefCell<bool>>,
+        state: Rc<RefCell<ChatState>>,
+    ) -> Self {
+        Self {
+            editor,
+            exit_flag,
+            state,
+        }
+    }
+}
+
+impl Component for EditorWrapper {
+    fn render(&mut self, width: usize) -> Vec<String> {
+        self.editor.borrow_mut().render(width)
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        if matches_key(data, "ctrl+c") {
+            *self.exit_flag.borrow_mut() = true;
+            return;
+        }
+        {
+            let mut editor = self.editor.borrow_mut();
+            editor.handle_input(data);
+        }
+        if self.state.borrow().responding {
+            self.editor.borrow_mut().set_disable_submit(true);
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.editor.borrow_mut().invalidate();
+    }
+
+    fn set_terminal_rows(&mut self, rows: usize) {
+        self.editor.borrow_mut().set_terminal_rows(rows);
+    }
+
+    fn wants_key_release(&self) -> bool {
+        self.editor.borrow().wants_key_release()
+    }
+
+    fn as_focusable(&mut self) -> Option<&mut dyn Focusable> {
+        Some(self)
+    }
+}
+
+impl Focusable for EditorWrapper {
+    fn set_focused(&mut self, focused: bool) {
+        self.editor.borrow_mut().set_focused(focused);
+    }
+
+    fn is_focused(&self) -> bool {
+        self.editor.borrow().is_focused()
+    }
+}
+
+#[derive(Default)]
+struct DummyComponent;
+
+impl Component for DummyComponent {
+    fn render(&mut self, _width: usize) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+fn editor_theme() -> EditorTheme {
+    EditorTheme {
+        border_color: Box::new(|text| text.to_string()),
+        select_list: SelectListTheme {
+            selected_prefix: std::sync::Arc::new(|text| text.to_string()),
+            selected_text: std::sync::Arc::new(|text| text.to_string()),
+            description: std::sync::Arc::new(|text| text.to_string()),
+            scroll_info: std::sync::Arc::new(|text| text.to_string()),
+            no_match: std::sync::Arc::new(|text| text.to_string()),
+        },
+    }
+}
+
+fn markdown_theme() -> MarkdownTheme {
+    MarkdownTheme {
+        heading: Box::new(|text| text.to_string()),
+        link: Box::new(|text| text.to_string()),
+        link_url: Box::new(|text| text.to_string()),
+        code: Box::new(|text| text.to_string()),
+        code_block: Box::new(|text| text.to_string()),
+        code_block_border: Box::new(|text| text.to_string()),
+        quote: Box::new(|text| text.to_string()),
+        quote_border: Box::new(|text| text.to_string()),
+        hr: Box::new(|text| text.to_string()),
+        list_bullet: Box::new(|text| text.to_string()),
+        bold: Box::new(|text| text.to_string()),
+        italic: Box::new(|text| text.to_string()),
+        strikethrough: Box::new(|text| text.to_string()),
+        underline: Box::new(|text| text.to_string()),
+        highlight_code: None,
+        code_block_indent: None,
+    }
+}
+
+fn pick_response() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|dur| dur.subsec_nanos() as usize)
+        .unwrap_or(0);
+    RESPONSES[nanos % RESPONSES.len()].to_string()
+}
+
+fn main() {
+    let terminal = ProcessTerminal::new();
+    let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
+    let mut tui = TUI::new(terminal, Rc::clone(&root));
+    let render_handle = tui.render_handle();
+
+    let editor = Rc::new(RefCell::new(Editor::new(
+        editor_theme(),
+        EditorOptions {
+            render_handle: Some(render_handle.clone()),
+            ..EditorOptions::default()
+        },
+    )));
+
+    let commands = vec![
+        CommandEntry::Command(SlashCommand {
+            name: "delete".to_string(),
+            description: Some("Delete the last message".to_string()),
+            get_argument_completions: None,
+        }),
+        CommandEntry::Command(SlashCommand {
+            name: "clear".to_string(),
+            description: Some("Clear all messages".to_string()),
+            get_argument_completions: None,
+        }),
+    ];
+    let base_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let autocomplete_provider = CombinedAutocompleteProvider::new(commands, base_path, None);
+    editor
+        .borrow_mut()
+        .set_autocomplete_provider(Box::new(autocomplete_provider));
+
+    let chat_state = Rc::new(RefCell::new(ChatState::new()));
+    let state_for_submit = Rc::clone(&chat_state);
+    let render_for_submit = render_handle.clone();
+    editor.borrow_mut().set_on_submit(Some(Box::new(move |value| {
+        let trimmed = value.trim();
+        let mut state = state_for_submit.borrow_mut();
+
+        if state.responding {
+            return;
+        }
+
+        if trimmed == "/delete" {
+            if state.messages.len() > 1 {
+                state.messages.pop();
+            }
+            render_for_submit.request_render();
+            return;
+        }
+
+        if trimmed == "/clear" {
+            if state.messages.len() > 1 {
+                state.messages.truncate(1);
+            }
+            render_for_submit.request_render();
+            return;
+        }
+
+        if trimmed.is_empty() {
+            return;
+        }
+
+        state.responding = true;
+        drop(state);
+
+        let mut state = state_for_submit.borrow_mut();
+        let user_message = Markdown::new(value, 1, 1, markdown_theme(), None);
+        state.messages.push(user_message);
+
+        let loader = Loader::new(
+            render_for_submit.clone(),
+            Box::new(|text| text.to_string()),
+            Box::new(|text| text.to_string()),
+            Some("Thinking...".to_string()),
+        );
+        state.loader = Some(loader);
+
+        let response = pick_response();
+        state.pending = Some(PendingResponse {
+            due: Instant::now() + Duration::from_millis(1000),
+            message: response,
+        });
+        render_for_submit.request_render();
+    })));
+
+    let welcome = Text::new(WELCOME_TEXT);
+    let chat_app = ChatApp {
+        welcome,
+        state: Rc::clone(&chat_state),
+        editor: Rc::clone(&editor),
+    };
+    *root.borrow_mut() = Box::new(chat_app);
+
+    let exit_flag = Rc::new(RefCell::new(false));
+    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
+        EditorWrapper::new(Rc::clone(&editor), Rc::clone(&exit_flag), Rc::clone(&chat_state)),
+    )));
+    tui.set_focus(Rc::clone(&editor_wrapper));
+
+    tui.start();
+
+    loop {
+        tui.run_once();
+
+        if *exit_flag.borrow() {
+            break;
+        }
+
+        let mut response_to_add: Option<String> = None;
+        {
+            let mut state = chat_state.borrow_mut();
+            if let Some(pending) = state.pending.as_ref() {
+                if Instant::now() >= pending.due {
+                    response_to_add = Some(pending.message.clone());
+                    state.pending = None;
+                    state.responding = false;
+                    state.loader = None;
+                }
+            }
+        }
+
+        if let Some(message) = response_to_add {
+            editor.borrow_mut().set_disable_submit(false);
+            chat_state
+                .borrow_mut()
+                .messages
+                .push(Markdown::new(message, 1, 1, markdown_theme(), None));
+            render_handle.request_render();
+        }
+
+        thread::sleep(Duration::from_millis(16));
+    }
+
+    tui.stop();
+}
