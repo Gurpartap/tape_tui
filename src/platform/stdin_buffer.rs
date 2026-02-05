@@ -12,6 +12,19 @@ pub enum StdinEvent {
     Paste(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StdinBufferOptions {
+    pub timeout_ms: u64,
+}
+
+impl Default for StdinBufferOptions {
+    fn default() -> Self {
+        Self { timeout_ms: 10 }
+    }
+}
+
+pub type StdinBufferEventMap = StdinEvent;
+
 #[derive(Debug)]
 enum SequenceStatus {
     Complete,
@@ -43,6 +56,10 @@ impl StdinBuffer {
             paste_buffer: String::new(),
             flush_deadline: None,
         }
+    }
+
+    pub fn with_options(options: StdinBufferOptions) -> Self {
+        Self::new(options.timeout_ms)
     }
 
     pub fn process(&mut self, data: &[u8]) -> Vec<StdinEvent> {

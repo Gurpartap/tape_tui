@@ -10,3 +10,67 @@ pub mod render;
 pub mod runtime;
 pub mod platform;
 pub mod widgets;
+
+// Autocomplete support
+pub use crate::core::autocomplete::{
+    AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider, SlashCommand,
+};
+
+// Components
+pub use crate::widgets::{
+    Box, CancellableLoader, Container, DefaultTextStyle, Editor, EditorOptions, EditorTheme, Image, ImageOptions,
+    ImageTheme, Input, Loader, Markdown, MarkdownTheme, SelectItem, SelectList, SelectListTheme, SettingItem,
+    SettingsList, SettingsListTheme, Spacer, Text, TruncatedText,
+};
+
+// Editor component interface
+pub use crate::core::editor_component::EditorComponent;
+
+// Fuzzy matching
+pub use crate::core::fuzzy::{fuzzy_filter, fuzzy_match, FuzzyMatch};
+
+// Keybindings
+pub use crate::core::keybindings::{
+    get_editor_keybindings, set_editor_keybindings, EditorAction, EditorKeybindingsConfig,
+    EditorKeybindingsManager, KeyId, DEFAULT_EDITOR_KEYBINDINGS,
+};
+
+// Keyboard input handling
+pub use crate::core::input::{
+    is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key,
+    set_kitty_protocol_active, Key, KeyEventType,
+};
+
+// Input buffering
+pub use crate::platform::stdin_buffer::{StdinBuffer, StdinBufferEventMap, StdinBufferOptions};
+
+// Terminal interface and implementations
+pub use crate::core::terminal::Terminal;
+pub use crate::platform::process_terminal::ProcessTerminal;
+
+// Terminal image support
+pub use crate::core::terminal_image::{
+    allocate_image_id, calculate_image_rows, delete_all_kitty_images, delete_kitty_image,
+    detect_capabilities, encode_iterm2, encode_kitty, get_capabilities, get_cell_dimensions,
+    get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions, get_png_dimensions,
+    get_webp_dimensions, image_fallback, render_image, reset_capabilities_cache,
+    set_cell_dimensions, CellDimensions, ImageDimensions, ImageProtocol, ImageRenderOptions,
+    TerminalCapabilities,
+};
+
+// TUI runtime + overlays
+pub use crate::core::component::{Component, Focusable};
+pub use crate::render::overlay::{OverlayAnchor, OverlayMargin, OverlayOptions, SizeValue};
+pub use crate::runtime::ime::CURSOR_MARKER;
+pub use crate::runtime::tui::OverlayHandle;
+
+pub type TUI<T> = crate::runtime::tui::TuiRuntime<T>;
+
+pub fn is_focusable(component: &mut dyn Component) -> bool {
+    component.as_focusable().is_some()
+}
+
+// Utilities
+pub use crate::render::slice::wrap_text_with_ansi;
+pub use crate::render::utils::truncate_to_width;
+pub use crate::render::width::visible_width;
