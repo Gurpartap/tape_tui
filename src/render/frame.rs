@@ -1,3 +1,7 @@
 //! Frame/line types (Phase 4).
-//!
-//! TODO: define frame representation used by renderer.
+
+/// A single rendered line.
+pub type Line = String;
+
+/// A rendered frame (lines).
+pub type Frame = Vec<Line>;

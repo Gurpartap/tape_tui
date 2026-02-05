@@ -14,12 +14,17 @@ pub enum StdinEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StdinBufferOptions {
+    /// Timeout alias matching pi-tui options (milliseconds).
+    pub timeout: Option<u64>,
     pub timeout_ms: u64,
 }
 
 impl Default for StdinBufferOptions {
     fn default() -> Self {
-        Self { timeout_ms: 10 }
+        Self {
+            timeout: None,
+            timeout_ms: 10,
+        }
     }
 }
 
@@ -59,7 +64,8 @@ impl StdinBuffer {
     }
 
     pub fn with_options(options: StdinBufferOptions) -> Self {
-        Self::new(options.timeout_ms)
+        let timeout = options.timeout.unwrap_or(options.timeout_ms);
+        Self::new(timeout)
     }
 
     pub fn process(&mut self, data: &[u8]) -> Vec<StdinEvent> {
@@ -376,7 +382,7 @@ fn is_complete_apc_sequence(data: &str) -> SequenceStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{StdinBuffer, StdinEvent};
+    use super::{StdinBuffer, StdinBufferOptions, StdinEvent};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -411,5 +417,18 @@ mod tests {
 
         let events = buffer.process(b"\x1b[200~hello\x1b[201~");
         assert_eq!(events, vec![StdinEvent::Paste("hello".to_string())]);
+    }
+
+    #[test]
+    fn timeout_alias_overrides_timeout_ms() {
+        let options = StdinBufferOptions {
+            timeout: Some(0),
+            timeout_ms: 10,
+        };
+        let mut buffer = StdinBuffer::with_options(options);
+        let events = buffer.process(b"\x1b[");
+        assert!(events.is_empty());
+        let events = buffer.flush_due(Instant::now());
+        assert_eq!(events, vec![StdinEvent::Data("\x1b[".to_string())]);
     }
 }

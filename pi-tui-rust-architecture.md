@@ -345,3 +345,11 @@ pub struct TuiRuntime<T: Terminal> {
 ---
 
 If you want, I can draft concrete Rust trait signatures and a minimal `DiffRenderer` implementation skeleton that follows pi‑tui’s exact update algorithm and cursor tracking.
+
+---
+
+## Known divergences (open-ended concerns)
+These are documented parity risks in the current snapshot. Either port the exact pi‑tui behavior or add targeted tests that document differences.
+
+- **Width logic:** Rust uses `unicode-width` + `emojis` while pi‑tui uses East‑Asian width + regex-based default‑ignorable handling. Options: port pi‑tui rules or add targeted width tests that codify the divergence.
+- **Markdown parsing:** Rust uses the `markdown` crate while pi‑tui uses `marked`. Options: add compatibility fixtures/tests or pursue deeper token‑level parity.

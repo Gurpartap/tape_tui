@@ -14,6 +14,7 @@ pub struct Input {
     value: String,
     cursor: usize,
     focused: bool,
+    prompt: String,
     on_submit: Option<Box<dyn FnMut(String)>>,
     on_escape: Option<Box<dyn FnMut()>>,
     paste_buffer: String,
@@ -26,6 +27,7 @@ impl Input {
             value: String::new(),
             cursor: 0,
             focused: false,
+            prompt: String::new(),
             on_submit: None,
             on_escape: None,
             paste_buffer: String::new(),
@@ -41,6 +43,10 @@ impl Input {
         self.value = value.into();
         self.cursor = self.cursor.min(self.value.len());
         self.clamp_cursor();
+    }
+
+    pub fn set_prompt(&mut self, prompt: impl Into<String>) {
+        self.prompt = prompt.into();
     }
 
     pub fn set_on_submit(&mut self, handler: Option<Box<dyn FnMut(String)>>) {
@@ -192,7 +198,7 @@ impl Component for Input {
     fn render(&mut self, width: usize) -> Vec<String> {
         self.clamp_cursor();
 
-        let prompt = "> ";
+        let prompt = &self.prompt;
         let available_width = width.saturating_sub(prompt.len());
         if available_width == 0 {
             return vec![prompt.to_string()];
@@ -469,5 +475,13 @@ mod tests {
         input.handle_input("\x17");
         assert_eq!(input.get_value(), "helloworld ");
         assert_eq!(input.cursor, "helloworld ".len());
+    }
+
+    #[test]
+    fn input_has_no_prompt_by_default() {
+        let mut input = Input::new();
+        let lines = input.render(10);
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].starts_with("> "));
     }
 }

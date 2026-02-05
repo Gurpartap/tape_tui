@@ -37,6 +37,16 @@ pub trait EditorComponent: Component {
     /// Set horizontal padding (optional).
     fn set_padding_x(&mut self, _padding: usize) {}
 
+    /// Get horizontal padding (optional).
+    fn get_padding_x(&self) -> usize {
+        0
+    }
+
     /// Set max visible autocomplete rows (optional).
     fn set_autocomplete_max_visible(&mut self, _max_visible: usize) {}
+
+    /// Get max visible autocomplete rows (optional).
+    fn get_autocomplete_max_visible(&self) -> usize {
+        5
+    }
 }

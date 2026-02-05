@@ -291,12 +291,20 @@ impl Editor {
         }
     }
 
+    pub fn get_padding_x(&self) -> usize {
+        self.padding_x
+    }
+
     pub fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
         let new_value = max(3, min(20, max_visible));
         if self.autocomplete_max_visible != new_value {
             self.autocomplete_max_visible = new_value;
             self.request_render();
         }
+    }
+
+    pub fn get_autocomplete_max_visible(&self) -> usize {
+        self.autocomplete_max_visible
     }
 
     pub fn set_autocomplete_provider(&mut self, provider: Box<dyn AutocompleteProvider>) {
@@ -2535,8 +2543,16 @@ impl EditorComponent for Editor {
         Editor::set_padding_x(self, padding);
     }
 
+    fn get_padding_x(&self) -> usize {
+        Editor::get_padding_x(self)
+    }
+
     fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
         Editor::set_autocomplete_max_visible(self, max_visible);
+    }
+
+    fn get_autocomplete_max_visible(&self) -> usize {
+        Editor::get_autocomplete_max_visible(self)
     }
 
     fn set_autocomplete_provider(&mut self, provider: Box<dyn AutocompleteProvider>) {
@@ -2686,6 +2702,18 @@ mod tests {
         editor.focused = true;
         let lines = editor.render(10);
         assert!(lines.iter().any(|line| line.contains("\x1b_pi:c")));
+    }
+
+    #[test]
+    fn editor_getters_reflect_options() {
+        let options = EditorOptions {
+            padding_x: Some(2),
+            autocomplete_max_visible: Some(7),
+            ..EditorOptions::default()
+        };
+        let editor = Editor::new(theme(), options);
+        assert_eq!(editor.get_padding_x(), 2);
+        assert_eq!(editor.get_autocomplete_max_visible(), 7);
     }
 
     #[test]

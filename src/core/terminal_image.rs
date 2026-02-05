@@ -54,7 +54,7 @@ const ITERM2_PREFIX: &str = "\x1b]1337;File=";
 const KITTY_CHUNK_SIZE: usize = 4096;
 const KITTY_ID_MAX: u32 = 0xffff_fffe;
 
-static IMAGE_ID_COUNTER: OnceLock<AtomicU32> = OnceLock::new();
+static IMAGE_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, Default)]
 pub struct KittyEncodeOptions {
@@ -176,9 +176,12 @@ pub fn is_image_line(line: &str) -> bool {
 }
 
 pub fn allocate_image_id() -> u32 {
-    let counter = IMAGE_ID_COUNTER.get_or_init(|| AtomicU32::new(image_id_seed()));
-    let id = counter.fetch_add(1, Ordering::Relaxed);
-    (id % KITTY_ID_MAX) + 1
+    let counter = IMAGE_ID_COUNTER.fetch_add(0x9e37_79b9, Ordering::Relaxed);
+    let mut value = image_id_seed().wrapping_add(counter);
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    (value % KITTY_ID_MAX).saturating_add(1)
 }
 
 pub fn encode_kitty(base64_data: &str, options: &KittyEncodeOptions) -> String {

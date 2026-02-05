@@ -449,3 +449,23 @@ This roadmap breaks the port into concrete milestones with per‑phase checklist
 
 **Tests**
 - [ ] Compile-time export smoke checks
+
+---
+
+## Phase 29 — Parity closure (pending gaps)
+**Goal:** close remaining parity gaps from earlier phases and document known divergences.
+
+**Checklist**
+- [x] Implement `EnvConfig` parsing + tests (`PI_HARDWARE_CURSOR`, `PI_CLEAR_ON_SHRINK`, `PI_TUI_WRITE_LOG`, `PI_TUI_DEBUG`, `PI_DEBUG_REDRAW`)
+- [x] Remove/make optional Input prompt to match pi-tui
+- [x] Align `allocate_image_id()` to random ID semantics
+- [x] Add `timeout` alias in `StdinBufferOptions`
+- [x] Add Editor getters for padding + autocomplete max visible
+- [x] Resolve `render/frame.rs` (implement or remove)
+- [x] Document open-ended divergences in `pi-tui-rust-architecture.md` (width logic, markdown parsing)
+
+**Tests**
+- [x] Unit: config/env parsing defaults + flags
+- [x] Unit: StdinBufferOptions timeout alias (if added)
+- [x] Unit: Editor getters (if added)
+- [x] Integration: Input render without prompt (if tests exist)
