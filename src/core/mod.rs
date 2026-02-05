@@ -2,6 +2,7 @@
 
 pub mod terminal;
 pub mod component;
+pub mod editor_component;
 pub mod input;
 pub mod keybindings;
 pub mod fuzzy;
