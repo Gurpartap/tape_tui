@@ -436,4 +436,25 @@ mod tests {
         }));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn identical_render_produces_no_output() {
+        let mut renderer = DiffRenderer::new();
+        let mut term = TestTerminal::new(20, 5);
+        renderer.render(&mut term, vec!["line".to_string()], not_image, false, false);
+        term.take_output();
+
+        renderer.render(&mut term, vec!["line".to_string()], not_image, false, false);
+        let output = term.take_output();
+        assert!(output.is_empty(), "expected no output, got: {output:?}");
+    }
+
+    #[test]
+    fn segment_reset_appended_to_non_image_lines() {
+        let mut renderer = DiffRenderer::new();
+        let mut term = TestTerminal::new(20, 5);
+        renderer.render(&mut term, vec!["hello".to_string()], not_image, false, false);
+        let output = term.take_output();
+        assert!(output.contains("hello\x1b[0m\x1b]8;;\x07"));
+    }
 }
