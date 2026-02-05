@@ -1,6 +1,7 @@
 //! Editor widget (Phase 25).
 
 use std::cmp::{max, min};
+use std::collections::HashMap;
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -12,6 +13,11 @@ use crate::render::width::visible_width;
 use crate::widgets::select_list::SelectListTheme;
 
 const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
+const PASTE_START: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
+
+const MAX_PASTE_LINES: usize = 10;
+const MAX_PASTE_CHARS: usize = 1000;
 
 /// Represents a chunk of text for word-wrap layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +130,13 @@ enum JumpMode {
     Backward,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LastAction {
+    Kill,
+    Yank,
+    TypeWord,
+}
+
 pub struct Editor {
     state: EditorState,
     focused: bool,
@@ -138,6 +151,14 @@ pub struct Editor {
     terminal_rows: usize,
     preferred_visual_col: Option<usize>,
     jump_mode: Option<JumpMode>,
+    disable_submit: bool,
+    pastes: HashMap<u32, String>,
+    paste_counter: u32,
+    paste_buffer: String,
+    is_in_paste: bool,
+    kill_ring: Vec<String>,
+    last_action: Option<LastAction>,
+    undo_stack: Vec<EditorState>,
     on_submit: Option<Box<dyn FnMut(String)>>,
     on_change: Option<Box<dyn FnMut(String)>>,
     history: Vec<String>,
@@ -167,6 +188,14 @@ impl Editor {
             terminal_rows: 0,
             preferred_visual_col: None,
             jump_mode: None,
+            disable_submit: false,
+            pastes: HashMap::new(),
+            paste_counter: 0,
+            paste_buffer: String::new(),
+            is_in_paste: false,
+            kill_ring: Vec::new(),
+            last_action: None,
+            undo_stack: Vec::new(),
             on_submit: None,
             on_change: None,
             history: Vec::new(),
@@ -186,13 +215,32 @@ impl Editor {
         self.state.lines.join("\n")
     }
 
+    pub fn get_expanded_text(&self) -> String {
+        let text = self.get_text();
+        self.replace_paste_markers(&text)
+    }
+
     pub fn get_cursor(&self) -> (usize, usize) {
         (self.state.cursor_line, self.state.cursor_col)
     }
 
     pub fn set_text(&mut self, text: &str) {
+        self.last_action = None;
         self.history_index = -1;
+        if self.get_text() != text {
+            self.push_undo_snapshot();
+        }
         self.set_text_internal(text);
+    }
+
+    pub fn insert_text_at_cursor(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.push_undo_snapshot();
+        self.last_action = None;
+        self.history_index = -1;
+        self.insert_text_at_cursor_internal(text);
     }
 
     pub fn set_padding_x(&mut self, padding: usize) {
@@ -213,6 +261,19 @@ impl Editor {
 
     pub fn set_on_change(&mut self, handler: Option<Box<dyn FnMut(String)>>) {
         self.on_change = handler;
+    }
+
+    pub fn set_disable_submit(&mut self, disabled: bool) {
+        self.disable_submit = disabled;
+    }
+
+    fn emit_change(&mut self) {
+        if self.on_change.is_some() {
+            let text = self.get_text();
+            if let Some(handler) = self.on_change.as_mut() {
+                handler(text);
+            }
+        }
     }
 
     fn clamp_cursor(&mut self) {
@@ -239,6 +300,676 @@ impl Editor {
                 self.state.cursor_col = self.state.cursor_col.saturating_sub(1);
             }
         }
+    }
+
+    fn insert_text_at_cursor_internal(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let inserted_lines: Vec<&str> = normalized.split('\n').collect();
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+        let before_cursor = &current_line[..self.state.cursor_col];
+        let after_cursor = &current_line[self.state.cursor_col..];
+
+        if inserted_lines.len() == 1 {
+            self.state.lines[self.state.cursor_line] =
+                format!("{before_cursor}{normalized}{after_cursor}");
+            self.set_cursor_col(self.state.cursor_col + normalized.len());
+        } else {
+            let mut next_lines = Vec::new();
+            next_lines.extend_from_slice(&self.state.lines[..self.state.cursor_line]);
+            next_lines.push(format!("{before_cursor}{}", inserted_lines[0]));
+
+            if inserted_lines.len() > 2 {
+                for mid in &inserted_lines[1..inserted_lines.len() - 1] {
+                    next_lines.push((*mid).to_string());
+                }
+            }
+
+            let last_inserted = inserted_lines.last().copied().unwrap_or("");
+            next_lines.push(format!("{last_inserted}{after_cursor}"));
+            next_lines.extend_from_slice(&self.state.lines[self.state.cursor_line + 1..]);
+
+            self.state.lines = next_lines;
+            self.state.cursor_line = self.state.cursor_line.saturating_add(inserted_lines.len() - 1);
+            self.set_cursor_col(last_inserted.len());
+        }
+
+        self.emit_change();
+    }
+
+    fn insert_character(&mut self, ch: &str, skip_undo_coalescing: bool) {
+        if ch.is_empty() {
+            return;
+        }
+
+        self.history_index = -1;
+
+        if !skip_undo_coalescing {
+            if ch.chars().any(is_whitespace_char) || self.last_action != Some(LastAction::TypeWord) {
+                self.push_undo_snapshot();
+            }
+            self.last_action = Some(LastAction::TypeWord);
+        }
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+        let before = &current_line[..self.state.cursor_col];
+        let after = &current_line[self.state.cursor_col..];
+        self.state.lines[self.state.cursor_line] = format!("{before}{ch}{after}");
+        self.set_cursor_col(self.state.cursor_col + ch.len());
+
+        self.emit_change();
+    }
+
+    fn handle_paste(&mut self, pasted_text: &str) {
+        self.history_index = -1;
+        self.last_action = None;
+        self.push_undo_snapshot();
+
+        let cleaned = pasted_text.replace("\r\n", "\n").replace('\r', "\n");
+        let tab_expanded = cleaned.replace('\t', "    ");
+        let mut filtered: String = tab_expanded
+            .chars()
+            .filter(|ch| *ch == '\n' || (*ch as u32) >= 32)
+            .collect();
+
+        if filtered.starts_with('/') || filtered.starts_with('~') || filtered.starts_with('.') {
+            let current_line = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .map(String::as_str)
+                .unwrap_or("");
+            let char_before = if self.state.cursor_col > 0 {
+                current_line[..self.state.cursor_col]
+                    .chars()
+                    .last()
+            } else {
+                None
+            };
+            if let Some(ch) = char_before {
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    filtered = format!(" {filtered}");
+                }
+            }
+        }
+
+        let pasted_lines_count = filtered.split('\n').count();
+        let total_chars = filtered.encode_utf16().count();
+
+        if pasted_lines_count > MAX_PASTE_LINES || total_chars > MAX_PASTE_CHARS {
+            self.paste_counter = self.paste_counter.saturating_add(1);
+            let paste_id = self.paste_counter;
+            self.pastes.insert(paste_id, filtered);
+
+            let marker = if pasted_lines_count > MAX_PASTE_LINES {
+                format!("[paste #{paste_id} +{} lines]", pasted_lines_count)
+            } else {
+                format!("[paste #{paste_id} {total_chars} chars]")
+            };
+            self.insert_text_at_cursor_internal(&marker);
+            return;
+        }
+
+        if pasted_lines_count == 1 {
+            for ch in filtered.chars() {
+                let ch = ch.to_string();
+                self.insert_character(&ch, true);
+            }
+            return;
+        }
+
+        self.insert_text_at_cursor_internal(&filtered);
+    }
+
+    fn add_new_line(&mut self) {
+        self.history_index = -1;
+        self.last_action = None;
+        self.push_undo_snapshot();
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+        let before = current_line[..self.state.cursor_col].to_string();
+        let after = current_line[self.state.cursor_col..].to_string();
+
+        self.state.lines[self.state.cursor_line] = before;
+        self.state
+            .lines
+            .insert(self.state.cursor_line + 1, after);
+        self.state.cursor_line += 1;
+        self.set_cursor_col(0);
+
+        self.emit_change();
+    }
+
+    fn should_submit_on_backslash_enter(
+        &self,
+        data: &str,
+        keybindings: &crate::core::keybindings::EditorKeybindingsManager,
+    ) -> bool {
+        if self.disable_submit {
+            return false;
+        }
+        if !crate::core::input::matches_key(data, "enter") {
+            return false;
+        }
+        let submit_keys = keybindings.get_keys(EditorAction::Submit);
+        let has_shift_enter = submit_keys
+            .iter()
+            .any(|key| key == "shift+enter" || key == "shift+return");
+        if !has_shift_enter {
+            return false;
+        }
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .map(String::as_str)
+            .unwrap_or("");
+        self.state.cursor_col > 0 && current_line[..self.state.cursor_col].ends_with('\\')
+    }
+
+    fn submit_value(&mut self) {
+        let text = self.get_text();
+        let mut result = text.trim().to_string();
+        result = self.replace_paste_markers(&result);
+
+        self.state = EditorState {
+            lines: vec![String::new()],
+            cursor_line: 0,
+            cursor_col: 0,
+        };
+        self.pastes.clear();
+        self.paste_counter = 0;
+        self.history_index = -1;
+        self.scroll_offset = 0;
+        self.undo_stack.clear();
+        self.last_action = None;
+
+        self.emit_change();
+        if let Some(handler) = self.on_submit.as_mut() {
+            handler(result);
+        }
+    }
+
+    fn handle_backspace(&mut self) {
+        self.history_index = -1;
+        self.last_action = None;
+
+        if self.state.cursor_col > 0 {
+            self.push_undo_snapshot();
+            let line = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .cloned()
+                .unwrap_or_default();
+            let before_cursor = &line[..self.state.cursor_col];
+            let mut graphemes: Vec<&str> = grapheme_segments(before_cursor).collect();
+            let grapheme_len = graphemes.pop().map(|seg| seg.len()).unwrap_or(1);
+            let start = self.state.cursor_col.saturating_sub(grapheme_len);
+            let after = &line[self.state.cursor_col..];
+            self.state.lines[self.state.cursor_line] =
+                format!("{}{}", &line[..start], after);
+            self.set_cursor_col(start);
+        } else if self.state.cursor_line > 0 {
+            self.push_undo_snapshot();
+            let current = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .cloned()
+                .unwrap_or_default();
+            let prev_index = self.state.cursor_line - 1;
+            let previous = self
+                .state
+                .lines
+                .get(prev_index)
+                .cloned()
+                .unwrap_or_default();
+            let new_line = format!("{previous}{current}");
+            self.state.lines[prev_index] = new_line;
+            self.state.lines.remove(self.state.cursor_line);
+            self.state.cursor_line = prev_index;
+            self.set_cursor_col(previous.len());
+        }
+
+        self.emit_change();
+    }
+
+    fn handle_forward_delete(&mut self) {
+        self.history_index = -1;
+        self.last_action = None;
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+
+        if self.state.cursor_col < current_line.len() {
+            self.push_undo_snapshot();
+            let after_cursor = &current_line[self.state.cursor_col..];
+            let mut graphemes = grapheme_segments(after_cursor);
+            let first = graphemes.next().unwrap_or("");
+            let end = self.state.cursor_col.saturating_add(first.len());
+            self.state.lines[self.state.cursor_line] =
+                format!("{}{}", &current_line[..self.state.cursor_col], &current_line[end..]);
+        } else if self.state.cursor_line + 1 < self.state.lines.len() {
+            self.push_undo_snapshot();
+            let next_line = self
+                .state
+                .lines
+                .get(self.state.cursor_line + 1)
+                .cloned()
+                .unwrap_or_default();
+            self.state.lines[self.state.cursor_line] =
+                format!("{current_line}{next_line}");
+            self.state.lines.remove(self.state.cursor_line + 1);
+        }
+
+        self.emit_change();
+    }
+
+    fn delete_to_start_of_line(&mut self) {
+        self.history_index = -1;
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+
+        if self.state.cursor_col > 0 {
+            self.push_undo_snapshot();
+            let deleted = current_line[..self.state.cursor_col].to_string();
+            self.add_to_kill_ring(&deleted, true);
+            self.last_action = Some(LastAction::Kill);
+            self.state.lines[self.state.cursor_line] =
+                current_line[self.state.cursor_col..].to_string();
+            self.set_cursor_col(0);
+        } else if self.state.cursor_line > 0 {
+            self.push_undo_snapshot();
+            self.add_to_kill_ring("\n", true);
+            self.last_action = Some(LastAction::Kill);
+
+            let prev_index = self.state.cursor_line - 1;
+            let previous = self
+                .state
+                .lines
+                .get(prev_index)
+                .cloned()
+                .unwrap_or_default();
+            let merged = format!("{previous}{current_line}");
+            self.state.lines[prev_index] = merged;
+            self.state.lines.remove(self.state.cursor_line);
+            self.state.cursor_line = prev_index;
+            self.set_cursor_col(previous.len());
+        }
+
+        self.emit_change();
+    }
+
+    fn delete_to_end_of_line(&mut self) {
+        self.history_index = -1;
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+
+        if self.state.cursor_col < current_line.len() {
+            self.push_undo_snapshot();
+            let deleted = current_line[self.state.cursor_col..].to_string();
+            self.add_to_kill_ring(&deleted, false);
+            self.last_action = Some(LastAction::Kill);
+            self.state.lines[self.state.cursor_line] =
+                current_line[..self.state.cursor_col].to_string();
+        } else if self.state.cursor_line + 1 < self.state.lines.len() {
+            self.push_undo_snapshot();
+            self.add_to_kill_ring("\n", false);
+            self.last_action = Some(LastAction::Kill);
+
+            let next_line = self
+                .state
+                .lines
+                .get(self.state.cursor_line + 1)
+                .cloned()
+                .unwrap_or_default();
+            self.state.lines[self.state.cursor_line] =
+                format!("{current_line}{next_line}");
+            self.state.lines.remove(self.state.cursor_line + 1);
+        }
+
+        self.emit_change();
+    }
+
+    fn delete_word_backwards(&mut self) {
+        self.history_index = -1;
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+
+        if self.state.cursor_col == 0 {
+            if self.state.cursor_line > 0 {
+                self.push_undo_snapshot();
+                self.add_to_kill_ring("\n", true);
+                self.last_action = Some(LastAction::Kill);
+
+                let prev_index = self.state.cursor_line - 1;
+                let previous = self
+                    .state
+                    .lines
+                    .get(prev_index)
+                    .cloned()
+                    .unwrap_or_default();
+                self.state.lines[prev_index] = format!("{previous}{current_line}");
+                self.state.lines.remove(self.state.cursor_line);
+                self.state.cursor_line = prev_index;
+                self.set_cursor_col(previous.len());
+            }
+        } else {
+            self.push_undo_snapshot();
+            let was_kill = self.last_action == Some(LastAction::Kill);
+            let old_col = self.state.cursor_col;
+            self.move_word_backwards();
+            let delete_from = self.state.cursor_col;
+            self.set_cursor_col(old_col);
+            self.last_action = if was_kill {
+                Some(LastAction::Kill)
+            } else {
+                None
+            };
+            let deleted = current_line[delete_from..old_col].to_string();
+            self.add_to_kill_ring(&deleted, true);
+            self.last_action = Some(LastAction::Kill);
+            self.state.lines[self.state.cursor_line] =
+                format!("{}{}", &current_line[..delete_from], &current_line[old_col..]);
+            self.set_cursor_col(delete_from);
+        }
+
+        self.emit_change();
+    }
+
+    fn delete_word_forwards(&mut self) {
+        self.history_index = -1;
+
+        let current_line = self
+            .state
+            .lines
+            .get(self.state.cursor_line)
+            .cloned()
+            .unwrap_or_default();
+
+        if self.state.cursor_col >= current_line.len() {
+            if self.state.cursor_line + 1 < self.state.lines.len() {
+                self.push_undo_snapshot();
+                self.add_to_kill_ring("\n", false);
+                self.last_action = Some(LastAction::Kill);
+
+                let next_line = self
+                    .state
+                    .lines
+                    .get(self.state.cursor_line + 1)
+                    .cloned()
+                    .unwrap_or_default();
+                self.state.lines[self.state.cursor_line] =
+                    format!("{current_line}{next_line}");
+                self.state.lines.remove(self.state.cursor_line + 1);
+            }
+        } else {
+            self.push_undo_snapshot();
+            let was_kill = self.last_action == Some(LastAction::Kill);
+            let old_col = self.state.cursor_col;
+            self.move_word_forwards();
+            let delete_to = self.state.cursor_col;
+            self.set_cursor_col(old_col);
+            self.last_action = if was_kill {
+                Some(LastAction::Kill)
+            } else {
+                None
+            };
+            let deleted = current_line[old_col..delete_to].to_string();
+            self.add_to_kill_ring(&deleted, false);
+            self.last_action = Some(LastAction::Kill);
+            self.state.lines[self.state.cursor_line] =
+                format!("{}{}", &current_line[..old_col], &current_line[delete_to..]);
+        }
+
+        self.emit_change();
+    }
+
+    fn yank(&mut self) {
+        if self.kill_ring.is_empty() {
+            return;
+        }
+        self.push_undo_snapshot();
+
+        let text = self.kill_ring.last().cloned().unwrap_or_default();
+        self.insert_yanked_text(&text);
+        self.last_action = Some(LastAction::Yank);
+    }
+
+    fn yank_pop(&mut self) {
+        if self.last_action != Some(LastAction::Yank) || self.kill_ring.len() <= 1 {
+            return;
+        }
+        self.push_undo_snapshot();
+        self.delete_yanked_text();
+
+        if let Some(last) = self.kill_ring.pop() {
+            self.kill_ring.insert(0, last);
+        }
+        let text = self.kill_ring.last().cloned().unwrap_or_default();
+        self.insert_yanked_text(&text);
+        self.last_action = Some(LastAction::Yank);
+    }
+
+    fn insert_yanked_text(&mut self, text: &str) {
+        self.history_index = -1;
+        let lines: Vec<&str> = text.split('\n').collect();
+
+        if lines.len() == 1 {
+            let current_line = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .cloned()
+                .unwrap_or_default();
+            let before = &current_line[..self.state.cursor_col];
+            let after = &current_line[self.state.cursor_col..];
+            self.state.lines[self.state.cursor_line] = format!("{before}{text}{after}");
+            self.set_cursor_col(self.state.cursor_col + text.len());
+        } else {
+            let current_line = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .cloned()
+                .unwrap_or_default();
+            let before = &current_line[..self.state.cursor_col];
+            let after = &current_line[self.state.cursor_col..];
+
+            self.state.lines[self.state.cursor_line] = format!("{before}{}", lines[0]);
+            for (idx, line) in lines.iter().enumerate().skip(1).take(lines.len() - 2) {
+                self.state
+                    .lines
+                    .insert(self.state.cursor_line + idx, (*line).to_string());
+            }
+
+            let last_idx = self.state.cursor_line + lines.len() - 1;
+            self.state
+                .lines
+                .insert(last_idx, format!("{}{}", lines[lines.len() - 1], after));
+            self.state.cursor_line = last_idx;
+            self.set_cursor_col(lines[lines.len() - 1].len());
+        }
+
+        self.emit_change();
+    }
+
+    fn delete_yanked_text(&mut self) {
+        let yanked_text = self.kill_ring.last().cloned().unwrap_or_default();
+        if yanked_text.is_empty() {
+            return;
+        }
+        let yank_lines: Vec<&str> = yanked_text.split('\n').collect();
+
+        if yank_lines.len() == 1 {
+            let current_line = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .cloned()
+                .unwrap_or_default();
+            let delete_len = yanked_text.len();
+            let start = self.state.cursor_col.saturating_sub(delete_len);
+            let before = &current_line[..start];
+            let after = &current_line[self.state.cursor_col..];
+            self.state.lines[self.state.cursor_line] = format!("{before}{after}");
+            self.set_cursor_col(start);
+        } else {
+            let start_line = self
+                .state
+                .cursor_line
+                .saturating_sub(yank_lines.len().saturating_sub(1));
+            let line_at_start = self
+                .state
+                .lines
+                .get(start_line)
+                .cloned()
+                .unwrap_or_default();
+            let start_col = line_at_start
+                .len()
+                .saturating_sub(yank_lines[0].len());
+            let after_cursor = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .map(|line| line[self.state.cursor_col..].to_string())
+                .unwrap_or_default();
+            let before_yank = line_at_start[..start_col].to_string();
+
+            self.state
+                .lines
+                .splice(start_line..=self.state.cursor_line, [format!("{before_yank}{after_cursor}")]);
+            self.state.cursor_line = start_line;
+            self.set_cursor_col(start_col);
+        }
+
+        self.emit_change();
+    }
+
+    fn add_to_kill_ring(&mut self, text: &str, prepend: bool) {
+        if text.is_empty() {
+            return;
+        }
+        if self.last_action == Some(LastAction::Kill) && !self.kill_ring.is_empty() {
+            if let Some(last) = self.kill_ring.pop() {
+                if prepend {
+                    self.kill_ring.push(format!("{text}{last}"));
+                } else {
+                    self.kill_ring.push(format!("{last}{text}"));
+                }
+            }
+        } else {
+            self.kill_ring.push(text.to_string());
+        }
+    }
+
+    fn capture_undo_snapshot(&self) -> EditorState {
+        self.state.clone()
+    }
+
+    fn restore_undo_snapshot(&mut self, snapshot: EditorState) {
+        self.state = snapshot;
+    }
+
+    fn push_undo_snapshot(&mut self) {
+        self.undo_stack.push(self.capture_undo_snapshot());
+    }
+
+    fn undo(&mut self) {
+        self.history_index = -1;
+        if self.undo_stack.is_empty() {
+            return;
+        }
+        if let Some(snapshot) = self.undo_stack.pop() {
+            self.restore_undo_snapshot(snapshot);
+        }
+        self.last_action = None;
+        self.preferred_visual_col = None;
+        self.emit_change();
+    }
+
+    fn replace_paste_markers(&self, input: &str) -> String {
+        let bytes = input.as_bytes();
+        let mut result = String::new();
+        let mut idx = 0usize;
+        while idx < bytes.len() {
+            if bytes[idx..].starts_with(b"[paste #") {
+                let start = idx;
+                let mut cursor = idx + b"[paste #".len();
+                let mut paste_id: u32 = 0;
+                let mut has_id = false;
+                while cursor < bytes.len() {
+                    let ch = bytes[cursor];
+                    if ch.is_ascii_digit() {
+                        paste_id = paste_id.saturating_mul(10).saturating_add((ch - b'0') as u32);
+                        has_id = true;
+                        cursor += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                if !has_id {
+                    result.push_str("[paste #");
+                    idx = start + b"[paste #".len();
+                    continue;
+                }
+
+                if let Some(close_rel) = bytes[cursor..].iter().position(|b| *b == b']') {
+                    let end = cursor + close_rel;
+                    if let Some(content) = self.pastes.get(&paste_id) {
+                        result.push_str(content);
+                    } else {
+                        result.push_str(&input[start..=end]);
+                    }
+                    idx = end + 1;
+                    continue;
+                }
+            }
+            let ch = input[idx..].chars().next().unwrap();
+            result.push(ch);
+            idx += ch.len_utf8();
+        }
+        result
     }
 
     fn layout_text(&self, content_width: usize) -> Vec<LayoutLine> {
@@ -362,6 +1093,7 @@ impl Editor {
     }
 
     fn move_cursor(&mut self, delta_line: isize, delta_col: isize) {
+        self.last_action = None;
         let visual_lines = self.build_visual_line_map(self.last_width);
         let current_visual_line = self.find_current_visual_line(&visual_lines);
 
@@ -493,10 +1225,12 @@ impl Editor {
     }
 
     fn move_to_line_start(&mut self) {
+        self.last_action = None;
         self.set_cursor_col(0);
     }
 
     fn move_to_line_end(&mut self) {
+        self.last_action = None;
         if let Some(line) = self.state.lines.get(self.state.cursor_line) {
             self.set_cursor_col(line.len());
         } else {
@@ -505,6 +1239,7 @@ impl Editor {
     }
 
     fn move_word_backwards(&mut self) {
+        self.last_action = None;
         let current_line = self
             .state
             .lines
@@ -560,6 +1295,7 @@ impl Editor {
     }
 
     fn move_word_forwards(&mut self) {
+        self.last_action = None;
         let current_line = self
             .state
             .lines
@@ -617,6 +1353,7 @@ impl Editor {
     }
 
     fn page_scroll(&mut self, direction: isize) {
+        self.last_action = None;
         let page_size = max(5, (self.terminal_rows.saturating_mul(3)) / 10);
         let visual_lines = self.build_visual_line_map(self.last_width);
         let current_visual_line = self.find_current_visual_line(&visual_lines);
@@ -660,12 +1397,16 @@ impl Editor {
     }
 
     fn navigate_history(&mut self, direction: isize) {
+        self.last_action = None;
         if self.history.is_empty() {
             return;
         }
         let new_index = self.history_index - direction;
         if new_index < -1 || new_index as usize >= self.history.len() {
             return;
+        }
+        if self.history_index == -1 && new_index >= 0 {
+            self.push_undo_snapshot();
         }
         self.history_index = new_index;
         if self.history_index == -1 {
@@ -688,13 +1429,11 @@ impl Editor {
         let last_len = self.state.lines[self.state.cursor_line].len();
         self.set_cursor_col(last_len);
         self.scroll_offset = 0;
-        let updated = self.get_text();
-        if let Some(handler) = self.on_change.as_mut() {
-            handler(updated);
-        }
+        self.emit_change();
     }
 
     fn jump_to_char(&mut self, target: &str, direction: JumpMode) {
+        self.last_action = None;
         let is_forward = matches!(direction, JumpMode::Forward);
         let total_lines = self.state.lines.len();
         let mut line_idx = self.state.cursor_line as isize;
@@ -861,40 +1600,153 @@ impl Component for Editor {
     fn handle_input(&mut self, data: &str) {
         self.clamp_cursor();
 
+        let mut data = data.to_string();
+
+        {
+            let kb = get_editor_keybindings();
+            let kb = kb.lock().expect("editor keybindings lock poisoned");
+            if let Some(jump_mode) = self.jump_mode.take() {
+                if kb.matches(&data, EditorAction::JumpForward)
+                    || kb.matches(&data, EditorAction::JumpBackward)
+                {
+                    return;
+                }
+
+                if data.chars().next().map(|ch| (ch as u32) >= 32).unwrap_or(false) {
+                    self.jump_to_char(&data, jump_mode);
+                    return;
+                }
+            }
+        }
+
+        if data.contains(PASTE_START) {
+            self.is_in_paste = true;
+            self.paste_buffer.clear();
+            data = data.replacen(PASTE_START, "", 1);
+        }
+
+        if self.is_in_paste {
+            self.paste_buffer.push_str(&data);
+            if let Some(end_index) = self.paste_buffer.find(PASTE_END) {
+                let paste_content = self.paste_buffer[..end_index].to_string();
+                if !paste_content.is_empty() {
+                    self.handle_paste(&paste_content);
+                }
+                self.is_in_paste = false;
+                let remaining = self.paste_buffer[end_index + PASTE_END.len()..].to_string();
+                self.paste_buffer.clear();
+                if !remaining.is_empty() {
+                    self.handle_input(&remaining);
+                }
+            }
+            return;
+        }
+
         let kb = get_editor_keybindings();
         let kb = kb.lock().expect("editor keybindings lock poisoned");
 
-        if let Some(jump_mode) = self.jump_mode.take() {
-            if kb.matches(data, EditorAction::JumpForward)
-                || kb.matches(data, EditorAction::JumpBackward)
-            {
-                return;
-            }
-
-            if data.chars().next().map(|ch| (ch as u32) >= 32).unwrap_or(false) {
-                self.jump_to_char(data, jump_mode);
-                return;
-            }
+        if kb.matches(&data, EditorAction::Copy) {
+            return;
         }
 
-        if kb.matches(data, EditorAction::CursorLineStart) {
+        if kb.matches(&data, EditorAction::Undo) {
+            self.undo();
+            return;
+        }
+
+        if kb.matches(&data, EditorAction::DeleteToLineEnd) {
+            self.delete_to_end_of_line();
+            return;
+        }
+        if kb.matches(&data, EditorAction::DeleteToLineStart) {
+            self.delete_to_start_of_line();
+            return;
+        }
+        if kb.matches(&data, EditorAction::DeleteWordBackward) {
+            self.delete_word_backwards();
+            return;
+        }
+        if kb.matches(&data, EditorAction::DeleteWordForward) {
+            self.delete_word_forwards();
+            return;
+        }
+        if kb.matches(&data, EditorAction::DeleteCharBackward)
+            || crate::core::input::matches_key(&data, "shift+backspace")
+        {
+            self.handle_backspace();
+            return;
+        }
+        if kb.matches(&data, EditorAction::DeleteCharForward)
+            || crate::core::input::matches_key(&data, "shift+delete")
+        {
+            self.handle_forward_delete();
+            return;
+        }
+
+        if kb.matches(&data, EditorAction::Yank) {
+            self.yank();
+            return;
+        }
+        if kb.matches(&data, EditorAction::YankPop) {
+            self.yank_pop();
+            return;
+        }
+
+        if kb.matches(&data, EditorAction::CursorLineStart) {
             self.move_to_line_start();
             return;
         }
-        if kb.matches(data, EditorAction::CursorLineEnd) {
+        if kb.matches(&data, EditorAction::CursorLineEnd) {
             self.move_to_line_end();
             return;
         }
-        if kb.matches(data, EditorAction::CursorWordLeft) {
+        if kb.matches(&data, EditorAction::CursorWordLeft) {
             self.move_word_backwards();
             return;
         }
-        if kb.matches(data, EditorAction::CursorWordRight) {
+        if kb.matches(&data, EditorAction::CursorWordRight) {
             self.move_word_forwards();
             return;
         }
 
-        if kb.matches(data, EditorAction::CursorUp) {
+        let is_new_line = kb.matches(&data, EditorAction::NewLine)
+            || (data.as_bytes().first() == Some(&b'\n') && data.len() > 1)
+            || data == "\x1b\r"
+            || data == "\x1b[13;2~"
+            || (data.len() > 1 && data.contains('\x1b') && data.contains('\r'))
+            || data == "\n";
+        if is_new_line {
+            if self.should_submit_on_backslash_enter(&data, &kb) {
+                self.handle_backspace();
+                self.submit_value();
+                return;
+            }
+            self.add_new_line();
+            return;
+        }
+
+        if kb.matches(&data, EditorAction::Submit) {
+            if self.disable_submit {
+                return;
+            }
+
+            let current_line = self
+                .state
+                .lines
+                .get(self.state.cursor_line)
+                .map(String::as_str)
+                .unwrap_or("");
+            if self.state.cursor_col > 0 && current_line[..self.state.cursor_col].ends_with('\\') {
+                self.handle_backspace();
+                self.add_new_line();
+                return;
+            }
+
+            self.submit_value();
+            return;
+        }
+
+        if kb.matches(&data, EditorAction::CursorUp) {
             if self.is_editor_empty() {
                 self.navigate_history(-1);
             } else if self.history_index > -1 && self.is_on_first_visual_line() {
@@ -906,7 +1758,7 @@ impl Component for Editor {
             }
             return;
         }
-        if kb.matches(data, EditorAction::CursorDown) {
+        if kb.matches(&data, EditorAction::CursorDown) {
             if self.history_index > -1 && self.is_on_last_visual_line() {
                 self.navigate_history(1);
             } else if self.is_on_last_visual_line() {
@@ -916,31 +1768,45 @@ impl Component for Editor {
             }
             return;
         }
-        if kb.matches(data, EditorAction::CursorRight) {
+        if kb.matches(&data, EditorAction::CursorRight) {
             self.move_cursor(0, 1);
             return;
         }
-        if kb.matches(data, EditorAction::CursorLeft) {
+        if kb.matches(&data, EditorAction::CursorLeft) {
             self.move_cursor(0, -1);
             return;
         }
 
-        if kb.matches(data, EditorAction::PageUp) {
+        if kb.matches(&data, EditorAction::PageUp) {
             self.page_scroll(-1);
             return;
         }
-        if kb.matches(data, EditorAction::PageDown) {
+        if kb.matches(&data, EditorAction::PageDown) {
             self.page_scroll(1);
             return;
         }
 
-        if kb.matches(data, EditorAction::JumpForward) {
+        if kb.matches(&data, EditorAction::JumpForward) {
             self.jump_mode = Some(JumpMode::Forward);
             return;
         }
-        if kb.matches(data, EditorAction::JumpBackward) {
+        if kb.matches(&data, EditorAction::JumpBackward) {
             self.jump_mode = Some(JumpMode::Backward);
             return;
+        }
+
+        if crate::core::input::matches_key(&data, "shift+space") {
+            self.insert_character(" ", false);
+            return;
+        }
+
+        if let Some(decoded) = decode_kitty_printable(&data) {
+            self.insert_character(&decoded, false);
+            return;
+        }
+
+        if data.chars().next().map(|ch| (ch as u32) >= 32).unwrap_or(false) {
+            self.insert_character(&data, false);
         }
     }
 
@@ -967,8 +1833,15 @@ impl EditorComponent for Editor {
     }
 
     fn set_text(&mut self, text: &str) {
-        self.history_index = -1;
-        self.set_text_internal(text);
+        Editor::set_text(self, text);
+    }
+
+    fn insert_text_at_cursor(&mut self, text: &str) {
+        Editor::insert_text_at_cursor(self, text);
+    }
+
+    fn get_expanded_text(&self) -> String {
+        Editor::get_expanded_text(self)
     }
 
     fn set_on_submit(&mut self, handler: Option<Box<dyn FnMut(String)>>) {
@@ -1000,6 +1873,10 @@ impl EditorComponent for Editor {
     fn set_padding_x(&mut self, padding: usize) {
         Editor::set_padding_x(self, padding);
     }
+
+    fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
+        Editor::set_autocomplete_max_visible(self, max_visible);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1015,6 +1892,53 @@ fn is_whitespace_segment(segment: &str) -> bool {
 
 fn is_punctuation_segment(segment: &str) -> bool {
     segment.chars().any(is_punctuation_char)
+}
+
+fn decode_kitty_printable(data: &str) -> Option<String> {
+    if !data.starts_with("\x1b[") || !data.ends_with('u') {
+        return None;
+    }
+    let inner = &data[2..data.len() - 1];
+    let (left, right) = match inner.split_once(';') {
+        Some((left, right)) => (left, right),
+        None => (inner, ""),
+    };
+
+    let mut left_parts = left.split(':');
+    let codepoint = left_parts.next().and_then(|value| value.parse::<u32>().ok())?;
+    let shifted = left_parts
+        .next()
+        .and_then(|value| if value.is_empty() { None } else { value.parse::<u32>().ok() });
+
+    let mod_value = if right.is_empty() {
+        1u32
+    } else {
+        right
+            .split(':')
+            .next()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(1)
+    };
+    let modifier = mod_value.saturating_sub(1);
+
+    const MOD_SHIFT: u32 = 1;
+    const MOD_ALT: u32 = 2;
+    const MOD_CTRL: u32 = 4;
+
+    if modifier & (MOD_ALT | MOD_CTRL) != 0 {
+        return None;
+    }
+
+    let mut effective = codepoint;
+    if modifier & MOD_SHIFT != 0 {
+        if let Some(shifted) = shifted {
+            effective = shifted;
+        }
+    }
+    if effective < 32 {
+        return None;
+    }
+    char::from_u32(effective).map(|ch| ch.to_string())
 }
 
 #[cfg(test)]
@@ -1098,5 +2022,44 @@ mod tests {
         editor.state.cursor_col = 0;
         let lines = editor.render(20);
         assert!(lines[0].contains("↑"));
+    }
+
+    #[test]
+    fn editor_undo_coalesces_words() {
+        let mut editor = Editor::new(theme(), EditorOptions::default());
+        for ch in "hello world".chars() {
+            let input = ch.to_string();
+            editor.handle_input(&input);
+        }
+        editor.handle_input("\x1f"); // ctrl+-
+        assert_eq!(editor.get_text(), "hello");
+        editor.handle_input("\x1f");
+        assert_eq!(editor.get_text(), "");
+    }
+
+    #[test]
+    fn editor_kill_and_yank_restore_line() {
+        let mut editor = Editor::new(theme(), EditorOptions::default());
+        editor.set_text("hello world");
+        editor.state.cursor_line = 0;
+        editor.set_cursor_col(5);
+
+        editor.handle_input("\x0b"); // ctrl+k
+        assert_eq!(editor.get_text(), "hello");
+
+        editor.handle_input("\x19"); // ctrl+y
+        assert_eq!(editor.get_text(), "hello world");
+    }
+
+    #[test]
+    fn editor_large_paste_inserts_marker_and_expands() {
+        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let lines = (0..11).map(|idx| format!("line{idx}")).collect::<Vec<_>>();
+        let paste = lines.join("\n");
+        let input = format!("\x1b[200~{paste}\x1b[201~");
+        editor.handle_input(&input);
+        let text = editor.get_text();
+        assert!(text.contains("[paste #1 +11 lines]"));
+        assert_eq!(editor.get_expanded_text(), paste);
     }
 }
