@@ -2,6 +2,7 @@
 
 use crate::core::component::Component;
 use crate::render::slice::wrap_text_with_ansi;
+use crate::render::utils::apply_background_to_line;
 use crate::render::width::visible_width;
 
 pub struct Text {
@@ -117,21 +118,6 @@ impl Component for Text {
         self.cached_width = None;
         self.cached_lines = None;
     }
-}
-
-fn apply_background_to_line(
-    line: &str,
-    width: usize,
-    bg_fn: &dyn Fn(&str) -> String,
-) -> String {
-    let visible_len = visible_width(line);
-    let padding_needed = width.saturating_sub(visible_len);
-    let mut with_padding = String::with_capacity(line.len() + padding_needed);
-    with_padding.push_str(line);
-    if padding_needed > 0 {
-        with_padding.push_str(&" ".repeat(padding_needed));
-    }
-    bg_fn(&with_padding)
 }
 
 #[cfg(test)]

@@ -195,3 +195,257 @@ This roadmap breaks the port into concrete milestones with per‑phase checklist
 **Tests**
 - [ ] Golden fixtures for renderer diffs
 - [ ] Replay input streams vs expected key IDs
+
+---
+
+## Phase 10 — Utils parity
+**Goal:** finish remaining `utils.ts` parity helpers.
+
+**Checklist**
+- [ ] `truncate_to_width`
+- [ ] `apply_background_to_line`
+- [ ] `is_whitespace_char`
+- [ ] `is_punctuation_char`
+- [ ] Segmenter helper (if needed for Input/Editor)
+
+**Tests**
+- [ ] Unit: truncate/padding/ellipsis cases
+- [ ] Unit: whitespace/punctuation classification
+
+---
+
+## Phase 11 — Key helper API
+**Goal:** finish key helper surface from `keys.ts`.
+
+**Checklist**
+- [ ] `Key` helper builder
+- [ ] `KeyEventType`
+- [ ] `is_key_repeat`
+
+**Tests**
+- [ ] Unit: `Key` builder + `is_key_repeat`
+
+---
+
+## Phase 12 — Editor keybindings
+**Goal:** port `keybindings.ts` support.
+
+**Checklist**
+- [ ] `EditorAction`, `EditorKeybindingsConfig`
+- [ ] `DEFAULT_EDITOR_KEYBINDINGS`
+- [ ] `EditorKeybindingsManager` + global get/set
+
+**Tests**
+- [ ] Unit: keybindings defaults + overrides
+
+---
+
+## Phase 13 — Fuzzy matching
+**Goal:** port `fuzzy.ts` utilities.
+
+**Checklist**
+- [ ] `FuzzyMatch`
+- [ ] `fuzzy_match`
+- [ ] `fuzzy_filter`
+
+**Tests**
+- [ ] Unit: scoring + token matching
+
+---
+
+## Phase 14 — Autocomplete providers
+**Goal:** port autocomplete provider APIs.
+
+**Checklist**
+- [ ] `AutocompleteItem`, `AutocompleteSuggestions`, `AutocompleteProvider`
+- [ ] `SlashCommand` support
+- [ ] `CombinedAutocompleteProvider` (slash commands, file paths, quoted prefixes)
+- [ ] Async suggestions + cancellation hooks (fd integration)
+
+**Tests**
+- [ ] Unit: prefix parsing + quoting rules
+- [ ] Unit: `apply_completion` behavior
+- [ ] Unit: async update/cancel flow (mocked)
+
+---
+
+## Phase 15 — Terminal image helpers: encoding + IDs
+**Goal:** implement image encoding and ID management.
+
+**Checklist**
+- [ ] `encode_kitty`, `encode_iterm2`
+- [ ] `allocate_image_id`
+- [ ] `delete_kitty_image`, `delete_all_kitty_images`
+
+**Tests**
+- [ ] Unit: encoder output + delete sequences + ID range
+
+---
+
+## Phase 16 — Terminal image helpers: dimensions + render
+**Goal:** implement dimension parsing and render helpers.
+
+**Checklist**
+- [ ] `get_png_dimensions`, `get_jpeg_dimensions`, `get_gif_dimensions`, `get_webp_dimensions`
+- [ ] `get_image_dimensions`
+- [ ] `calculate_image_rows`
+- [ ] `render_image`
+- [ ] `image_fallback`
+
+**Tests**
+- [ ] Unit: dimension parsing + row calculation + render output
+
+---
+
+## Phase 17 — Runtime async render handle
+**Goal:** enable async components to schedule renders safely.
+
+**Checklist**
+- [ ] Thread-safe render request handle (no direct terminal writes)
+- [ ] Scheduling hooks for background tasks
+
+**Tests**
+- [ ] Integration: render request from background task
+
+---
+
+## Phase 18 — Box + TruncatedText
+**Goal:** basic layout components parity.
+
+**Checklist**
+- [ ] `Box` (padding/background + caching)
+- [ ] `TruncatedText`
+
+**Tests**
+- [ ] Unit: Box padding/background width
+- [ ] Unit: TruncatedText width + ellipsis
+
+---
+
+## Phase 19 — Input component
+**Goal:** single-line input parity.
+
+**Checklist**
+- [ ] Cursor movement (grapheme-aware)
+- [ ] Word navigation/delete
+- [ ] Bracketed paste handling
+- [ ] onSubmit/onEscape hooks
+
+**Tests**
+- [ ] Integration: editing + cursor movement
+- [ ] Integration: paste + delete word
+
+---
+
+## Phase 20 — SelectList component
+**Goal:** selection list parity.
+
+**Checklist**
+- [ ] Selection + scroll behavior
+- [ ] Keybinding navigation
+- [ ] Callbacks (`onSelect`, `onCancel`, `onSelectionChange`)
+
+**Tests**
+- [ ] Integration: navigation + selection state
+
+---
+
+## Phase 21 — SettingsList component
+**Goal:** settings list parity.
+
+**Checklist**
+- [ ] Search input integration
+- [ ] Fuzzy filter + selection
+- [ ] Submenu handling + value cycling
+
+**Tests**
+- [ ] Integration: search + navigation + selection
+
+---
+
+## Phase 22 — Markdown component
+**Goal:** Markdown rendering parity.
+
+**Checklist**
+- [ ] Theme + default styles
+- [ ] ANSI styling + wrapping
+- [ ] Cache behavior
+
+**Tests**
+- [ ] Integration: Markdown rendering fixtures
+
+---
+
+## Phase 23 — Loader + CancellableLoader
+**Goal:** timer-driven status components.
+
+**Checklist**
+- [ ] Loader spinner frames
+- [ ] Cancellable loader interaction
+- [ ] Render scheduling on ticks
+
+**Tests**
+- [ ] Integration: tick updates + cancel hook
+
+---
+
+## Phase 24 — Image component
+**Goal:** image component parity using terminal-image helpers.
+
+**Checklist**
+- [ ] Kitty/iTerm2 rendering
+- [ ] Fallback rendering
+- [ ] Image ID reuse
+
+**Tests**
+- [ ] Integration: image fallback + sequence output
+
+---
+
+## Phase 25 — Editor core: layout + navigation
+**Goal:** multi-line editor foundation without autocomplete.
+
+**Checklist**
+- [ ] `EditorComponent` trait parity
+- [ ] Word-wrapped layout + viewport scrolling
+- [ ] Cursor movement + selection boundaries
+
+**Tests**
+- [ ] Integration: navigation + layout + selection
+
+---
+
+## Phase 26 — Editor core: editing + undo
+**Goal:** editing operations and history.
+
+**Checklist**
+- [ ] Insert/delete/kill/yank
+- [ ] Undo/redo
+
+**Tests**
+- [ ] Integration: editing + undo/redo + kill/yank
+
+---
+
+## Phase 27 — Editor autocomplete integration
+**Goal:** wire autocomplete providers into the editor.
+
+**Checklist**
+- [ ] Autocomplete trigger + selection UI
+- [ ] Async suggestion updates
+- [ ] Apply completion semantics
+
+**Tests**
+- [ ] Integration: autocomplete flow + applyCompletion
+
+---
+
+## Phase 28 — Public API parity sweep
+**Goal:** final exports aligned to `packages/tui/src/index.ts`.
+
+**Checklist**
+- [ ] `lib.rs` re-exports match TS index
+- [ ] Final parity spot-checks
+
+**Tests**
+- [ ] Compile-time export smoke checks

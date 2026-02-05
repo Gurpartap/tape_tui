@@ -6,3 +6,4 @@ pub mod ansi;
 pub mod width;
 pub mod slice;
 pub mod overlay;
+pub mod utils;
