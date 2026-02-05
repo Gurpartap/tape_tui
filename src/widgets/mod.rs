@@ -3,6 +3,7 @@
 pub mod container;
 pub mod r#box;
 pub mod cancellable_loader;
+pub mod image;
 pub mod input;
 pub mod loader;
 pub mod markdown;
@@ -15,6 +16,7 @@ pub mod truncated_text;
 pub use container::Container;
 pub use r#box::Box;
 pub use cancellable_loader::{AbortSignal, CancellableLoader};
+pub use image::{Image, ImageOptions, ImageTheme};
 pub use input::Input;
 pub use loader::Loader;
 pub use markdown::{DefaultTextStyle, Markdown, MarkdownTheme};
