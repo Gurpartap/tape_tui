@@ -24,7 +24,7 @@ pub struct TuiRuntime<T: Terminal> {
     on_debug: Option<Box<dyn FnMut()>>,
     clear_on_shrink: bool,
     show_hardware_cursor: bool,
-    render_requested: bool,
+    render_requested: Arc<AtomicBool>,
     stopped: bool,
     pending_inputs: Arc<Mutex<Vec<String>>>,
     pending_resize: Arc<AtomicBool>,
@@ -51,6 +51,17 @@ struct OverlayEntry {
 pub struct OverlayHandle {
     id: u64,
     state: std::rc::Weak<RefCell<OverlayState>>,
+}
+
+#[derive(Clone)]
+pub struct RenderHandle {
+    requested: Arc<AtomicBool>,
+}
+
+impl RenderHandle {
+    pub fn request_render(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+    }
 }
 
 impl OverlayHandle {
@@ -103,7 +114,7 @@ impl<T: Terminal> TuiRuntime<T> {
             on_debug: None,
             clear_on_shrink,
             show_hardware_cursor,
-            render_requested: false,
+            render_requested: Arc::new(AtomicBool::new(false)),
             stopped: true,
             pending_inputs: Arc::new(Mutex::new(Vec::new())),
             pending_resize: Arc::new(AtomicBool::new(false)),
@@ -114,6 +125,12 @@ impl<T: Terminal> TuiRuntime<T> {
 
     pub fn set_on_debug(&mut self, handler: Option<Box<dyn FnMut()>>) {
         self.on_debug = handler;
+    }
+
+    pub fn render_handle(&self) -> RenderHandle {
+        RenderHandle {
+            requested: Arc::clone(&self.render_requested),
+        }
     }
 
     pub fn set_focus(&mut self, target: Rc<RefCell<Box<dyn Component>>>) {
@@ -271,19 +288,18 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn request_render(&mut self) {
-        self.render_requested = true;
+        self.render_requested.store(true, Ordering::SeqCst);
     }
 
     pub fn render_if_needed(&mut self) {
-        if !self.render_requested {
+        if !self.render_requested.swap(false, Ordering::SeqCst) {
             return;
         }
-        self.render_requested = false;
         self.do_render();
     }
 
     pub fn render_now(&mut self) {
-        self.render_requested = false;
+        self.render_requested.store(false, Ordering::SeqCst);
         self.do_render();
     }
 
@@ -554,6 +570,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
+    use std::thread;
 
     #[derive(Default)]
     struct TestTerminal {
@@ -803,6 +820,30 @@ mod tests {
         runtime.pending_resize.store(true, Ordering::SeqCst);
         runtime.run_once();
         assert!(*overlay_focus.borrow());
+    }
+
+    #[test]
+    fn render_handle_triggers_render_from_background_task() {
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start();
+        runtime.render_if_needed();
+        let baseline = state.borrow().renders;
+
+        let handle = runtime.render_handle();
+        let join = thread::spawn(move || {
+            handle.request_render();
+        });
+        join.join().expect("join render thread");
+
+        runtime.run_once();
+        assert_eq!(state.borrow().renders, baseline + 1);
     }
 
     fn env_test_lock() -> &'static Mutex<()> {
