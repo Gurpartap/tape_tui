@@ -17,7 +17,7 @@ pub mod truncated_text;
 pub use container::Container;
 pub use r#box::Box;
 pub use cancellable_loader::{AbortSignal, CancellableLoader};
-pub use editor::{Editor, EditorOptions, EditorTheme, TextChunk};
+pub use editor::{Editor, EditorHeightMode, EditorOptions, EditorTheme, TextChunk};
 pub use image::{Image, ImageOptions, ImageTheme};
 pub use input::Input;
 pub use loader::Loader;

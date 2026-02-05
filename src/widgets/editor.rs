@@ -130,10 +130,19 @@ pub struct EditorTheme {
     pub select_list: SelectListTheme,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorHeightMode {
+    /// Preserve pi-tui parity behavior (chat-style editor height heuristic).
+    Default,
+    /// Expand the editor to fill the available vertical space passed via `set_terminal_rows`.
+    FillAvailable,
+}
+
 #[derive(Clone, Default)]
 pub struct EditorOptions {
     pub padding_x: Option<usize>,
     pub autocomplete_max_visible: Option<usize>,
+    pub height_mode: Option<EditorHeightMode>,
     pub render_handle: Option<RenderHandle>,
 }
 
@@ -177,6 +186,7 @@ pub struct Editor {
     scroll_offset: usize,
     border_color: Box<dyn Fn(&str) -> String>,
     terminal_rows: usize,
+    height_mode: EditorHeightMode,
     preferred_visual_col: Option<usize>,
     jump_mode: Option<JumpMode>,
     disable_submit: bool,
@@ -198,6 +208,7 @@ impl Editor {
         let padding_x = options.padding_x.unwrap_or(0);
         let max_visible = options.autocomplete_max_visible.unwrap_or(5);
         let autocomplete_max_visible = max(3, min(20, max_visible));
+        let height_mode = options.height_mode.unwrap_or(EditorHeightMode::Default);
         let render_handle = options.render_handle;
         let border_color = theme.border_color;
         let select_list_theme = theme.select_list;
@@ -227,6 +238,7 @@ impl Editor {
             scroll_offset: 0,
             border_color,
             terminal_rows: 0,
+            height_mode,
             preferred_visual_col: None,
             jump_mode: None,
             disable_submit: false,
@@ -2046,7 +2058,10 @@ impl Component for Editor {
         let horizontal = (self.border_color)("─");
         let layout_lines = self.layout_text(layout_width);
 
-        let max_visible_lines = max(5, (self.terminal_rows.saturating_mul(3)) / 10);
+        let max_visible_lines = match self.height_mode {
+            EditorHeightMode::Default => max(5, (self.terminal_rows.saturating_mul(3)) / 10),
+            EditorHeightMode::FillAvailable => max(1, self.terminal_rows.saturating_sub(2)),
+        };
         let cursor_line_index = layout_lines
             .iter()
             .position(|line| line.has_cursor)
@@ -2624,7 +2639,7 @@ fn decode_kitty_printable(data: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{word_wrap_line, Editor, EditorOptions, EditorTheme};
+    use super::{word_wrap_line, Editor, EditorHeightMode, EditorOptions, EditorTheme};
     use crate::core::autocomplete::{
         AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
         CommandEntry, CompletionResult, SlashCommand,
@@ -2714,6 +2729,30 @@ mod tests {
         let editor = Editor::new(theme(), options);
         assert_eq!(editor.get_padding_x(), 2);
         assert_eq!(editor.get_autocomplete_max_visible(), 7);
+    }
+
+    #[test]
+    fn editor_fill_available_renders_more_lines_than_default() {
+        let text = (0..50).map(|idx| format!("line {idx}")).collect::<Vec<_>>().join("\n");
+
+        let mut default_editor = Editor::new(theme(), EditorOptions::default());
+        default_editor.set_terminal_rows(20);
+        default_editor.set_text(&text);
+        let default_lines = default_editor.render(20);
+
+        let mut fill_editor = Editor::new(
+            theme(),
+            EditorOptions {
+                height_mode: Some(EditorHeightMode::FillAvailable),
+                ..EditorOptions::default()
+            },
+        );
+        fill_editor.set_terminal_rows(20);
+        fill_editor.set_text(&text);
+        let fill_lines = fill_editor.render(20);
+
+        assert_eq!(fill_lines.len(), 20);
+        assert!(fill_lines.len() > default_lines.len());
     }
 
     #[test]

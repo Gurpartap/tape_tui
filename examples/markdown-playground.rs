@@ -7,9 +7,9 @@ use pi_tui::core::component::{Component, Focusable};
 use pi_tui::render::slice::slice_by_column;
 use pi_tui::{
     matches_key, set_editor_keybindings, truncate_to_width, visible_width, Editor, EditorAction,
-    EditorKeybindingsConfig, EditorKeybindingsManager, EditorOptions, EditorTheme, Markdown,
-    MarkdownTheme, OverlayAnchor, OverlayMargin, OverlayOptions, OverlayHandle, ProcessTerminal,
-    SelectItem, SelectList, SelectListTheme, SizeValue, TUI,
+    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsManager, EditorOptions, EditorTheme,
+    Markdown, MarkdownTheme, OverlayAnchor, OverlayMargin, OverlayOptions, OverlayHandle,
+    ProcessTerminal, SelectItem, SelectList, SelectListTheme, SizeValue, TUI,
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
@@ -367,7 +367,11 @@ impl Component for PlaygroundApp {
 
         let available_height = self.terminal_rows.saturating_sub(2);
 
-        let left_lines = self.editor.borrow_mut().render(left_width);
+        let left_lines = {
+            let mut editor = self.editor.borrow_mut();
+            editor.set_terminal_rows(available_height);
+            editor.render(left_width)
+        };
         let right_lines = if right_width > 0 {
             self.markdown.render(right_width)
         } else {
@@ -418,7 +422,6 @@ impl Component for PlaygroundApp {
 
     fn set_terminal_rows(&mut self, rows: usize) {
         self.terminal_rows = rows;
-        self.editor.borrow_mut().set_terminal_rows(rows);
     }
 }
 
@@ -457,6 +460,7 @@ fn main() {
     let editor = Rc::new(RefCell::new(Editor::new(
         editor_theme(),
         EditorOptions {
+            height_mode: Some(EditorHeightMode::FillAvailable),
             render_handle: Some(render_handle.clone()),
             ..EditorOptions::default()
         },
@@ -547,4 +551,3 @@ impl Component for EmptyComponent {
         Vec::new()
     }
 }
-
