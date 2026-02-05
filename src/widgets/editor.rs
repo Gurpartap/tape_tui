@@ -2058,9 +2058,17 @@ impl Component for Editor {
         let horizontal = (self.border_color)("─");
         let layout_lines = self.layout_text(layout_width);
 
-        let max_visible_lines = match self.height_mode {
-            EditorHeightMode::Default => max(5, (self.terminal_rows.saturating_mul(3)) / 10),
-            EditorHeightMode::FillAvailable => max(1, self.terminal_rows.saturating_sub(2)),
+        let default_visible_lines = max(5, (self.terminal_rows.saturating_mul(3)) / 10);
+        let (max_visible_lines, fill_exact_height) = match self.height_mode {
+            EditorHeightMode::Default => (default_visible_lines, false),
+            EditorHeightMode::FillAvailable => {
+                if self.terminal_rows == 0 {
+                    // Without a height, preserve the Default behavior instead of forcing a fixed layout.
+                    (default_visible_lines, false)
+                } else {
+                    (self.terminal_rows.saturating_sub(2), true)
+                }
+            }
         };
         let cursor_line_index = layout_lines
             .iter()
@@ -2070,7 +2078,8 @@ impl Component for Editor {
         if cursor_line_index < self.scroll_offset {
             self.scroll_offset = cursor_line_index;
         } else if cursor_line_index >= self.scroll_offset + max_visible_lines {
-            self.scroll_offset = cursor_line_index.saturating_sub(max_visible_lines - 1);
+            self.scroll_offset =
+                cursor_line_index.saturating_sub(max_visible_lines.saturating_sub(1));
         }
 
         let max_scroll = layout_lines.len().saturating_sub(max_visible_lines);
@@ -2078,12 +2087,21 @@ impl Component for Editor {
             self.scroll_offset = max_scroll;
         }
 
-        let visible_lines = layout_lines
+        let mut visible_lines = layout_lines
             .iter()
             .skip(self.scroll_offset)
             .take(max_visible_lines)
             .cloned()
             .collect::<Vec<_>>();
+
+        if fill_exact_height && visible_lines.len() < max_visible_lines {
+            let missing = max_visible_lines - visible_lines.len();
+            visible_lines.extend((0..missing).map(|_| LayoutLine {
+                text: String::new(),
+                has_cursor: false,
+                cursor_pos: None,
+            }));
+        }
 
         let mut result = Vec::new();
         let left_padding = " ".repeat(padding_x);
@@ -2139,16 +2157,18 @@ impl Component for Editor {
             ));
         }
 
-        let lines_below = layout_lines
-            .len()
-            .saturating_sub(self.scroll_offset + visible_lines.len());
-        if lines_below > 0 {
-            let indicator = format!("─── ↓ {} more ", lines_below);
-            let remaining = width.saturating_sub(visible_width(&indicator));
-            let line = format!("{}{}", indicator, "─".repeat(remaining));
-            result.push((self.border_color)(&line));
-        } else {
-            result.push(horizontal.repeat(width));
+        if !(fill_exact_height && self.terminal_rows == 1) {
+            let lines_below = layout_lines
+                .len()
+                .saturating_sub(self.scroll_offset + visible_lines.len());
+            if lines_below > 0 {
+                let indicator = format!("─── ↓ {} more ", lines_below);
+                let remaining = width.saturating_sub(visible_width(&indicator));
+                let line = format!("{}{}", indicator, "─".repeat(remaining));
+                result.push((self.border_color)(&line));
+            } else {
+                result.push(horizontal.repeat(width));
+            }
         }
 
         if self.autocomplete_state.is_some() {
@@ -2753,6 +2773,23 @@ mod tests {
 
         assert_eq!(fill_lines.len(), 20);
         assert!(fill_lines.len() > default_lines.len());
+    }
+
+    #[test]
+    fn editor_fill_available_pads_short_content_to_terminal_rows() {
+        let mut editor = Editor::new(
+            theme(),
+            EditorOptions {
+                height_mode: Some(EditorHeightMode::FillAvailable),
+                ..EditorOptions::default()
+            },
+        );
+        editor.set_terminal_rows(20);
+        editor.set_text("hi");
+
+        let lines = editor.render(20);
+        assert_eq!(lines.len(), 20);
+        assert_eq!(lines.last().unwrap(), &"─".repeat(20));
     }
 
     #[test]
