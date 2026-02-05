@@ -7,12 +7,22 @@ pub struct Spacer {
 }
 
 impl Spacer {
-    pub fn new(lines: usize) -> Self {
+    pub fn new() -> Self {
+        Self { lines: 1 }
+    }
+
+    pub fn with_lines(lines: usize) -> Self {
         Self { lines }
     }
 
     pub fn set_lines(&mut self, lines: usize) {
         self.lines = lines;
+    }
+}
+
+impl Default for Spacer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -29,9 +39,16 @@ mod tests {
 
     #[test]
     fn spacer_renders_empty_lines() {
-        let mut spacer = Spacer::new(3);
+        let mut spacer = Spacer::with_lines(3);
         let lines = spacer.render(10);
         assert_eq!(lines.len(), 3);
         assert!(lines.iter().all(|line| line.is_empty()));
+    }
+
+    #[test]
+    fn spacer_default_is_one_line() {
+        let mut spacer = Spacer::new();
+        let lines = spacer.render(10);
+        assert_eq!(lines.len(), 1);
     }
 }
