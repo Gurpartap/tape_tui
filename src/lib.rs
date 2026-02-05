@@ -18,9 +18,9 @@ pub use crate::core::autocomplete::{
 
 // Components
 pub use crate::widgets::{
-    Box, CancellableLoader, Container, DefaultTextStyle, Editor, EditorHeightMode, EditorOptions, EditorTheme,
-    Image, ImageOptions, ImageTheme, Input, Loader, Markdown, MarkdownTheme, SelectItem, SelectList, SelectListTheme,
-    SettingItem, SettingsList, SettingsListTheme, Spacer, Text, TruncatedText,
+    Box, CancellableLoader, Container, DefaultTextStyle, Editor, EditorHeightMode, EditorOptions, EditorPasteMode,
+    EditorTheme, Image, ImageOptions, ImageTheme, Input, Loader, Markdown, MarkdownTheme, SelectItem, SelectList,
+    SelectListTheme, SettingItem, SettingsList, SettingsListTheme, Spacer, Text, TruncatedText,
 };
 
 // Editor component interface

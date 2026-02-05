@@ -7,8 +7,8 @@ use pi_tui::core::component::{Component, Focusable};
 use pi_tui::render::slice::slice_by_column;
 use pi_tui::{
     matches_key, set_editor_keybindings, truncate_to_width, visible_width, Editor, EditorAction,
-    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsManager, EditorOptions, EditorTheme,
-    Markdown, MarkdownTheme, OverlayAnchor, OverlayMargin, OverlayOptions, OverlayHandle,
+    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsManager, EditorOptions, EditorPasteMode,
+    EditorTheme, Markdown, MarkdownTheme, OverlayAnchor, OverlayMargin, OverlayOptions, OverlayHandle,
     ProcessTerminal, SelectItem, SelectList, SelectListTheme, SizeValue, TUI,
 };
 
@@ -461,6 +461,7 @@ fn main() {
         editor_theme(),
         EditorOptions {
             height_mode: Some(EditorHeightMode::FillAvailable),
+            paste_mode: Some(EditorPasteMode::Literal),
             render_handle: Some(render_handle.clone()),
             ..EditorOptions::default()
         },

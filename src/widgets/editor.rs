@@ -138,11 +138,20 @@ pub enum EditorHeightMode {
     FillAvailable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorPasteMode {
+    /// Preserve pi-tui parity behavior (large pastes are replaced by paste markers).
+    Default,
+    /// Always insert the literal pasted content, never inserting paste markers.
+    Literal,
+}
+
 #[derive(Clone, Default)]
 pub struct EditorOptions {
     pub padding_x: Option<usize>,
     pub autocomplete_max_visible: Option<usize>,
     pub height_mode: Option<EditorHeightMode>,
+    pub paste_mode: Option<EditorPasteMode>,
     pub render_handle: Option<RenderHandle>,
 }
 
@@ -187,6 +196,7 @@ pub struct Editor {
     border_color: Box<dyn Fn(&str) -> String>,
     terminal_rows: usize,
     height_mode: EditorHeightMode,
+    paste_mode: EditorPasteMode,
     preferred_visual_col: Option<usize>,
     jump_mode: Option<JumpMode>,
     disable_submit: bool,
@@ -209,6 +219,7 @@ impl Editor {
         let max_visible = options.autocomplete_max_visible.unwrap_or(5);
         let autocomplete_max_visible = max(3, min(20, max_visible));
         let height_mode = options.height_mode.unwrap_or(EditorHeightMode::Default);
+        let paste_mode = options.paste_mode.unwrap_or(EditorPasteMode::Default);
         let render_handle = options.render_handle;
         let border_color = theme.border_color;
         let select_list_theme = theme.select_list;
@@ -239,6 +250,7 @@ impl Editor {
             border_color,
             terminal_rows: 0,
             height_mode,
+            paste_mode,
             preferred_visual_col: None,
             jump_mode: None,
             disable_submit: false,
@@ -912,6 +924,11 @@ impl Editor {
                     filtered = format!(" {filtered}");
                 }
             }
+        }
+
+        if self.paste_mode == EditorPasteMode::Literal {
+            self.insert_text_at_cursor_internal(&filtered);
+            return;
         }
 
         let pasted_lines_count = filtered.split('\n').count();
@@ -2659,7 +2676,7 @@ fn decode_kitty_printable(data: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{word_wrap_line, Editor, EditorHeightMode, EditorOptions, EditorTheme};
+    use super::{word_wrap_line, Editor, EditorHeightMode, EditorOptions, EditorPasteMode, EditorTheme};
     use crate::core::autocomplete::{
         AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
         CommandEntry, CompletionResult, SlashCommand,
@@ -2840,6 +2857,25 @@ mod tests {
         let text = editor.get_text();
         assert!(text.contains("[paste #1 +11 lines]"));
         assert_eq!(editor.get_expanded_text(), paste);
+    }
+
+    #[test]
+    fn editor_large_paste_in_literal_mode_inserts_full_text() {
+        let mut editor = Editor::new(
+            theme(),
+            EditorOptions {
+                paste_mode: Some(EditorPasteMode::Literal),
+                ..EditorOptions::default()
+            },
+        );
+        let lines = (0..11).map(|idx| format!("line{idx}")).collect::<Vec<_>>();
+        let paste = lines.join("\n");
+        let input = format!("\x1b[200~{paste}\x1b[201~");
+        editor.handle_input(&input);
+        let text = editor.get_text();
+        assert!(text.contains('\n'));
+        assert!(!text.contains("[paste #"));
+        assert_eq!(text, paste);
     }
 
     #[test]
