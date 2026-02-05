@@ -6,3 +6,4 @@ pub mod input;
 pub mod keybindings;
 pub mod fuzzy;
 pub mod terminal_image;
+pub mod autocomplete;
