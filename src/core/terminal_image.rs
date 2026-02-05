@@ -24,6 +24,28 @@ pub struct CellDimensions {
     pub height_px: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageDimensions {
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ImageRenderOptions {
+    pub max_width_cells: Option<u32>,
+    #[allow(dead_code)]
+    pub max_height_cells: Option<u32>,
+    pub preserve_aspect_ratio: Option<bool>,
+    pub image_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRenderResult {
+    pub sequence: String,
+    pub rows: u32,
+    pub image_id: Option<u32>,
+}
+
 static CAPABILITIES: OnceLock<Mutex<Option<TerminalCapabilities>>> = OnceLock::new();
 static CELL_DIMENSIONS: OnceLock<Mutex<CellDimensions>> = OnceLock::new();
 
@@ -244,6 +266,219 @@ pub fn encode_iterm2(base64_data: &str, options: &Iterm2EncodeOptions) -> String
     )
 }
 
+pub fn calculate_image_rows(
+    image_dimensions: ImageDimensions,
+    target_width_cells: u32,
+    cell_dimensions: Option<CellDimensions>,
+) -> u32 {
+    let cell_dimensions = cell_dimensions.unwrap_or(CellDimensions {
+        width_px: 9,
+        height_px: 18,
+    });
+    let target_width_px = target_width_cells as f64 * cell_dimensions.width_px as f64;
+    let scale = target_width_px / image_dimensions.width_px as f64;
+    let scaled_height_px = image_dimensions.height_px as f64 * scale;
+    let rows = (scaled_height_px / cell_dimensions.height_px as f64).ceil() as u32;
+    rows.max(1)
+}
+
+pub fn get_png_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    let buffer = base64_decode(base64_data)?;
+    if buffer.len() < 24 {
+        return None;
+    }
+    if buffer[0] != 0x89 || buffer[1] != 0x50 || buffer[2] != 0x4e || buffer[3] != 0x47 {
+        return None;
+    }
+    let width = u32::from_be_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
+    let height = u32::from_be_bytes([buffer[20], buffer[21], buffer[22], buffer[23]]);
+    Some(ImageDimensions {
+        width_px: width,
+        height_px: height,
+    })
+}
+
+pub fn get_jpeg_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    let buffer = base64_decode(base64_data)?;
+    if buffer.len() < 2 {
+        return None;
+    }
+    if buffer[0] != 0xff || buffer[1] != 0xd8 {
+        return None;
+    }
+
+    let mut offset = 2usize;
+    while offset < buffer.len().saturating_sub(9) {
+        if buffer[offset] != 0xff {
+            offset += 1;
+            continue;
+        }
+
+        let marker = buffer[offset + 1];
+        if (0xc0..=0xc2).contains(&marker) {
+            let height = u16::from_be_bytes([buffer[offset + 5], buffer[offset + 6]]) as u32;
+            let width = u16::from_be_bytes([buffer[offset + 7], buffer[offset + 8]]) as u32;
+            return Some(ImageDimensions {
+                width_px: width,
+                height_px: height,
+            });
+        }
+
+        if offset + 3 >= buffer.len() {
+            return None;
+        }
+        let length = u16::from_be_bytes([buffer[offset + 2], buffer[offset + 3]]) as usize;
+        if length < 2 {
+            return None;
+        }
+        offset += 2 + length;
+    }
+
+    None
+}
+
+pub fn get_gif_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    let buffer = base64_decode(base64_data)?;
+    if buffer.len() < 10 {
+        return None;
+    }
+    let sig = std::str::from_utf8(&buffer[0..6]).ok()?;
+    if sig != "GIF87a" && sig != "GIF89a" {
+        return None;
+    }
+    let width = u16::from_le_bytes([buffer[6], buffer[7]]) as u32;
+    let height = u16::from_le_bytes([buffer[8], buffer[9]]) as u32;
+    Some(ImageDimensions {
+        width_px: width,
+        height_px: height,
+    })
+}
+
+pub fn get_webp_dimensions(base64_data: &str) -> Option<ImageDimensions> {
+    let buffer = base64_decode(base64_data)?;
+    if buffer.len() < 30 {
+        return None;
+    }
+    let riff = std::str::from_utf8(&buffer[0..4]).ok()?;
+    let webp = std::str::from_utf8(&buffer[8..12]).ok()?;
+    if riff != "RIFF" || webp != "WEBP" {
+        return None;
+    }
+    let chunk = std::str::from_utf8(&buffer[12..16]).ok()?;
+
+    if chunk == "VP8 " {
+        if buffer.len() < 30 {
+            return None;
+        }
+        let width = u16::from_le_bytes([buffer[26], buffer[27]]) & 0x3fff;
+        let height = u16::from_le_bytes([buffer[28], buffer[29]]) & 0x3fff;
+        return Some(ImageDimensions {
+            width_px: width as u32,
+            height_px: height as u32,
+        });
+    }
+
+    if chunk == "VP8L" {
+        if buffer.len() < 25 {
+            return None;
+        }
+        let bits = u32::from_le_bytes([buffer[21], buffer[22], buffer[23], buffer[24]]);
+        let width = (bits & 0x3fff) + 1;
+        let height = ((bits >> 14) & 0x3fff) + 1;
+        return Some(ImageDimensions {
+            width_px: width,
+            height_px: height,
+        });
+    }
+
+    if chunk == "VP8X" {
+        if buffer.len() < 30 {
+            return None;
+        }
+        let width = (buffer[24] as u32 | ((buffer[25] as u32) << 8) | ((buffer[26] as u32) << 16)) + 1;
+        let height = (buffer[27] as u32 | ((buffer[28] as u32) << 8) | ((buffer[29] as u32) << 16)) + 1;
+        return Some(ImageDimensions {
+            width_px: width,
+            height_px: height,
+        });
+    }
+
+    None
+}
+
+pub fn get_image_dimensions(base64_data: &str, mime_type: &str) -> Option<ImageDimensions> {
+    match mime_type {
+        "image/png" => get_png_dimensions(base64_data),
+        "image/jpeg" => get_jpeg_dimensions(base64_data),
+        "image/gif" => get_gif_dimensions(base64_data),
+        "image/webp" => get_webp_dimensions(base64_data),
+        _ => None,
+    }
+}
+
+pub fn render_image(
+    base64_data: &str,
+    image_dimensions: ImageDimensions,
+    options: &ImageRenderOptions,
+) -> Option<ImageRenderResult> {
+    let caps = get_capabilities();
+    let images = caps.images?;
+
+    let max_width = options.max_width_cells.unwrap_or(80);
+    let rows = calculate_image_rows(image_dimensions, max_width, Some(get_cell_dimensions()));
+
+    match images {
+        ImageProtocol::Kitty => {
+            let sequence = encode_kitty(
+                base64_data,
+                &KittyEncodeOptions {
+                    columns: Some(max_width),
+                    rows: Some(rows),
+                    image_id: options.image_id,
+                },
+            );
+            Some(ImageRenderResult {
+                sequence,
+                rows,
+                image_id: options.image_id,
+            })
+        }
+        ImageProtocol::Iterm2 => {
+            let sequence = encode_iterm2(
+                base64_data,
+                &Iterm2EncodeOptions {
+                    width: Some(max_width.to_string()),
+                    height: Some("auto".to_string()),
+                    name: None,
+                    preserve_aspect_ratio: Some(options.preserve_aspect_ratio.unwrap_or(true)),
+                    inline: None,
+                },
+            );
+            Some(ImageRenderResult {
+                sequence,
+                rows,
+                image_id: None,
+            })
+        }
+    }
+}
+
+pub fn image_fallback(
+    mime_type: &str,
+    dimensions: Option<ImageDimensions>,
+    filename: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(name) = filename {
+        parts.push(name.to_string());
+    }
+    parts.push(format!("[{mime_type}]"));
+    if let Some(dim) = dimensions {
+        parts.push(format!("{}x{}", dim.width_px, dim.height_px));
+    }
+    format!("[Image: {}]", parts.join(" "))
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     if data.is_empty() {
@@ -279,6 +514,55 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut values: Vec<u8> = Vec::new();
+    for byte in input.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => 64,
+            b' ' | b'\n' | b'\r' | b'\t' => continue,
+            _ => return None,
+        };
+        values.push(value);
+    }
+
+    if values.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut output = Vec::with_capacity(values.len() / 4 * 3);
+    let mut idx = 0usize;
+
+    while idx < values.len() {
+        let v0 = values[idx];
+        let v1 = *values.get(idx + 1).unwrap_or(&64);
+        let v2 = *values.get(idx + 2).unwrap_or(&64);
+        let v3 = *values.get(idx + 3).unwrap_or(&64);
+        if v0 == 64 || v1 == 64 {
+            break;
+        }
+
+        let triple = ((v0 as u32) << 18) | ((v1 as u32) << 12) | ((if v2 == 64 { 0 } else { v2 }) as u32) << 6
+            | (if v3 == 64 { 0 } else { v3 }) as u32;
+
+        output.push(((triple >> 16) & 0xff) as u8);
+        if v2 != 64 {
+            output.push(((triple >> 8) & 0xff) as u8);
+        }
+        if v3 != 64 {
+            output.push((triple & 0xff) as u8);
+        }
+
+        idx += 4;
+    }
+
+    Some(output)
+}
+
 fn image_id_seed() -> u32 {
     let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let nanos = duration.as_nanos() as u64;
@@ -290,11 +574,39 @@ fn image_id_seed() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use crate::core::input::kitty_test_lock;
     use super::{
         allocate_image_id, delete_all_kitty_images, delete_kitty_image, encode_iterm2, encode_kitty,
-        get_cell_dimensions, is_image_line, set_cell_dimensions, CellDimensions, Iterm2EncodeOptions,
-        KittyEncodeOptions,
+        get_cell_dimensions, get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions, get_png_dimensions,
+        get_webp_dimensions, image_fallback, is_image_line, render_image, set_cell_dimensions, CellDimensions,
+        ImageDimensions, ImageRenderOptions, Iterm2EncodeOptions, KittyEncodeOptions,
     };
+    use std::env;
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                env::set_var(self.key, value);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn set_env_guard(key: &'static str, value: Option<&str>) -> EnvGuard {
+        let previous = env::var(key).ok();
+        if let Some(value) = value {
+            env::set_var(key, value);
+        } else {
+            env::remove_var(key);
+        }
+        EnvGuard { key, previous }
+    }
 
     #[test]
     fn image_line_detection_matches_prefixes() {
@@ -362,5 +674,182 @@ mod tests {
             encoded,
             "\x1b]1337;File=inline=0;width=10;height=auto;name=Zm9vLnBuZw==;preserveAspectRatio=0:AAAA\x07"
         );
+    }
+
+    #[test]
+    fn png_dimensions_parsed() {
+        let mut buffer = vec![0u8; 24];
+        buffer[0] = 0x89;
+        buffer[1] = 0x50;
+        buffer[2] = 0x4e;
+        buffer[3] = 0x47;
+        buffer[16..20].copy_from_slice(&80u32.to_be_bytes());
+        buffer[20..24].copy_from_slice(&40u32.to_be_bytes());
+        let base64 = super::base64_encode(&buffer);
+        let dims = get_png_dimensions(&base64).expect("png dims");
+        assert_eq!(dims, ImageDimensions { width_px: 80, height_px: 40 });
+    }
+
+    #[test]
+    fn jpeg_dimensions_parsed() {
+        let buffer = vec![0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x20, 0x00, 0x10, 0x00];
+        let base64 = super::base64_encode(&buffer);
+        let dims = get_jpeg_dimensions(&base64).expect("jpeg dims");
+        assert_eq!(dims, ImageDimensions { width_px: 16, height_px: 32 });
+    }
+
+    #[test]
+    fn gif_dimensions_parsed() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(b"GIF89a");
+        buffer.extend_from_slice(&3u16.to_le_bytes());
+        buffer.extend_from_slice(&4u16.to_le_bytes());
+        let base64 = super::base64_encode(&buffer);
+        let dims = get_gif_dimensions(&base64).expect("gif dims");
+        assert_eq!(dims, ImageDimensions { width_px: 3, height_px: 4 });
+    }
+
+    #[test]
+    fn webp_dimensions_vp8_parsed() {
+        let mut buffer = vec![0u8; 30];
+        buffer[0..4].copy_from_slice(b"RIFF");
+        buffer[8..12].copy_from_slice(b"WEBP");
+        buffer[12..16].copy_from_slice(b"VP8 ");
+        buffer[26..28].copy_from_slice(&100u16.to_le_bytes());
+        buffer[28..30].copy_from_slice(&50u16.to_le_bytes());
+        let base64 = super::base64_encode(&buffer);
+        let dims = get_webp_dimensions(&base64).expect("webp vp8 dims");
+        assert_eq!(dims, ImageDimensions { width_px: 100, height_px: 50 });
+    }
+
+    #[test]
+    fn webp_dimensions_vp8l_parsed() {
+        let mut buffer = vec![0u8; 30];
+        buffer[0..4].copy_from_slice(b"RIFF");
+        buffer[8..12].copy_from_slice(b"WEBP");
+        buffer[12..16].copy_from_slice(b"VP8L");
+        let width = 10u32;
+        let height = 5u32;
+        let bits = (width - 1) | ((height - 1) << 14);
+        buffer[21..25].copy_from_slice(&bits.to_le_bytes());
+        let base64 = super::base64_encode(&buffer);
+        let dims = get_webp_dimensions(&base64).expect("webp vp8l dims");
+        assert_eq!(dims, ImageDimensions { width_px: 10, height_px: 5 });
+    }
+
+    #[test]
+    fn webp_dimensions_vp8x_parsed() {
+        let mut buffer = vec![0u8; 30];
+        buffer[0..4].copy_from_slice(b"RIFF");
+        buffer[8..12].copy_from_slice(b"WEBP");
+        buffer[12..16].copy_from_slice(b"VP8X");
+        let width = 300u32;
+        let height = 200u32;
+        buffer[24] = ((width - 1) & 0xff) as u8;
+        buffer[25] = (((width - 1) >> 8) & 0xff) as u8;
+        buffer[26] = (((width - 1) >> 16) & 0xff) as u8;
+        buffer[27] = ((height - 1) & 0xff) as u8;
+        buffer[28] = (((height - 1) >> 8) & 0xff) as u8;
+        buffer[29] = (((height - 1) >> 16) & 0xff) as u8;
+        let base64 = super::base64_encode(&buffer);
+        let dims = get_webp_dimensions(&base64).expect("webp vp8x dims");
+        assert_eq!(dims, ImageDimensions { width_px: 300, height_px: 200 });
+    }
+
+    #[test]
+    fn image_dimensions_dispatches_on_mime() {
+        let mut buffer = vec![0u8; 24];
+        buffer[0] = 0x89;
+        buffer[1] = 0x50;
+        buffer[2] = 0x4e;
+        buffer[3] = 0x47;
+        buffer[16..20].copy_from_slice(&12u32.to_be_bytes());
+        buffer[20..24].copy_from_slice(&34u32.to_be_bytes());
+        let base64 = super::base64_encode(&buffer);
+        let dims = get_image_dimensions(&base64, "image/png").expect("png dims");
+        assert_eq!(dims, ImageDimensions { width_px: 12, height_px: 34 });
+    }
+
+    #[test]
+    fn calculate_image_rows_scales() {
+        let rows = super::calculate_image_rows(
+            ImageDimensions {
+                width_px: 100,
+                height_px: 50,
+            },
+            10,
+            Some(CellDimensions {
+                width_px: 10,
+                height_px: 10,
+            }),
+        );
+        assert_eq!(rows, 5);
+    }
+
+    #[test]
+    fn calculate_rows_and_render_image_kitty() {
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _term_program = set_env_guard("TERM_PROGRAM", Some("kitty"));
+        let _kitty = set_env_guard("KITTY_WINDOW_ID", Some("1"));
+        let _wezterm = set_env_guard("WEZTERM_PANE", None);
+        let _iterm = set_env_guard("ITERM_SESSION_ID", None);
+        let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
+        super::reset_capabilities_cache();
+
+        let original = get_cell_dimensions();
+        set_cell_dimensions(CellDimensions {
+            width_px: 10,
+            height_px: 10,
+        });
+
+        let dims = ImageDimensions {
+            width_px: 100,
+            height_px: 50,
+        };
+        let options = ImageRenderOptions {
+            max_width_cells: Some(10),
+            max_height_cells: None,
+            preserve_aspect_ratio: None,
+            image_id: Some(9),
+        };
+        let result = render_image("AAAA", dims, &options).expect("kitty render");
+        assert!(result.sequence.starts_with("\x1b_G"));
+        assert_eq!(result.rows, 5);
+        assert_eq!(result.image_id, Some(9));
+
+        set_cell_dimensions(original);
+        super::reset_capabilities_cache();
+    }
+
+    #[test]
+    fn render_image_iterm2_and_fallback() {
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _term_program = set_env_guard("TERM_PROGRAM", Some("iterm.app"));
+        let _kitty = set_env_guard("KITTY_WINDOW_ID", None);
+        let _wezterm = set_env_guard("WEZTERM_PANE", None);
+        let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
+        super::reset_capabilities_cache();
+
+        let dims = ImageDimensions {
+            width_px: 200,
+            height_px: 100,
+        };
+        let options = ImageRenderOptions {
+            max_width_cells: Some(20),
+            max_height_cells: None,
+            preserve_aspect_ratio: Some(false),
+            image_id: None,
+        };
+        let result = render_image("AAAA", dims, &options).expect("iterm render");
+        assert!(result.sequence.starts_with("\x1b]1337;File="));
+        assert!(result.sequence.contains("width=20;height=auto"));
+        assert!(result.sequence.contains("preserveAspectRatio=0"));
+        assert_eq!(result.rows, 5);
+        assert_eq!(result.image_id, None);
+
+        let fallback = image_fallback("image/png", Some(dims), Some("file.png"));
+        assert_eq!(fallback, "[Image: file.png [image/png] 200x100]");
+
+        super::reset_capabilities_cache();
     }
 }
