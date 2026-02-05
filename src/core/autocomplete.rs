@@ -254,6 +254,24 @@ pub trait AutocompleteProvider {
         cursor_col: usize,
     ) -> Option<AutocompleteSuggestions>;
 
+    fn get_force_file_suggestions(
+        &self,
+        _lines: &[String],
+        _cursor_line: usize,
+        _cursor_col: usize,
+    ) -> Option<AutocompleteSuggestions> {
+        None
+    }
+
+    fn should_trigger_file_completion(
+        &self,
+        _lines: &[String],
+        _cursor_line: usize,
+        _cursor_col: usize,
+    ) -> bool {
+        true
+    }
+
     fn get_suggestions_async(
         &self,
         _lines: Vec<String>,
@@ -738,6 +756,24 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         }
 
         None
+    }
+
+    fn get_force_file_suggestions(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+    ) -> Option<AutocompleteSuggestions> {
+        CombinedAutocompleteProvider::get_force_file_suggestions(self, lines, cursor_line, cursor_col)
+    }
+
+    fn should_trigger_file_completion(
+        &self,
+        lines: &[String],
+        cursor_line: usize,
+        cursor_col: usize,
+    ) -> bool {
+        CombinedAutocompleteProvider::should_trigger_file_completion(self, lines, cursor_line, cursor_col)
     }
 
     fn get_suggestions_async(

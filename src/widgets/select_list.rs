@@ -1,5 +1,7 @@
 //! SelectList widget (Phase 20).
 
+use std::sync::Arc;
+
 use crate::core::component::Component;
 use crate::core::keybindings::{get_editor_keybindings, EditorAction};
 use crate::render::utils::truncate_to_width;
@@ -38,12 +40,13 @@ impl SelectItem {
     }
 }
 
+#[derive(Clone)]
 pub struct SelectListTheme {
-    pub selected_prefix: Box<dyn Fn(&str) -> String>,
-    pub selected_text: Box<dyn Fn(&str) -> String>,
-    pub description: Box<dyn Fn(&str) -> String>,
-    pub scroll_info: Box<dyn Fn(&str) -> String>,
-    pub no_match: Box<dyn Fn(&str) -> String>,
+    pub selected_prefix: Arc<dyn Fn(&str) -> String>,
+    pub selected_text: Arc<dyn Fn(&str) -> String>,
+    pub description: Arc<dyn Fn(&str) -> String>,
+    pub scroll_info: Arc<dyn Fn(&str) -> String>,
+    pub no_match: Arc<dyn Fn(&str) -> String>,
 }
 
 pub struct SelectList {
@@ -264,14 +267,15 @@ mod tests {
     use crate::core::component::Component;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Arc;
 
     fn theme() -> SelectListTheme {
         SelectListTheme {
-            selected_prefix: Box::new(|text| text.to_string()),
-            selected_text: Box::new(|text| text.to_string()),
-            description: Box::new(|text| text.to_string()),
-            scroll_info: Box::new(|text| text.to_string()),
-            no_match: Box::new(|text| text.to_string()),
+            selected_prefix: Arc::new(|text| text.to_string()),
+            selected_text: Arc::new(|text| text.to_string()),
+            description: Arc::new(|text| text.to_string()),
+            scroll_info: Arc::new(|text| text.to_string()),
+            no_match: Arc::new(|text| text.to_string()),
         }
     }
 
