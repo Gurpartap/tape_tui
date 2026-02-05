@@ -954,14 +954,45 @@ impl Editor {
                     continue;
                 }
 
-                if let Some(close_rel) = bytes[cursor..].iter().position(|b| *b == b']') {
-                    let end = cursor + close_rel;
+                let mut cursor = cursor;
+                let mut valid_suffix = true;
+                if cursor < bytes.len() && bytes[cursor] == b' ' {
+                    cursor += 1;
+                    if cursor < bytes.len() && bytes[cursor] == b'+' {
+                        cursor += 1;
+                        let digits_start = cursor;
+                        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                            cursor += 1;
+                        }
+                        if digits_start == cursor {
+                            valid_suffix = false;
+                        } else if bytes[cursor..].starts_with(b" lines") {
+                            cursor += b" lines".len();
+                        } else {
+                            valid_suffix = false;
+                        }
+                    } else {
+                        let digits_start = cursor;
+                        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                            cursor += 1;
+                        }
+                        if digits_start == cursor {
+                            valid_suffix = false;
+                        } else if bytes[cursor..].starts_with(b" chars") {
+                            cursor += b" chars".len();
+                        } else {
+                            valid_suffix = false;
+                        }
+                    }
+                }
+
+                if valid_suffix && cursor < bytes.len() && bytes[cursor] == b']' {
                     if let Some(content) = self.pastes.get(&paste_id) {
                         result.push_str(content);
                     } else {
-                        result.push_str(&input[start..=end]);
+                        result.push_str(&input[start..=cursor]);
                     }
-                    idx = end + 1;
+                    idx = cursor + 1;
                     continue;
                 }
             }
