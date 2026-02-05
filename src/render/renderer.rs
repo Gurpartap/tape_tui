@@ -26,6 +26,18 @@ impl DiffRenderer {
         Self::default()
     }
 
+    pub fn hardware_cursor_row(&self) -> usize {
+        self.hardware_cursor_row
+    }
+
+    pub fn set_hardware_cursor_row(&mut self, row: usize) {
+        self.hardware_cursor_row = row;
+    }
+
+    pub fn previous_lines_len(&self) -> usize {
+        self.previous_lines.len()
+    }
+
     fn full_render(
         &mut self,
         term: &mut dyn Terminal,

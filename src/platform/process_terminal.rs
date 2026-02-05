@@ -643,13 +643,14 @@ impl Terminal for ProcessTerminal {
 #[cfg(all(test, unix))]
 mod tests {
     use std::io;
-    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use super::{
         get_termios, poll_readable, ProcessTerminal, StopTestHooks, BRACKETED_PASTE_DISABLE,
         BRACKETED_PASTE_ENABLE,
     };
+    use crate::core::input::kitty_test_lock;
     use crate::core::terminal::Terminal;
 
     #[cfg(unix)]
@@ -667,11 +668,6 @@ mod tests {
                 libc::close(self.slave);
             }
         }
-    }
-
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn open_pty() -> Pty {
@@ -737,7 +733,7 @@ mod tests {
 
     #[test]
     fn pty_bracketed_paste_toggles_on_start_stop() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
 
         let mut terminal = ProcessTerminal::new();
@@ -763,7 +759,7 @@ mod tests {
 
     #[test]
     fn drain_input_returns_within_limits() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
 
         let mut terminal = ProcessTerminal::new();
@@ -785,7 +781,7 @@ mod tests {
 
     #[test]
     fn tcflush_runs_before_raw_mode_restore() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
         let original = get_termios(pty.slave);
 
@@ -882,7 +878,7 @@ mod tests {
 
     #[test]
     fn bracketed_paste_is_rewrapped_for_input_handler() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
 
         let (tx, rx) = mpsc::channel();

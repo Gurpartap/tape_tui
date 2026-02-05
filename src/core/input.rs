@@ -2,6 +2,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 static KITTY_PROTOCOL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_kitty_protocol_active(active: bool) {
@@ -10,6 +13,12 @@ pub fn set_kitty_protocol_active(active: bool) {
 
 pub fn is_kitty_protocol_active() -> bool {
     KITTY_PROTOCOL_ACTIVE.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn kitty_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 const MOD_SHIFT: u8 = 1;
@@ -982,18 +991,11 @@ const LEGACY_CTRL_END: [&str; 1] = ["\x1b[8^"];
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
-    use super::{is_key_release, matches_key, parse_key, set_kitty_protocol_active};
-
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use super::{is_key_release, kitty_test_lock, matches_key, parse_key, set_kitty_protocol_active};
 
     #[test]
     fn kitty_shift_enter_vs_alt_enter() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         set_kitty_protocol_active(true);
         assert_eq!(parse_key("\x1b\r"), Some("shift+enter".to_string()));
         assert_eq!(parse_key("\n"), Some("shift+enter".to_string()));
@@ -1004,14 +1006,14 @@ mod tests {
 
     #[test]
     fn modify_other_keys_matches_when_kitty_inactive() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b[27;2;13~", "shift+enter"));
     }
 
     #[test]
     fn base_layout_fallback_for_non_latin_only() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         set_kitty_protocol_active(true);
         assert_eq!(parse_key("\x1b[1089::99;5u"), Some("ctrl+c".to_string()));
         assert_eq!(parse_key("\x1b[99::118;5u"), Some("ctrl+c".to_string()));
@@ -1019,7 +1021,7 @@ mod tests {
 
     #[test]
     fn key_release_ignores_paste() {
-        let _guard = test_lock().lock().expect("test lock poisoned");
+        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         assert!(!is_key_release("\x1b[200~90:62:3F\x1b[201~"));
         assert!(is_key_release("\x1b[65;1:3u"));
     }
