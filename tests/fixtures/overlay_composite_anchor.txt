@@ -1,0 +1,5 @@
+base
+
+
+
+       \x1b[0m\x1b]8;;\x07\x1b[31mX\x1b[0m  \x1b[0m\x1b]8;;\x07

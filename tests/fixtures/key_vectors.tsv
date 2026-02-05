@@ -1,0 +1,12 @@
+# kind	kitty	input	expected
+parse	1	\x1b\r	shift+enter
+parse	0	\x1b\r	alt+enter
+parse	0	\x1b[A	up
+parse	1	\x1b[1089::99;5u	ctrl+c
+parse	1	\x1b[99::118;5u	ctrl+c
+match	0	\x1b[27;2;13~	shift+enter	true
+match	0	\x1b[A	up	true
+match	1	\x1b[1;5A	ctrl+up	true
+match	1	\x1b[1089::99;5u	ctrl+c	true
+match	1	\x1b[99::118;5u	ctrl+v	false
+match	0	\x1b\r	alt+enter	true
