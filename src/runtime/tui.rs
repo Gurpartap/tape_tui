@@ -10,6 +10,7 @@ use crate::core::component::Component;
 use crate::core::input::{is_key_release, matches_key};
 use crate::core::terminal::Terminal;
 use crate::core::terminal_image::{get_capabilities, is_image_line, set_cell_dimensions, CellDimensions};
+use crate::render::overlay::{composite_overlays, resolve_overlay_layout, OverlayOptions, RenderedOverlay};
 use crate::render::renderer::DiffRenderer;
 use crate::runtime::focus::FocusState;
 use crate::runtime::ime::{extract_cursor_position, position_hardware_cursor};
@@ -19,6 +20,7 @@ pub struct TuiRuntime<T: Terminal> {
     root: Rc<RefCell<Box<dyn Component>>>,
     renderer: DiffRenderer,
     focus: FocusState,
+    overlays: Rc<RefCell<OverlayState>>,
     on_debug: Option<Box<dyn FnMut()>>,
     clear_on_shrink: bool,
     show_hardware_cursor: bool,
@@ -30,6 +32,64 @@ pub struct TuiRuntime<T: Terminal> {
     cell_size_query_pending: bool,
 }
 
+#[derive(Default)]
+struct OverlayState {
+    entries: Vec<OverlayEntry>,
+    next_id: u64,
+    dirty: bool,
+    pending_pre_focus: Option<Rc<RefCell<Box<dyn Component>>>>,
+}
+
+struct OverlayEntry {
+    id: u64,
+    component: Rc<RefCell<Box<dyn Component>>>,
+    options: Option<OverlayOptions>,
+    pre_focus: Option<Rc<RefCell<Box<dyn Component>>>>,
+    hidden: bool,
+}
+
+pub struct OverlayHandle {
+    id: u64,
+    state: std::rc::Weak<RefCell<OverlayState>>,
+}
+
+impl OverlayHandle {
+    pub fn hide(&self) {
+        if let Some(state) = self.state.upgrade() {
+            let mut state = state.borrow_mut();
+            if let Some(index) = state.entries.iter().position(|entry| entry.id == self.id) {
+                let entry = state.entries.remove(index);
+                if let Some(pre_focus) = entry.pre_focus {
+                    state.pending_pre_focus = Some(pre_focus);
+                }
+                state.dirty = true;
+            }
+        }
+    }
+
+    pub fn set_hidden(&self, hidden: bool) {
+        if let Some(state) = self.state.upgrade() {
+            let mut state = state.borrow_mut();
+            if let Some(entry) = state.entries.iter_mut().find(|entry| entry.id == self.id) {
+                if entry.hidden != hidden {
+                    entry.hidden = hidden;
+                    state.dirty = true;
+                }
+            }
+        }
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        if let Some(state) = self.state.upgrade() {
+            let state = state.borrow();
+            if let Some(entry) = state.entries.iter().find(|entry| entry.id == self.id) {
+                return entry.hidden;
+            }
+        }
+        false
+    }
+}
+
 impl<T: Terminal> TuiRuntime<T> {
     pub fn new(terminal: T, root: Rc<RefCell<Box<dyn Component>>>) -> Self {
         let clear_on_shrink = env_flag("PI_CLEAR_ON_SHRINK");
@@ -39,6 +99,7 @@ impl<T: Terminal> TuiRuntime<T> {
             root,
             renderer: DiffRenderer::new(),
             focus: FocusState::new(),
+            overlays: Rc::new(RefCell::new(OverlayState::default())),
             on_debug: None,
             clear_on_shrink,
             show_hardware_cursor,
@@ -61,6 +122,56 @@ impl<T: Terminal> TuiRuntime<T> {
 
     pub fn clear_focus(&mut self) {
         self.focus.clear();
+    }
+
+    pub fn show_overlay(
+        &mut self,
+        component: Rc<RefCell<Box<dyn Component>>>,
+        options: Option<OverlayOptions>,
+    ) -> OverlayHandle {
+        let pre_focus = self.focus.focused();
+        let entry = OverlayEntry {
+            id: 0,
+            component: Rc::clone(&component),
+            options,
+            pre_focus,
+            hidden: false,
+        };
+        let visible = self.is_overlay_visible(&entry);
+        let mut state = self.overlays.borrow_mut();
+        let id = state.next_id;
+        state.next_id = state.next_id.wrapping_add(1);
+        let mut entry = entry;
+        entry.id = id;
+        state.entries.push(entry);
+        state.dirty = true;
+        drop(state);
+        if visible {
+            self.focus.set_focus(Some(component));
+        }
+        self.request_render();
+        OverlayHandle {
+            id,
+            state: Rc::downgrade(&self.overlays),
+        }
+    }
+
+    pub fn hide_overlay(&mut self) {
+        let mut state = self.overlays.borrow_mut();
+        let entry = state.entries.pop();
+        if entry.is_some() {
+            state.dirty = true;
+        }
+        drop(state);
+        if entry.is_some() {
+            self.reconcile_focus();
+            self.request_render();
+        }
+    }
+
+    pub fn has_overlay(&self) -> bool {
+        let state = self.overlays.borrow();
+        state.entries.iter().any(|entry| self.is_overlay_visible(entry))
     }
 
     pub fn start(&mut self) {
@@ -97,7 +208,13 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
 
+        if self.take_overlay_dirty() {
+            self.reconcile_focus();
+            self.request_render();
+        }
+
         if self.pending_resize.swap(false, Ordering::SeqCst) {
+            self.reconcile_focus();
             self.request_render();
         }
 
@@ -117,6 +234,8 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn handle_input(&mut self, data: &str) {
+        self.reconcile_focus();
+
         let mut data = data;
         let owned;
         if self.cell_size_query_pending {
@@ -171,12 +290,21 @@ impl<T: Terminal> TuiRuntime<T> {
     fn do_render(&mut self) {
         let width = self.terminal.columns() as usize;
         let height = self.terminal.rows() as usize;
-        let mut root = self.root.borrow_mut();
-        let mut lines = root.render(width);
+        self.reconcile_focus();
+        let mut lines = {
+            let mut root = self.root.borrow_mut();
+            root.render(width)
+        };
+
+        if self.has_overlay() {
+            lines = self.composite_overlay_lines(lines, width, height);
+        }
+
         let total_lines = lines.len();
         let cursor_pos = extract_cursor_position(&mut lines, height);
+        let has_overlays = self.has_overlay();
         self.renderer
-            .render(&mut self.terminal, lines, is_image_line, self.clear_on_shrink, false);
+            .render(&mut self.terminal, lines, is_image_line, self.clear_on_shrink, has_overlays);
 
         let updated_row = position_hardware_cursor(
             &mut self.terminal,
@@ -241,6 +369,127 @@ impl<T: Terminal> TuiRuntime<T> {
         self.cell_size_query_pending = false;
         Some(result)
     }
+
+    fn composite_overlay_lines(&mut self, lines: Vec<String>, width: usize, height: usize) -> Vec<String> {
+        let overlays = {
+            let state = self.overlays.borrow();
+            let mut rendered = Vec::new();
+            for entry in state.entries.iter() {
+                if !self.is_overlay_visible(entry) {
+                    continue;
+                }
+                let layout = resolve_overlay_layout(entry.options.as_ref(), 0, width, height);
+                let mut overlay_lines = entry
+                    .component
+                    .borrow_mut()
+                    .render(layout.width);
+                if let Some(max_height) = layout.max_height {
+                    if overlay_lines.len() > max_height {
+                        overlay_lines.truncate(max_height);
+                    }
+                }
+                let final_layout =
+                    resolve_overlay_layout(entry.options.as_ref(), overlay_lines.len(), width, height);
+                rendered.push(RenderedOverlay {
+                    lines: overlay_lines,
+                    row: final_layout.row,
+                    col: final_layout.col,
+                    width: final_layout.width,
+                });
+            }
+            rendered
+        };
+
+        composite_overlays(
+            lines,
+            &overlays,
+            width,
+            height,
+            self.renderer.max_lines_rendered(),
+            is_image_line,
+        )
+    }
+
+    fn is_overlay_visible(&self, entry: &OverlayEntry) -> bool {
+        if entry.hidden {
+            return false;
+        }
+        match entry.options.as_ref().and_then(|opt| opt.visible.as_ref()) {
+            Some(visible) => visible(self.terminal.columns() as usize, self.terminal.rows() as usize),
+            None => true,
+        }
+    }
+
+    fn reconcile_focus(&mut self) {
+        let focused = self.focus.focused();
+        if let Some(focused) = focused {
+            if let Some(pre_focus) = self.pre_focus_for_overlay(&focused) {
+                if !self.is_overlay_visible_for_component(&focused) {
+                    let next = self.topmost_visible_overlay().or(pre_focus);
+                    if let Some(next) = next {
+                        self.focus.set_focus(Some(next));
+                    } else if let Some(restore) = self.take_pending_pre_focus() {
+                        self.focus.set_focus(Some(restore));
+                    } else {
+                        self.focus.clear();
+                    }
+                }
+                return;
+            }
+        }
+
+        if let Some(topmost) = self.topmost_visible_overlay() {
+            self.focus.set_focus(Some(topmost));
+        } else if let Some(restore) = self.take_pending_pre_focus() {
+            self.focus.set_focus(Some(restore));
+        }
+    }
+
+    fn topmost_visible_overlay(&self) -> Option<Rc<RefCell<Box<dyn Component>>>> {
+        let state = self.overlays.borrow();
+        for entry in state.entries.iter().rev() {
+            if self.is_overlay_visible(entry) {
+                return Some(Rc::clone(&entry.component));
+            }
+        }
+        None
+    }
+
+    fn pre_focus_for_overlay(
+        &self,
+        component: &Rc<RefCell<Box<dyn Component>>>,
+    ) -> Option<Option<Rc<RefCell<Box<dyn Component>>>>> {
+        let state = self.overlays.borrow();
+        state
+            .entries
+            .iter()
+            .find(|entry| Rc::ptr_eq(&entry.component, component))
+            .map(|entry| entry.pre_focus.clone())
+    }
+
+    fn is_overlay_visible_for_component(&self, component: &Rc<RefCell<Box<dyn Component>>>) -> bool {
+        let state = self.overlays.borrow();
+        if let Some(entry) = state
+            .entries
+            .iter()
+            .find(|entry| Rc::ptr_eq(&entry.component, component))
+        {
+            return self.is_overlay_visible(entry);
+        }
+        false
+    }
+
+    fn take_overlay_dirty(&mut self) -> bool {
+        let mut state = self.overlays.borrow_mut();
+        let dirty = state.dirty;
+        state.dirty = false;
+        dirty
+    }
+
+    fn take_pending_pre_focus(&mut self) -> Option<Rc<RefCell<Box<dyn Component>>>> {
+        let mut state = self.overlays.borrow_mut();
+        state.pending_pre_focus.take()
+    }
 }
 
 fn env_flag(name: &str) -> bool {
@@ -297,17 +546,30 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_cell_size_response, TuiRuntime};
+    use super::{find_cell_size_response, OverlayOptions, TuiRuntime};
     use crate::core::component::Component;
     use crate::core::terminal_image::{get_cell_dimensions, reset_capabilities_cache};
     use crate::core::terminal::Terminal;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::atomic::Ordering;
     use std::sync::{Mutex, OnceLock};
 
     #[derive(Default)]
     struct TestTerminal {
         output: String,
+        columns: u16,
+        rows: u16,
+    }
+
+    impl TestTerminal {
+        fn new(columns: u16, rows: u16) -> Self {
+            Self {
+                output: String::new(),
+                columns,
+                rows,
+            }
+        }
     }
 
     impl Terminal for TestTerminal {
@@ -318,10 +580,10 @@ mod tests {
             self.output.push_str(data);
         }
         fn columns(&self) -> u16 {
-            80
+            if self.columns == 0 { 80 } else { self.columns }
         }
         fn rows(&self) -> u16 {
-            24
+            if self.rows == 0 { 24 } else { self.rows }
         }
         fn kitty_protocol_active(&self) -> bool {
             false
@@ -368,13 +630,19 @@ mod tests {
     struct TestComponent {
         inputs: Rc<RefCell<Vec<String>>>,
         wants_release: bool,
+        focused: Rc<RefCell<bool>>,
     }
 
     impl TestComponent {
-        fn new(wants_release: bool, inputs: Rc<RefCell<Vec<String>>>) -> Self {
+        fn new(
+            wants_release: bool,
+            inputs: Rc<RefCell<Vec<String>>>,
+            focused: Rc<RefCell<bool>>,
+        ) -> Self {
             Self {
                 inputs,
                 wants_release,
+                focused,
             }
         }
     }
@@ -391,6 +659,20 @@ mod tests {
         fn wants_key_release(&self) -> bool {
             self.wants_release
         }
+
+        fn as_focusable(&mut self) -> Option<&mut dyn crate::core::component::Focusable> {
+            Some(self)
+        }
+    }
+
+    impl crate::core::component::Focusable for TestComponent {
+        fn set_focused(&mut self, focused: bool) {
+            *self.focused.borrow_mut() = focused;
+        }
+
+        fn is_focused(&self) -> bool {
+            *self.focused.borrow()
+        }
     }
 
     #[test]
@@ -401,7 +683,8 @@ mod tests {
         let mut runtime = TuiRuntime::new(terminal, root);
 
         let inputs = Rc::new(RefCell::new(Vec::new()));
-        let component = TestComponent::new(false, Rc::clone(&inputs));
+        let focused = Rc::new(RefCell::new(false));
+        let component = TestComponent::new(false, Rc::clone(&inputs), focused);
         let component_handle: Rc<RefCell<Box<dyn Component>>> =
             Rc::new(RefCell::new(Box::new(component)));
         runtime.set_focus(component_handle);
@@ -409,7 +692,9 @@ mod tests {
         assert!(inputs.borrow().is_empty());
 
         let inputs_release = Rc::new(RefCell::new(Vec::new()));
-        let component_release = TestComponent::new(true, Rc::clone(&inputs_release));
+        let focused_release = Rc::new(RefCell::new(false));
+        let component_release =
+            TestComponent::new(true, Rc::clone(&inputs_release), focused_release);
         let component_release_handle: Rc<RefCell<Box<dyn Component>>> =
             Rc::new(RefCell::new(Box::new(component_release)));
         runtime.set_focus(component_release_handle);
@@ -454,6 +739,70 @@ mod tests {
 
         std::env::remove_var("TERM_PROGRAM");
         reset_capabilities_cache();
+    }
+
+    #[test]
+    fn overlay_focus_handoff_and_restore() {
+        let terminal = TestTerminal::new(80, 24);
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::new(RefCell::new(Vec::new())), Rc::clone(&root_focus));
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(root_component)));
+        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+
+        runtime.start();
+        runtime.set_focus(Rc::clone(&root));
+        assert!(*root_focus.borrow());
+
+        let overlay_focus = Rc::new(RefCell::new(false));
+        let overlay_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&overlay_focus),
+        );
+        let overlay: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(overlay_component)));
+        let handle = runtime.show_overlay(Rc::clone(&overlay), None);
+        runtime.run_once();
+        assert!(*overlay_focus.borrow());
+
+        handle.hide();
+        runtime.run_once();
+        assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn overlay_visibility_callback_on_resize() {
+        let terminal = TestTerminal::new(5, 10);
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::new(RefCell::new(Vec::new())), Rc::clone(&root_focus));
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(root_component)));
+        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        runtime.start();
+        runtime.set_focus(Rc::clone(&root));
+
+        let overlay_focus = Rc::new(RefCell::new(false));
+        let overlay_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&overlay_focus),
+        );
+        let overlay: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(overlay_component)));
+        let mut options = OverlayOptions::default();
+        options.visible = Some(Box::new(|w, _| w >= 10));
+
+        runtime.show_overlay(Rc::clone(&overlay), Some(options));
+        runtime.run_once();
+        assert!(!*overlay_focus.borrow());
+
+        runtime.terminal.columns = 20;
+        runtime.pending_resize.store(true, Ordering::SeqCst);
+        runtime.run_once();
+        assert!(*overlay_focus.borrow());
     }
 
     fn env_test_lock() -> &'static Mutex<()> {

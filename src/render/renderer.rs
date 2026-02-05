@@ -38,6 +38,10 @@ impl DiffRenderer {
         self.previous_lines.len()
     }
 
+    pub fn max_lines_rendered(&self) -> usize {
+        self.max_lines_rendered
+    }
+
     fn full_render(
         &mut self,
         term: &mut dyn Terminal,
