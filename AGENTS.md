@@ -19,6 +19,7 @@
 
 ## Implementation Constraints
 - Maintain parity with pi-tui behavior and edge cases from `/Users/gurpartap/Projects/github.com/badlogic/pi-mono/packages/tui`.
+- Backward compatibility or legacy migrations are not required.
 - Avoid cyclic dependencies between modules.
 - No dynamic imports or runtime codegen.
 
