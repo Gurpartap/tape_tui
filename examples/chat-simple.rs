@@ -26,6 +26,46 @@ const RESPONSES: [&str; 8] = [
     "Thanks for sharing that.",
 ];
 
+fn ansi_wrap(text: &str, prefix: &str, suffix: &str) -> String {
+    format!("{prefix}{text}{suffix}")
+}
+
+fn dim(text: &str) -> String {
+    ansi_wrap(text, "\x1b[2m", "\x1b[22m")
+}
+
+fn bold(text: &str) -> String {
+    ansi_wrap(text, "\x1b[1m", "\x1b[22m")
+}
+
+fn italic(text: &str) -> String {
+    ansi_wrap(text, "\x1b[3m", "\x1b[23m")
+}
+
+fn underline(text: &str) -> String {
+    ansi_wrap(text, "\x1b[4m", "\x1b[24m")
+}
+
+fn strikethrough(text: &str) -> String {
+    ansi_wrap(text, "\x1b[9m", "\x1b[29m")
+}
+
+fn blue(text: &str) -> String {
+    ansi_wrap(text, "\x1b[34m", "\x1b[39m")
+}
+
+fn cyan(text: &str) -> String {
+    ansi_wrap(text, "\x1b[36m", "\x1b[39m")
+}
+
+fn yellow(text: &str) -> String {
+    ansi_wrap(text, "\x1b[33m", "\x1b[39m")
+}
+
+fn green(text: &str) -> String {
+    ansi_wrap(text, "\x1b[32m", "\x1b[39m")
+}
+
 struct PendingResponse {
     due: Instant,
     message: String,
@@ -168,33 +208,33 @@ impl Component for DummyComponent {
 
 fn editor_theme() -> EditorTheme {
     EditorTheme {
-        border_color: Box::new(|text| text.to_string()),
+        border_color: Box::new(|text| dim(text)),
         select_list: SelectListTheme {
-            selected_prefix: std::sync::Arc::new(|text| text.to_string()),
-            selected_text: std::sync::Arc::new(|text| text.to_string()),
-            description: std::sync::Arc::new(|text| text.to_string()),
-            scroll_info: std::sync::Arc::new(|text| text.to_string()),
-            no_match: std::sync::Arc::new(|text| text.to_string()),
+            selected_prefix: std::sync::Arc::new(|text| blue(text)),
+            selected_text: std::sync::Arc::new(|text| bold(text)),
+            description: std::sync::Arc::new(|text| dim(text)),
+            scroll_info: std::sync::Arc::new(|text| dim(text)),
+            no_match: std::sync::Arc::new(|text| dim(text)),
         },
     }
 }
 
 fn markdown_theme() -> MarkdownTheme {
     MarkdownTheme {
-        heading: Box::new(|text| text.to_string()),
-        link: Box::new(|text| text.to_string()),
-        link_url: Box::new(|text| text.to_string()),
-        code: Box::new(|text| text.to_string()),
-        code_block: Box::new(|text| text.to_string()),
-        code_block_border: Box::new(|text| text.to_string()),
-        quote: Box::new(|text| text.to_string()),
-        quote_border: Box::new(|text| text.to_string()),
-        hr: Box::new(|text| text.to_string()),
-        list_bullet: Box::new(|text| text.to_string()),
-        bold: Box::new(|text| text.to_string()),
-        italic: Box::new(|text| text.to_string()),
-        strikethrough: Box::new(|text| text.to_string()),
-        underline: Box::new(|text| text.to_string()),
+        heading: Box::new(|text| cyan(text)),
+        link: Box::new(|text| blue(text)),
+        link_url: Box::new(|text| dim(text)),
+        code: Box::new(|text| yellow(text)),
+        code_block: Box::new(|text| green(text)),
+        code_block_border: Box::new(|text| dim(text)),
+        quote: Box::new(|text| italic(text)),
+        quote_border: Box::new(|text| dim(text)),
+        hr: Box::new(|text| dim(text)),
+        list_bullet: Box::new(|text| cyan(text)),
+        bold: Box::new(|text| bold(text)),
+        italic: Box::new(|text| italic(text)),
+        strikethrough: Box::new(|text| strikethrough(text)),
+        underline: Box::new(|text| underline(text)),
         highlight_code: None,
         code_block_indent: None,
     }
@@ -280,8 +320,8 @@ fn main() {
 
         let loader = Loader::new(
             render_for_submit.clone(),
-            Box::new(|text| text.to_string()),
-            Box::new(|text| text.to_string()),
+            Box::new(|text| cyan(text)),
+            Box::new(|text| dim(text)),
             Some("Thinking...".to_string()),
         );
         state.loader = Some(loader);
