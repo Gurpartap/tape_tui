@@ -11,6 +11,9 @@ pub trait Component {
     /// Invalidate any cached state.
     fn invalidate(&mut self) {}
 
+    /// Provide the current terminal row count (optional).
+    fn set_terminal_rows(&mut self, _rows: usize) {}
+
     /// Whether this component wants key-release events.
     fn wants_key_release(&self) -> bool {
         false

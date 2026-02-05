@@ -686,7 +686,7 @@ impl Editor {
         self.state.lines = lines;
         self.state.cursor_line = self.state.lines.len().saturating_sub(1);
         let last_len = self.state.lines[self.state.cursor_line].len();
-        self.state.cursor_col = last_len;
+        self.set_cursor_col(last_len);
         self.scroll_offset = 0;
         let updated = self.get_text();
         if let Some(handler) = self.on_change.as_mut() {
@@ -852,6 +852,10 @@ impl Component for Editor {
         }
 
         result
+    }
+
+    fn set_terminal_rows(&mut self, rows: usize) {
+        Editor::set_terminal_rows(self, rows);
     }
 
     fn handle_input(&mut self, data: &str) {

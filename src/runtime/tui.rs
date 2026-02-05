@@ -309,6 +309,7 @@ impl<T: Terminal> TuiRuntime<T> {
         self.reconcile_focus();
         let mut lines = {
             let mut root = self.root.borrow_mut();
+            root.set_terminal_rows(height);
             root.render(width)
         };
 
@@ -395,10 +396,9 @@ impl<T: Terminal> TuiRuntime<T> {
                     continue;
                 }
                 let layout = resolve_overlay_layout(entry.options.as_ref(), 0, width, height);
-                let mut overlay_lines = entry
-                    .component
-                    .borrow_mut()
-                    .render(layout.width);
+                let mut component = entry.component.borrow_mut();
+                component.set_terminal_rows(height);
+                let mut overlay_lines = component.render(layout.width);
                 if let Some(max_height) = layout.max_height {
                     if overlay_lines.len() > max_height {
                         overlay_lines.truncate(max_height);
