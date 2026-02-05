@@ -457,4 +457,19 @@ mod tests {
         let output = term.take_output();
         assert!(output.contains("hello\x1b[0m\x1b]8;;\x07"));
     }
+
+    #[test]
+    fn image_lines_skip_width_check() {
+        let mut renderer = DiffRenderer::new();
+        let mut term = TestTerminal::new(5, 5);
+        let is_image = |line: &str| line.contains("\x1b_G");
+        renderer.render(&mut term, vec!["short".to_string()], is_image, false, false);
+        term.take_output();
+
+        let image_line = format!("\x1b_G{}", "X".repeat(100));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            renderer.render(&mut term, vec![image_line], is_image, false, false);
+        }));
+        assert!(result.is_ok());
+    }
 }

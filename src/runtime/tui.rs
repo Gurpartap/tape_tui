@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::core::component::Component;
 use crate::core::input::{is_key_release, matches_key};
 use crate::core::terminal::Terminal;
+use crate::core::terminal_image::{get_capabilities, is_image_line, set_cell_dimensions, CellDimensions};
 use crate::render::renderer::DiffRenderer;
 use crate::runtime::focus::FocusState;
 use crate::runtime::ime::{extract_cursor_position, position_hardware_cursor};
@@ -25,6 +26,8 @@ pub struct TuiRuntime<T: Terminal> {
     stopped: bool,
     pending_inputs: Arc<Mutex<Vec<String>>>,
     pending_resize: Arc<AtomicBool>,
+    input_buffer: String,
+    cell_size_query_pending: bool,
 }
 
 impl<T: Terminal> TuiRuntime<T> {
@@ -43,6 +46,8 @@ impl<T: Terminal> TuiRuntime<T> {
             stopped: true,
             pending_inputs: Arc::new(Mutex::new(Vec::new())),
             pending_resize: Arc::new(AtomicBool::new(false)),
+            input_buffer: String::new(),
+            cell_size_query_pending: false,
         }
     }
 
@@ -73,6 +78,7 @@ impl<T: Terminal> TuiRuntime<T> {
             }),
         );
         self.terminal.hide_cursor();
+        self.query_cell_size();
         self.request_render();
     }
 
@@ -111,6 +117,20 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn handle_input(&mut self, data: &str) {
+        let mut data = data;
+        let owned;
+        if self.cell_size_query_pending {
+            let filtered = self.filter_cell_size_response(data);
+            let Some(filtered) = filtered else {
+                return;
+            };
+            if filtered.is_empty() {
+                return;
+            }
+            owned = filtered;
+            data = &owned;
+        }
+
         if matches_key(data, "shift+ctrl+d") {
             if let Some(handler) = self.on_debug.as_mut() {
                 handler();
@@ -184,23 +204,106 @@ impl<T: Terminal> TuiRuntime<T> {
         self.terminal.write("\r\n");
         self.renderer.set_hardware_cursor_row(target_row);
     }
+
+    fn query_cell_size(&mut self) {
+        if get_capabilities().images.is_none() {
+            return;
+        }
+        self.cell_size_query_pending = true;
+        self.terminal.write("\x1b[16t");
+    }
+
+    fn filter_cell_size_response(&mut self, data: &str) -> Option<String> {
+        self.input_buffer.push_str(data);
+
+        if let Some((start, end, height_px, width_px)) = find_cell_size_response(&self.input_buffer) {
+            if height_px > 0 && width_px > 0 {
+                set_cell_dimensions(CellDimensions {
+                    width_px,
+                    height_px,
+                });
+                {
+                    let mut root = self.root.borrow_mut();
+                    root.invalidate();
+                }
+                self.request_render();
+            }
+            self.input_buffer.replace_range(start..end, "");
+            self.cell_size_query_pending = false;
+        }
+
+        if self.cell_size_query_pending && is_partial_cell_size(&self.input_buffer) {
+            return None;
+        }
+
+        let result = self.input_buffer.clone();
+        self.input_buffer.clear();
+        self.cell_size_query_pending = false;
+        Some(result)
+    }
 }
 
 fn env_flag(name: &str) -> bool {
     env::var(name).map(|value| value == "1").unwrap_or(false)
 }
 
-fn is_image_line(_line: &str) -> bool {
-    false
+fn find_cell_size_response(buffer: &str) -> Option<(usize, usize, u32, u32)> {
+    let bytes = buffer.as_bytes();
+    let mut i = 0;
+    while i + 4 < bytes.len() {
+        if bytes[i] == 0x1b && bytes[i + 1] == b'[' && bytes[i + 2] == b'6' && bytes[i + 3] == b';' {
+            let mut j = i + 4;
+            let mut height: u32 = 0;
+            let mut has_height = false;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                height = height.saturating_mul(10).saturating_add((bytes[j] - b'0') as u32);
+                has_height = true;
+                j += 1;
+            }
+            if !has_height || j >= bytes.len() || bytes[j] != b';' {
+                i += 1;
+                continue;
+            }
+            j += 1;
+            let mut width: u32 = 0;
+            let mut has_width = false;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                width = width.saturating_mul(10).saturating_add((bytes[j] - b'0') as u32);
+                has_width = true;
+                j += 1;
+            }
+            if !has_width || j >= bytes.len() || bytes[j] != b't' {
+                i += 1;
+                continue;
+            }
+            return Some((i, j + 1, height, width));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_partial_cell_size(buffer: &str) -> bool {
+    let Some(start) = buffer.rfind("\x1b[6") else {
+        return false;
+    };
+    let tail = &buffer[start..];
+    if tail.contains('t') {
+        return false;
+    }
+    tail.chars()
+        .all(|ch| ch == '\x1b' || ch == '[' || ch == '6' || ch == ';' || ch.is_ascii_digit())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::TuiRuntime;
+    use super::{find_cell_size_response, TuiRuntime};
     use crate::core::component::Component;
+    use crate::core::terminal_image::{get_cell_dimensions, reset_capabilities_cache};
     use crate::core::terminal::Terminal;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::{Mutex, OnceLock};
 
     #[derive(Default)]
     struct TestTerminal {
@@ -238,6 +341,27 @@ mod tests {
     impl Component for DummyComponent {
         fn render(&mut self, _width: usize) -> Vec<String> {
             Vec::new()
+        }
+    }
+
+    #[derive(Default)]
+    struct RenderState {
+        renders: usize,
+        invalidates: usize,
+    }
+
+    struct CountingComponent {
+        state: Rc<RefCell<RenderState>>,
+    }
+
+    impl Component for CountingComponent {
+        fn render(&mut self, _width: usize) -> Vec<String> {
+            self.state.borrow_mut().renders += 1;
+            Vec::new()
+        }
+
+        fn invalidate(&mut self) {
+            self.state.borrow_mut().invalidates += 1;
         }
     }
 
@@ -291,5 +415,49 @@ mod tests {
         runtime.set_focus(component_release_handle);
         runtime.handle_input("\x1b[32:3u");
         assert_eq!(inputs_release.borrow().len(), 1);
+    }
+
+    #[test]
+    fn parse_cell_size_response_extracts_dimensions() {
+        let data = "\x1b[6;18;9t";
+        let parsed = find_cell_size_response(data);
+        assert_eq!(parsed, Some((0, data.len(), 18, 9)));
+    }
+
+    #[test]
+    fn cell_size_query_triggers_invalidate_and_render() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        reset_capabilities_cache();
+        std::env::set_var("TERM_PROGRAM", "kitty");
+
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start();
+        assert!(runtime.terminal.output.contains("\x1b[16t"));
+        runtime.render_if_needed();
+        assert_eq!(state.borrow().renders, 1);
+
+        runtime.handle_input("\x1b[6;20;10t");
+        runtime.render_if_needed();
+        assert_eq!(state.borrow().invalidates, 1);
+        assert_eq!(state.borrow().renders, 2);
+
+        let dims = get_cell_dimensions();
+        assert_eq!(dims.width_px, 10);
+        assert_eq!(dims.height_px, 20);
+
+        std::env::remove_var("TERM_PROGRAM");
+        reset_capabilities_cache();
+    }
+
+    fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 }
