@@ -344,10 +344,18 @@ impl Component for SettingsList {
         }
 
         let kb = get_editor_keybindings();
-        let kb = kb.lock().expect("editor keybindings lock poisoned");
+        let (select_up, select_down, select_confirm, select_cancel) = {
+            let kb = kb.lock().expect("editor keybindings lock poisoned");
+            (
+                kb.matches(data, EditorAction::SelectUp),
+                kb.matches(data, EditorAction::SelectDown),
+                kb.matches(data, EditorAction::SelectConfirm),
+                kb.matches(data, EditorAction::SelectCancel),
+            )
+        };
 
         let display_len = self.display_len();
-        if kb.matches(data, EditorAction::SelectUp) {
+        if select_up {
             if display_len == 0 {
                 return;
             }
@@ -356,7 +364,7 @@ impl Component for SettingsList {
             } else {
                 self.selected_index - 1
             };
-        } else if kb.matches(data, EditorAction::SelectDown) {
+        } else if select_down {
             if display_len == 0 {
                 return;
             }
@@ -365,9 +373,9 @@ impl Component for SettingsList {
             } else {
                 self.selected_index + 1
             };
-        } else if kb.matches(data, EditorAction::SelectConfirm) || data == " " {
+        } else if select_confirm || data == " " {
             self.activate_item();
-        } else if kb.matches(data, EditorAction::SelectCancel) {
+        } else if select_cancel {
             (self.on_cancel)();
         } else if self.search_enabled {
             let query = if let Some(search_input) = self.search_input.as_mut() {

@@ -789,6 +789,7 @@ mod tests {
     #[test]
     fn calculate_rows_and_render_image_kitty() {
         let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _term = set_env_guard("TERM", Some("xterm-256color"));
         let _term_program = set_env_guard("TERM_PROGRAM", Some("kitty"));
         let _kitty = set_env_guard("KITTY_WINDOW_ID", Some("1"));
         let _wezterm = set_env_guard("WEZTERM_PANE", None);
@@ -824,6 +825,7 @@ mod tests {
     #[test]
     fn render_image_iterm2_and_fallback() {
         let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _term = set_env_guard("TERM", Some("xterm-256color"));
         let _term_program = set_env_guard("TERM_PROGRAM", Some("iterm.app"));
         let _kitty = set_env_guard("KITTY_WINDOW_ID", None);
         let _wezterm = set_env_guard("WEZTERM_PANE", None);
