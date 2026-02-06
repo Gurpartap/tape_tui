@@ -32,21 +32,100 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(unix)]
-fn write_fd(fd: c_int, data: &str) {
-    let bytes = data.as_bytes();
+fn wait_writable(fd: c_int) -> std::io::Result<()> {
+    let mut fds = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        let result = unsafe { libc::poll(&mut fds, 1, -1) };
+        if result < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        if result == 0 {
+            // Infinite timeout should not return 0, but avoid a tight loop if it does.
+            continue;
+        }
+        if (fds.revents & libc::POLLOUT) != 0 {
+            return Ok(());
+        }
+
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("poll(POLLOUT) returned revents=0x{:x}", fds.revents),
+        ));
+    }
+}
+
+#[cfg(unix)]
+fn write_all_fd_with<FWrite, FWait>(
+    fd: c_int,
+    bytes: &[u8],
+    mut write_once: FWrite,
+    mut wait_writable: FWait,
+) -> std::io::Result<()>
+where
+    FWrite: FnMut(c_int, &[u8]) -> std::io::Result<usize>,
+    FWait: FnMut(c_int) -> std::io::Result<()>,
+{
     let mut written = 0;
     while written < bytes.len() {
-        let result = unsafe {
-            libc::write(
-                fd,
-                bytes[written..].as_ptr() as *const libc::c_void,
-                bytes.len() - written,
-            )
-        };
-        if result <= 0 {
-            return;
+        match write_once(fd, &bytes[written..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write returned 0",
+                ));
+            }
+            Ok(count) => {
+                let remaining = bytes.len() - written;
+                if count > remaining {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "write returned more bytes than requested",
+                    ));
+                }
+                written += count;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {
+                continue;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                wait_writable(fd)?;
+            }
+            Err(err) => return Err(err),
         }
-        written += result as usize;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_fd(fd: c_int, data: &str) {
+    if data.is_empty() {
+        return;
+    }
+
+    let bytes = data.as_bytes();
+    let result = write_all_fd_with(
+        fd,
+        bytes,
+        |fd, buf| {
+            let result = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+            if result < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(result as usize)
+            }
+        },
+        wait_writable,
+    );
+    if let Err(err) = result {
+        panic!("failed to write to terminal: {err}");
     }
 }
 
@@ -552,7 +631,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use super::{get_termios, poll_readable, ProcessTerminal, StopTestHooks};
+    use super::{get_termios, poll_readable, write_all_fd_with, ProcessTerminal, StopTestHooks};
     use crate::core::terminal::Terminal;
 
     #[cfg(unix)]
@@ -800,5 +879,85 @@ mod tests {
         assert_eq!(received, "\x1b[200~hello\x1b[201~");
 
         terminal.stop();
+    }
+
+    #[test]
+    fn write_all_fd_with_retries_on_eintr_and_writes_all_bytes() {
+        let data = b"hello";
+        let mut out = Vec::new();
+        let mut calls = 0;
+        write_all_fd_with(
+            1,
+            data,
+            |_, buf| {
+                calls += 1;
+                match calls {
+                    1 => Err(io::Error::from(io::ErrorKind::Interrupted)),
+                    2 => {
+                        out.extend_from_slice(&buf[..2]);
+                        Ok(2)
+                    }
+                    _ => {
+                        out.extend_from_slice(buf);
+                        Ok(buf.len())
+                    }
+                }
+            },
+            |_| unreachable!("wait_writable should not be called for EINTR"),
+        )
+        .expect("write_all_fd_with failed");
+
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn write_all_fd_with_handles_partial_writes() {
+        let data = b"abcdefg";
+        let mut out = Vec::new();
+        let mut calls = 0;
+        write_all_fd_with(
+            1,
+            data,
+            |_, buf| {
+                calls += 1;
+                let count = buf.len().min(2);
+                out.extend_from_slice(&buf[..count]);
+                Ok(count)
+            },
+            |_| unreachable!("wait_writable should not be called for partial writes"),
+        )
+        .expect("write_all_fd_with failed");
+
+        assert_eq!(out, data);
+        assert!(calls > 1, "expected multiple writes, got {calls}");
+    }
+
+    #[test]
+    fn write_all_fd_with_waits_for_writable_on_would_block_and_retries() {
+        let data = b"xyz";
+        let mut out = Vec::new();
+        let mut calls = 0;
+        let events = std::cell::RefCell::new(Vec::new());
+        write_all_fd_with(
+            1,
+            data,
+            |_, buf| {
+                events.borrow_mut().push("write");
+                calls += 1;
+                if calls == 1 {
+                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                }
+                out.extend_from_slice(buf);
+                Ok(buf.len())
+            },
+            |_| {
+                events.borrow_mut().push("wait");
+                Ok(())
+            },
+        )
+        .expect("write_all_fd_with failed");
+
+        assert_eq!(out, data);
+        assert_eq!(events.into_inner(), vec!["write", "wait", "write"]);
     }
 }
