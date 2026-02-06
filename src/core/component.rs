@@ -7,15 +7,8 @@ pub trait Component {
     /// Render to a list of lines at the given width.
     fn render(&mut self, width: usize) -> Vec<String>;
 
-    /// Handle input events (raw key sequences).
-    fn handle_input(&mut self, _data: &str) {}
-
-    /// Handle input events (structured).
-    ///
-    /// Prefer overriding this method instead of `handle_input`.
-    fn handle_event(&mut self, event: &InputEvent) {
-        self.handle_input(&event.raw)
-    }
+    /// Handle input events.
+    fn handle_event(&mut self, _event: &InputEvent) {}
 
     /// Invalidate any cached state.
     fn invalidate(&mut self) {}

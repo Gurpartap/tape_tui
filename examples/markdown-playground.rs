@@ -238,15 +238,27 @@ impl Component for PaletteOverlay {
     }
 
     fn handle_event(&mut self, event: &InputEvent) {
-        if event.event_type == KeyEventType::Press {
-            if event.key_id.as_deref() == Some("ctrl+c") {
-                *self.exit_flag.borrow_mut() = true;
-                return;
-            }
-            if event.key_id.as_deref() == Some("ctrl+p") {
-                self.state.borrow_mut().action = Some(PaletteAction::Close);
-                return;
-            }
+        if matches!(
+            event,
+            InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
+            } if key_id == "ctrl+c"
+        ) {
+            *self.exit_flag.borrow_mut() = true;
+            return;
+        }
+        if matches!(
+            event,
+            InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
+            } if key_id == "ctrl+p"
+        ) {
+            self.state.borrow_mut().action = Some(PaletteAction::Close);
+            return;
         }
 
         self.list.handle_event(event);
@@ -283,15 +295,27 @@ impl Component for EditorWrapper {
     }
 
     fn handle_event(&mut self, event: &InputEvent) {
-        if event.event_type == KeyEventType::Press {
-            if event.key_id.as_deref() == Some("ctrl+c") {
-                *self.exit_flag.borrow_mut() = true;
-                return;
-            }
-            if event.key_id.as_deref() == Some("ctrl+p") {
-                self.palette.borrow_mut().toggle_requested = true;
-                return;
-            }
+        if matches!(
+            event,
+            InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
+            } if key_id == "ctrl+c"
+        ) {
+            *self.exit_flag.borrow_mut() = true;
+            return;
+        }
+        if matches!(
+            event,
+            InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
+            } if key_id == "ctrl+p"
+        ) {
+            self.palette.borrow_mut().toggle_requested = true;
+            return;
         }
 
         self.editor.borrow_mut().handle_event(event);

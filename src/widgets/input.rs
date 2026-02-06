@@ -7,8 +7,6 @@ use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whites
 use crate::core::text::width::visible_width;
 
 const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
-const PASTE_START: &str = "\x1b[200~";
-const PASTE_END: &str = "\x1b[201~";
 
 /// Single-line input component with horizontal scrolling.
 pub struct Input {
@@ -19,8 +17,6 @@ pub struct Input {
     keybindings: EditorKeybindingsHandle,
     on_submit: Option<Box<dyn FnMut(String)>>,
     on_escape: Option<Box<dyn FnMut()>>,
-    paste_buffer: String,
-    is_in_paste: bool,
 }
 
 impl Input {
@@ -33,8 +29,6 @@ impl Input {
             keybindings,
             on_submit: None,
             on_escape: None,
-            paste_buffer: String::new(),
-            is_in_paste: false,
         }
     }
 
@@ -189,35 +183,6 @@ impl Input {
             }
         }
     }
-
-    fn text_from_key_id(key_id: &str) -> Option<String> {
-        let lowered = key_id.to_ascii_lowercase();
-        let parts: Vec<&str> = lowered.split('+').collect();
-        let key = parts.last().copied().unwrap_or("");
-        let has_ctrl = parts.iter().any(|part| part.trim() == "ctrl");
-        let has_alt = parts.iter().any(|part| part.trim() == "alt");
-        let has_shift = parts.iter().any(|part| part.trim() == "shift");
-
-        if has_ctrl || has_alt {
-            return None;
-        }
-
-        if key == "space" {
-            return Some(" ".to_string());
-        }
-
-        let mut chars = key.chars();
-        let ch = chars.next()?;
-        if chars.next().is_some() {
-            return None;
-        }
-
-        if has_shift && ch.is_ascii_alphabetic() {
-            return Some(ch.to_ascii_uppercase().to_string());
-        }
-
-        Some(ch.to_string())
-    }
 }
 
 impl Component for Input {
@@ -315,35 +280,19 @@ impl Component for Input {
     fn handle_event(&mut self, event: &InputEvent) {
         self.clamp_cursor();
 
-        let mut data = event.raw.clone();
-
-        if data.contains(PASTE_START) {
-            self.is_in_paste = true;
-            self.paste_buffer.clear();
-            data = data.replacen(PASTE_START, "", 1);
-        }
-
-        if self.is_in_paste {
-            self.paste_buffer.push_str(&data);
-            if let Some(end_index) = self.paste_buffer.find(PASTE_END) {
-                let paste_content = self.paste_buffer[..end_index].to_string();
-                self.handle_paste(&paste_content);
-                self.is_in_paste = false;
-                let remaining = self.paste_buffer[end_index + PASTE_END.len()..].to_string();
-                self.paste_buffer.clear();
-                if !remaining.is_empty() {
-                    let follow_event = InputEvent {
-                        raw: remaining,
-                        key_id: None,
-                        event_type: event.event_type,
-                    };
-                    self.handle_event(&follow_event);
-                }
+        let key_id = match event {
+            InputEvent::Text { text, .. } => {
+                self.insert_text(text);
+                return;
             }
-            return;
-        }
+            InputEvent::Paste { text, .. } => {
+                self.handle_paste(text);
+                return;
+            }
+            InputEvent::Key { key_id, .. } => Some(key_id.as_str()),
+            _ => return,
+        };
 
-        let key_id = event.key_id.as_deref();
         let (
             is_cancel,
             is_submit,
@@ -472,21 +421,6 @@ impl Component for Input {
             self.move_word_forwards();
             return;
         }
-
-        let has_control_chars = data.chars().any(|ch| {
-            let code = ch as u32;
-            code < 32 || code == 0x7f || (code >= 0x80 && code <= 0x9f)
-        });
-
-        if has_control_chars {
-            if let Some(key_id) = key_id {
-                if let Some(text) = Self::text_from_key_id(key_id) {
-                    self.insert_text(&text);
-                }
-            }
-        } else {
-            self.insert_text(&data);
-        }
     }
 
     fn invalidate(&mut self) {
@@ -512,17 +446,13 @@ impl Focusable for Input {
 mod tests {
     use super::Input;
     use crate::core::component::Component;
-    use crate::core::input::{parse_key, KeyEventType};
-    use crate::core::input_event::InputEvent;
+    use crate::core::input_event::parse_input_events;
     use crate::default_editor_keybindings_handle;
 
     fn send(input: &mut Input, data: &str) {
-        let event = InputEvent {
-            raw: data.to_string(),
-            key_id: parse_key(data, false),
-            event_type: KeyEventType::Press,
-        };
-        input.handle_event(&event);
+        for event in parse_input_events(data, false) {
+            input.handle_event(&event);
+        }
     }
 
     #[test]

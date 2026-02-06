@@ -360,16 +360,20 @@ impl Component for SettingsList {
             return;
         }
 
+        let key_id = match event {
+            InputEvent::Key { key_id, .. } => Some(key_id.as_str()),
+            _ => None,
+        };
         let (select_up, select_down, select_confirm, select_cancel) = {
             let kb = self
                 .keybindings
                 .lock()
                 .expect("editor keybindings lock poisoned");
             (
-                kb.matches(event.key_id.as_deref(), EditorAction::SelectUp),
-                kb.matches(event.key_id.as_deref(), EditorAction::SelectDown),
-                kb.matches(event.key_id.as_deref(), EditorAction::SelectConfirm),
-                kb.matches(event.key_id.as_deref(), EditorAction::SelectCancel),
+                kb.matches(key_id, EditorAction::SelectUp),
+                kb.matches(key_id, EditorAction::SelectDown),
+                kb.matches(key_id, EditorAction::SelectConfirm),
+                kb.matches(key_id, EditorAction::SelectCancel),
             )
         };
 
@@ -392,27 +396,46 @@ impl Component for SettingsList {
             } else {
                 self.selected_index + 1
             };
-        } else if select_confirm || event.key_id.as_deref() == Some("space") {
+        } else if select_confirm
+            || key_id == Some("space")
+            || matches!(event, InputEvent::Text { text, .. } if text == " ")
+        {
             self.activate_item();
         } else if select_cancel {
             (self.on_cancel)();
         } else if self.search_enabled {
             let query = if let Some(search_input) = self.search_input.as_mut() {
-                let sanitized: String = event.raw.chars().filter(|ch| *ch != ' ').collect();
-                if sanitized.is_empty() {
-                    return;
+                match event {
+                    InputEvent::Text {
+                        text, event_type, ..
+                    } => {
+                        let sanitized: String = text.chars().filter(|ch| *ch != ' ').collect();
+                        if sanitized.is_empty() {
+                            return;
+                        }
+                        let sanitized_event = InputEvent::Text {
+                            raw: sanitized.clone(),
+                            text: sanitized,
+                            event_type: *event_type,
+                        };
+                        search_input.handle_event(&sanitized_event);
+                    }
+                    InputEvent::Paste { text, .. } => {
+                        let sanitized: String = text.chars().filter(|ch| *ch != ' ').collect();
+                        if sanitized.is_empty() {
+                            return;
+                        }
+                        let sanitized_event = InputEvent::Paste {
+                            raw: sanitized.clone(),
+                            text: sanitized,
+                        };
+                        search_input.handle_event(&sanitized_event);
+                    }
+                    InputEvent::Key { .. } => {
+                        search_input.handle_event(event);
+                    }
+                    _ => return,
                 }
-                let sanitized_key_id = if sanitized == event.raw {
-                    event.key_id.clone()
-                } else {
-                    None
-                };
-                let sanitized_event = InputEvent {
-                    raw: sanitized,
-                    key_id: sanitized_key_id,
-                    event_type: event.event_type,
-                };
-                search_input.handle_event(&sanitized_event);
                 Some(search_input.get_value().to_string())
             } else {
                 None
@@ -435,8 +458,7 @@ impl Component for SettingsList {
 mod tests {
     use super::{SettingItem, SettingsList, SettingsListOptions, SettingsListTheme, SubmenuDone};
     use crate::core::component::Component;
-    use crate::core::input::{parse_key, KeyEventType};
-    use crate::core::input_event::InputEvent;
+    use crate::core::input_event::{parse_input_events, InputEvent};
     use crate::default_editor_keybindings_handle;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -466,7 +488,7 @@ mod tests {
             vec!["submenu".to_string()]
         }
 
-        fn handle_input(&mut self, _data: &str) {
+        fn handle_event(&mut self, _event: &InputEvent) {
             if let Some(mut done) = self.done.take() {
                 done(Some("updated".to_string()));
             }
@@ -474,12 +496,9 @@ mod tests {
     }
 
     fn send(list: &mut SettingsList, data: &str) {
-        let event = InputEvent {
-            raw: data.to_string(),
-            key_id: parse_key(data, false),
-            event_type: KeyEventType::Press,
-        };
-        list.handle_event(&event);
+        for event in parse_input_events(data, false) {
+            list.handle_event(&event);
+        }
     }
 
     #[test]

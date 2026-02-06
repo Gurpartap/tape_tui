@@ -103,11 +103,15 @@ impl Component for CancellableLoader {
     }
 
     fn handle_event(&mut self, event: &InputEvent) {
+        let key_id = match event {
+            InputEvent::Key { key_id, .. } => Some(key_id.as_str()),
+            _ => None,
+        };
         let kb = self
             .keybindings
             .lock()
             .expect("editor keybindings lock poisoned");
-        if kb.matches(event.key_id.as_deref(), EditorAction::SelectCancel) {
+        if kb.matches(key_id, EditorAction::SelectCancel) {
             if !self.abort_signal.aborted.swap(true, Ordering::SeqCst) {
                 if let Some(handler) = self.on_abort.as_mut() {
                     handler();
@@ -125,8 +129,7 @@ impl Component for CancellableLoader {
 mod tests {
     use super::CancellableLoader;
     use crate::core::component::Component;
-    use crate::core::input::{parse_key, KeyEventType};
-    use crate::core::input_event::InputEvent;
+    use crate::core::input_event::parse_input_events;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -147,12 +150,9 @@ mod tests {
             aborted_flag_clone.store(true, Ordering::SeqCst);
         })));
 
-        let event = InputEvent {
-            raw: "\x1b".to_string(),
-            key_id: parse_key("\x1b", false),
-            event_type: KeyEventType::Press,
-        };
-        loader.handle_event(&event);
+        let events = parse_input_events("\x1b", false);
+        assert_eq!(events.len(), 1);
+        loader.handle_event(&events[0]);
 
         assert!(loader.aborted());
         assert!(aborted_flag.load(Ordering::SeqCst));

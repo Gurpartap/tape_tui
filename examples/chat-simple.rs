@@ -158,7 +158,7 @@ impl Component for EditorWrapper {
     }
 
     fn handle_event(&mut self, event: &InputEvent) {
-        if event.key_id.as_deref() == Some("ctrl+c") {
+        if matches!(event, InputEvent::Key { key_id, .. } if key_id == "ctrl+c") {
             *self.exit_flag.borrow_mut() = true;
             return;
         }

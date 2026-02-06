@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::core::component::Component;
-use crate::core::input::{is_key_release, is_key_repeat, parse_key, KeyEventType};
-use crate::core::input_event::InputEvent;
+use crate::core::input::KeyEventType;
+use crate::core::input_event::{parse_input_events, InputEvent};
 use crate::core::terminal::Terminal;
 use crate::core::terminal_image::{
     get_capabilities, is_image_line, set_cell_dimensions, CellDimensions,
@@ -245,6 +245,13 @@ impl<T: Terminal> TuiRuntime<T> {
 
         if self.pending_resize.swap(false, Ordering::SeqCst) {
             self.reconcile_focus();
+            if let Some(component) = self.focus.focused() {
+                let event = InputEvent::Resize {
+                    columns: self.terminal.columns(),
+                    rows: self.terminal.rows(),
+                };
+                component.borrow_mut().handle_event(&event);
+            }
             self.request_render();
         }
 
@@ -281,26 +288,8 @@ impl<T: Terminal> TuiRuntime<T> {
         }
 
         let kitty_active = self.terminal.kitty_protocol_active();
-        let key_id = parse_key(data, kitty_active);
-        let event_type = if is_key_release(data) {
-            KeyEventType::Release
-        } else if is_key_repeat(data) {
-            KeyEventType::Repeat
-        } else {
-            KeyEventType::Press
-        };
-        let event = InputEvent {
-            raw: data.to_string(),
-            key_id,
-            event_type,
-        };
-
-        if event.event_type == KeyEventType::Press
-            && event.key_id.as_deref() == Some("ctrl+shift+d")
-        {
-            if let Some(handler) = self.on_debug.as_mut() {
-                handler();
-            }
+        let events = parse_input_events(data, kitty_active);
+        if events.is_empty() {
             return;
         }
 
@@ -309,12 +298,31 @@ impl<T: Terminal> TuiRuntime<T> {
         };
 
         let mut component = component.borrow_mut();
-        if event.event_type == KeyEventType::Release && !component.wants_key_release() {
-            return;
+
+        let mut handled = false;
+        for event in events {
+            if let InputEvent::Key {
+                key_id, event_type, ..
+            } = &event
+            {
+                if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
+                    if let Some(handler) = self.on_debug.as_mut() {
+                        handler();
+                    }
+                    continue;
+                }
+                if *event_type == KeyEventType::Release && !component.wants_key_release() {
+                    continue;
+                }
+            }
+
+            component.handle_event(&event);
+            handled = true;
         }
 
-        component.handle_event(&event);
-        self.request_render();
+        if handled {
+            self.request_render();
+        }
     }
 
     pub fn request_render(&mut self) {
@@ -751,8 +759,15 @@ mod tests {
             Vec::new()
         }
 
-        fn handle_input(&mut self, data: &str) {
-            self.inputs.borrow_mut().push(data.to_string());
+        fn handle_event(&mut self, event: &crate::core::input_event::InputEvent) {
+            let raw = match event {
+                crate::core::input_event::InputEvent::Key { raw, .. } => raw.as_str(),
+                crate::core::input_event::InputEvent::Text { raw, .. } => raw.as_str(),
+                crate::core::input_event::InputEvent::Paste { raw, .. } => raw.as_str(),
+                crate::core::input_event::InputEvent::UnknownRaw { raw } => raw.as_str(),
+                crate::core::input_event::InputEvent::Resize { .. } => return,
+            };
+            self.inputs.borrow_mut().push(raw.to_string());
         }
 
         fn wants_key_release(&self) -> bool {
@@ -787,7 +802,7 @@ mod tests {
         let component_handle: Rc<RefCell<Box<dyn Component>>> =
             Rc::new(RefCell::new(Box::new(component)));
         runtime.set_focus(component_handle);
-        runtime.handle_input("\x1b[32:3u");
+        runtime.handle_input("\x1b[32;1:3u");
         assert!(inputs.borrow().is_empty());
 
         let inputs_release = Rc::new(RefCell::new(Vec::new()));
@@ -797,7 +812,7 @@ mod tests {
         let component_release_handle: Rc<RefCell<Box<dyn Component>>> =
             Rc::new(RefCell::new(Box::new(component_release)));
         runtime.set_focus(component_release_handle);
-        runtime.handle_input("\x1b[32:3u");
+        runtime.handle_input("\x1b[32;1:3u");
         assert_eq!(inputs_release.borrow().len(), 1);
     }
 

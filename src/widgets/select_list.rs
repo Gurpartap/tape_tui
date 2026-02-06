@@ -256,7 +256,10 @@ impl Component for SelectList {
     }
 
     fn handle_event(&mut self, event: &InputEvent) {
-        let key_id = event.key_id.as_deref();
+        let key_id = match event {
+            InputEvent::Key { key_id, .. } => Some(key_id.as_str()),
+            _ => None,
+        };
 
         enum Action {
             Up,
@@ -333,8 +336,7 @@ impl Component for SelectList {
 mod tests {
     use super::{SelectItem, SelectList, SelectListTheme};
     use crate::core::component::Component;
-    use crate::core::input::{parse_key, KeyEventType};
-    use crate::core::input_event::InputEvent;
+    use crate::core::input_event::parse_input_events;
     use crate::default_editor_keybindings_handle;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -351,12 +353,9 @@ mod tests {
     }
 
     fn send(list: &mut SelectList, data: &str) {
-        let event = InputEvent {
-            raw: data.to_string(),
-            key_id: parse_key(data, false),
-            event_type: KeyEventType::Press,
-        };
-        list.handle_event(&event);
+        for event in parse_input_events(data, false) {
+            list.handle_event(&event);
+        }
     }
 
     #[test]

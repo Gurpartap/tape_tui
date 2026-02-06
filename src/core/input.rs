@@ -150,42 +150,24 @@ pub enum KeyEventType {
 #[derive(Debug, Clone, Copy)]
 struct ParsedKittySequence {
     codepoint: i32,
-    #[allow(dead_code)]
     shifted_key: Option<i32>,
     base_layout_key: Option<i32>,
     modifier: u8,
-    #[allow(dead_code)]
     event_type: KeyEventType,
 }
 
-pub fn is_key_release(data: &str) -> bool {
-    if data.contains("\x1b[200~") {
-        return false;
-    }
+pub fn parse_key_event_type(data: &str) -> KeyEventType {
+    parse_kitty_sequence(data)
+        .map(|seq| seq.event_type)
+        .unwrap_or(KeyEventType::Press)
+}
 
-    data.contains(":3u")
-        || data.contains(":3~")
-        || data.contains(":3A")
-        || data.contains(":3B")
-        || data.contains(":3C")
-        || data.contains(":3D")
-        || data.contains(":3H")
-        || data.contains(":3F")
+pub fn is_key_release(data: &str) -> bool {
+    parse_key_event_type(data) == KeyEventType::Release
 }
 
 pub fn is_key_repeat(data: &str) -> bool {
-    if data.contains("\x1b[200~") {
-        return false;
-    }
-
-    data.contains(":2u")
-        || data.contains(":2~")
-        || data.contains(":2A")
-        || data.contains(":2B")
-        || data.contains(":2C")
-        || data.contains(":2D")
-        || data.contains(":2H")
-        || data.contains(":2F")
+    parse_key_event_type(data) == KeyEventType::Repeat
 }
 
 pub fn matches_key(data: &str, key_id: &str, kitty_active: bool) -> bool {
@@ -705,6 +687,28 @@ pub fn parse_key(data: &str, kitty_active: bool) -> Option<String> {
     None
 }
 
+pub fn parse_text(data: &str, kitty_active: bool) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+
+    if kitty_active {
+        if let Some(text) = decode_kitty_printable(data) {
+            return Some(text);
+        }
+    }
+
+    let has_control_chars = data.chars().any(|ch| {
+        let code = ch as u32;
+        code < 32 || code == 0x7f || (code >= 0x80 && code <= 0x9f)
+    });
+    if has_control_chars {
+        return None;
+    }
+
+    Some(data.to_string())
+}
+
 struct ParsedKeyId {
     key: String,
     ctrl: bool,
@@ -931,6 +935,33 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKittySequence> {
     }
 
     None
+}
+
+fn decode_kitty_printable(data: &str) -> Option<String> {
+    if !data.starts_with("\x1b[") || !data.ends_with('u') {
+        return None;
+    }
+
+    let parsed = parse_kitty_sequence(data)?;
+    let modifier = parsed.modifier & !LOCK_MASK;
+
+    if modifier & (MOD_ALT | MOD_CTRL) != 0 {
+        return None;
+    }
+
+    let mut effective = parsed.codepoint;
+    if modifier & MOD_SHIFT != 0 {
+        if let Some(shifted) = parsed.shifted_key {
+            effective = shifted;
+        }
+    }
+
+    if effective < 32 {
+        return None;
+    }
+
+    let codepoint: u32 = effective.try_into().ok()?;
+    char::from_u32(codepoint).map(|ch| ch.to_string())
 }
 
 fn matches_kitty_sequence(data: &str, expected_codepoint: i32, expected_modifier: u8) -> bool {

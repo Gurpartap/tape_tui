@@ -20,8 +20,6 @@ use crate::runtime::tui::RenderHandle;
 use crate::widgets::select_list::{SelectItem, SelectList, SelectListTheme};
 
 const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
-const PASTE_START: &str = "\x1b[200~";
-const PASTE_END: &str = "\x1b[201~";
 
 const MAX_PASTE_LINES: usize = 10;
 const MAX_PASTE_CHARS: usize = 1000;
@@ -206,8 +204,6 @@ pub struct Editor {
     disable_submit: bool,
     pastes: HashMap<u32, String>,
     paste_counter: u32,
-    paste_buffer: String,
-    is_in_paste: bool,
     kill_ring: Vec<String>,
     last_action: Option<LastAction>,
     undo_stack: Vec<EditorState>,
@@ -265,8 +261,6 @@ impl Editor {
             disable_submit: false,
             pastes: HashMap::new(),
             paste_counter: 0,
-            paste_buffer: String::new(),
-            is_in_paste: false,
             kill_ring: Vec::new(),
             last_action: None,
             undo_stack: Vec::new(),
@@ -2260,8 +2254,10 @@ impl Component for Editor {
         self.clamp_cursor();
         self.poll_autocomplete_async();
 
-        let key_id = event.key_id.as_deref();
-        let mut data = event.raw.clone();
+        let key_id = match event {
+            InputEvent::Key { key_id, .. } => Some(key_id.as_str()),
+            _ => None,
+        };
 
         if let Some(jump_mode) = self.jump_mode.take() {
             let is_jump_key = {
@@ -2276,45 +2272,19 @@ impl Component for Editor {
                 return;
             }
 
-            let target = decode_kitty_printable(&data).or_else(|| {
-                data.chars().next().and_then(|ch| {
+            if let InputEvent::Text { text, .. } = event {
+                if let Some(ch) = text.chars().next() {
                     if (ch as u32) >= 32 {
-                        Some(ch.to_string())
-                    } else {
-                        None
+                        self.jump_to_char(&ch.to_string(), jump_mode);
+                        return;
                     }
-                })
-            });
-            if let Some(target) = target {
-                self.jump_to_char(&target, jump_mode);
-                return;
+                }
             }
         }
 
-        if data.contains(PASTE_START) {
-            self.is_in_paste = true;
-            self.paste_buffer.clear();
-            data = data.replacen(PASTE_START, "", 1);
-        }
-
-        if self.is_in_paste {
-            self.paste_buffer.push_str(&data);
-            if let Some(end_index) = self.paste_buffer.find(PASTE_END) {
-                let paste_content = self.paste_buffer[..end_index].to_string();
-                if !paste_content.is_empty() {
-                    self.handle_paste(&paste_content);
-                }
-                self.is_in_paste = false;
-                let remaining = self.paste_buffer[end_index + PASTE_END.len()..].to_string();
-                self.paste_buffer.clear();
-                if !remaining.is_empty() {
-                    let follow_event = InputEvent {
-                        raw: remaining,
-                        key_id: None,
-                        event_type: event.event_type,
-                    };
-                    self.handle_event(&follow_event);
-                }
+        if let InputEvent::Paste { text, .. } = event {
+            if !text.is_empty() {
+                self.handle_paste(text);
             }
             return;
         }
@@ -2657,18 +2627,10 @@ impl Component for Editor {
             None => {}
         }
 
-        if let Some(decoded) = decode_kitty_printable(&data) {
-            self.insert_character(&decoded, false);
-            return;
-        }
-
-        if data
-            .chars()
-            .next()
-            .map(|ch| (ch as u32) >= 32)
-            .unwrap_or(false)
-        {
-            self.insert_character(&data, false);
+        if let InputEvent::Text { text, .. } = event {
+            for ch in text.chars() {
+                self.insert_character(&ch.to_string(), false);
+            }
         }
     }
 
@@ -2773,59 +2735,6 @@ fn is_punctuation_segment(segment: &str) -> bool {
     segment.chars().any(is_punctuation_char)
 }
 
-fn decode_kitty_printable(data: &str) -> Option<String> {
-    if !data.starts_with("\x1b[") || !data.ends_with('u') {
-        return None;
-    }
-    let inner = &data[2..data.len() - 1];
-    let (left, right) = match inner.split_once(';') {
-        Some((left, right)) => (left, right),
-        None => (inner, ""),
-    };
-
-    let mut left_parts = left.split(':');
-    let codepoint = left_parts
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())?;
-    let shifted = left_parts.next().and_then(|value| {
-        if value.is_empty() {
-            None
-        } else {
-            value.parse::<u32>().ok()
-        }
-    });
-
-    let mod_value = if right.is_empty() {
-        1u32
-    } else {
-        right
-            .split(':')
-            .next()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(1)
-    };
-    let modifier = mod_value.saturating_sub(1);
-
-    const MOD_SHIFT: u32 = 1;
-    const MOD_ALT: u32 = 2;
-    const MOD_CTRL: u32 = 4;
-
-    if modifier & (MOD_ALT | MOD_CTRL) != 0 {
-        return None;
-    }
-
-    let mut effective = codepoint;
-    if modifier & MOD_SHIFT != 0 {
-        if let Some(shifted) = shifted {
-            effective = shifted;
-        }
-    }
-    if effective < 32 {
-        return None;
-    }
-    char::from_u32(effective).map(|ch| ch.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2836,8 +2745,7 @@ mod tests {
         CombinedAutocompleteProvider, CommandEntry, CompletionResult, SlashCommand,
     };
     use crate::core::component::Component;
-    use crate::core::input::{parse_key, KeyEventType};
-    use crate::core::input_event::InputEvent;
+    use crate::core::input_event::parse_input_events;
     use crate::default_editor_keybindings_handle;
     use crate::widgets::select_list::SelectListTheme;
     use std::cell::RefCell;
@@ -2861,12 +2769,9 @@ mod tests {
     }
 
     fn send(editor: &mut Editor, data: &str) {
-        let event = InputEvent {
-            raw: data.to_string(),
-            key_id: parse_key(data, false),
-            event_type: KeyEventType::Press,
-        };
-        editor.handle_event(&event);
+        for event in parse_input_events(data, false) {
+            editor.handle_event(&event);
+        }
     }
 
     #[test]

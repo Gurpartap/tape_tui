@@ -420,20 +420,39 @@ impl Component for EditorWrapper {
     }
 
     fn handle_event(&mut self, event: &InputEvent) {
-        if event.event_type == KeyEventType::Press {
-            if event.key_id.as_deref() == Some("ctrl+c") {
-                *self.exit_flag.borrow_mut() = true;
-                return;
-            }
-            if event.key_id.as_deref() == Some("ctrl+t") {
-                let mut state = self.state.borrow_mut();
-                state.auto_tick = !state.auto_tick;
-                return;
-            }
-            if event.key_id.as_deref() == Some("ctrl+l") {
-                self.state.borrow_mut().clear_ticks();
-                return;
-            }
+        if matches!(
+            event,
+            InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
+            } if key_id == "ctrl+c"
+        ) {
+            *self.exit_flag.borrow_mut() = true;
+            return;
+        }
+        if matches!(
+            event,
+            InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
+            } if key_id == "ctrl+t"
+        ) {
+            let mut state = self.state.borrow_mut();
+            state.auto_tick = !state.auto_tick;
+            return;
+        }
+        if matches!(
+            event,
+            InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
+            } if key_id == "ctrl+l"
+        ) {
+            self.state.borrow_mut().clear_ticks();
+            return;
         }
 
         self.editor.borrow_mut().handle_event(event);
