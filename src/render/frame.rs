@@ -40,15 +40,30 @@ impl From<String> for Span {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Line {
     spans: Vec<Span>,
+    is_image: bool,
 }
 
 impl Line {
     pub fn new(spans: Vec<Span>) -> Self {
-        Self { spans }
+        Self {
+            spans,
+            is_image: false,
+        }
+    }
+
+    pub fn image(spans: Vec<Span>) -> Self {
+        Self {
+            spans,
+            is_image: true,
+        }
     }
 
     pub fn spans(&self) -> &[Span] {
         &self.spans
+    }
+
+    pub fn is_image(&self) -> bool {
+        self.is_image
     }
 
     pub fn into_string(self) -> String {
@@ -81,6 +96,10 @@ impl Frame {
         &self.lines
     }
 
+    pub fn into_lines(self) -> Vec<Line> {
+        self.lines
+    }
+
     pub fn into_strings(self) -> Vec<String> {
         self.lines
             .into_iter()
@@ -91,7 +110,20 @@ impl Frame {
 
 impl From<Vec<String>> for Frame {
     fn from(lines: Vec<String>) -> Self {
-        Self::new(lines.into_iter().map(Line::from).collect())
+        Self::new(
+            lines
+                .into_iter()
+                .map(|text| {
+                    let is_image = crate::core::terminal_image::is_image_line(&text);
+                    let spans = vec![Span::new(text)];
+                    if is_image {
+                        Line::image(spans)
+                    } else {
+                        Line::new(spans)
+                    }
+                })
+                .collect(),
+        )
     }
 }
 
@@ -116,5 +148,19 @@ mod tests {
         for (out, inp) in output.iter().zip(input.iter()) {
             assert_eq!(out.as_bytes(), inp.as_bytes());
         }
+    }
+
+    #[test]
+    fn from_vec_strings_marks_image_lines() {
+        let frame: Frame = vec![
+            "plain".to_string(),
+            "\x1b_Gf=100;data".to_string(),
+            "\x1b]1337;File=name=test:AAAA".to_string(),
+        ]
+        .into();
+
+        assert!(!frame.lines()[0].is_image());
+        assert!(frame.lines()[1].is_image());
+        assert!(frame.lines()[2].is_image());
     }
 }

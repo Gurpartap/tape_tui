@@ -632,14 +632,9 @@ impl<T: Terminal> TuiRuntime<T> {
         let cursor_pos = extract_cursor_position(&mut lines, height);
         let has_overlays = self.has_overlay();
         let frame: Frame = lines.into();
-        let render_cmds = self.renderer.render(
-            frame,
-            width,
-            height,
-            is_image_line,
-            self.clear_on_shrink,
-            has_overlays,
-        );
+        let render_cmds =
+            self.renderer
+                .render(frame, width, height, self.clear_on_shrink, has_overlays);
         self.output.extend(render_cmds);
 
         let (updated_row, cursor_cmds) = position_hardware_cursor(
