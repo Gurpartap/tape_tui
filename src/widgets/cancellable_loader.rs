@@ -79,8 +79,8 @@ impl CancellableLoader {
         spinner_color_fn: Box<dyn Fn(&str) -> String>,
         message_color_fn: Box<dyn Fn(&str) -> String>,
         message: Option<String>,
+        keybindings: EditorKeybindingsHandle,
     ) -> Self {
-        let keybindings = crate::core::keybindings::default_editor_keybindings_handle();
         let loader = super::loader::Loader::with_requester(
             render_requester,
             spinner_color_fn,
@@ -135,11 +135,13 @@ mod tests {
         let aborted_flag = Arc::new(AtomicBool::new(false));
         let aborted_flag_clone = Arc::clone(&aborted_flag);
 
+        let keybindings = crate::core::keybindings::default_editor_keybindings_handle();
         let mut loader = CancellableLoader::with_requester(
             None,
             Box::new(|text| text.to_string()),
             Box::new(|text| text.to_string()),
             Some("Working".to_string()),
+            keybindings,
         );
         loader.set_on_abort(Some(Box::new(move || {
             aborted_flag_clone.store(true, Ordering::SeqCst);
