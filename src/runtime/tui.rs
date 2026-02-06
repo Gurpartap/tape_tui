@@ -19,6 +19,7 @@ use crate::render::overlay::{
     composite_overlays, resolve_overlay_layout, OverlayOptions, RenderedOverlay,
 };
 use crate::render::renderer::DiffRenderer;
+use crate::render::Frame;
 use crate::runtime::focus::FocusState;
 use crate::runtime::ime::{extract_cursor_position, position_hardware_cursor};
 
@@ -630,8 +631,9 @@ impl<T: Terminal> TuiRuntime<T> {
         let total_lines = lines.len();
         let cursor_pos = extract_cursor_position(&mut lines, height);
         let has_overlays = self.has_overlay();
+        let frame: Frame = lines.into();
         let render_cmds = self.renderer.render(
-            lines,
+            frame,
             width,
             height,
             is_image_line,

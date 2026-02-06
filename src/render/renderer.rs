@@ -6,6 +6,7 @@ use crate::core::text::width::visible_width;
 use crate::logging::{
     debug_redraw_enabled, log_debug_redraw, log_tui_debug, tui_debug_enabled, RenderDebugInfo,
 };
+use crate::render::Frame;
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
 const SYNC_START: &str = "\x1b[?2026h";
@@ -78,13 +79,14 @@ impl DiffRenderer {
 
     pub fn render(
         &mut self,
-        mut lines: Vec<String>,
+        frame: Frame,
         width: usize,
         height: usize,
         is_image_line: fn(&str) -> bool,
         clear_on_shrink: bool,
         has_overlays: bool,
     ) -> Vec<TerminalCmd> {
+        let mut lines = frame.into_strings();
         let mut cmds = Vec::new();
 
         let mut viewport_top = self.max_lines_rendered.saturating_sub(height);
@@ -376,6 +378,7 @@ fn clamp_non_image_line_to_width(line: &str, width: usize) -> String {
 mod tests {
     use super::DiffRenderer;
     use crate::core::output::TerminalCmd;
+    use crate::render::{Frame, Line, Span};
     use std::ffi::OsString;
     use std::sync::Mutex;
 
@@ -453,7 +456,7 @@ mod tests {
     fn width_change_triggers_full_clear() {
         let mut renderer = DiffRenderer::new();
         let output = cmds_to_bytes(renderer.render(
-            vec!["line".to_string()],
+            vec!["line".to_string()].into(),
             10,
             5,
             not_image,
@@ -463,7 +466,7 @@ mod tests {
         assert!(!output.is_empty());
 
         let output = cmds_to_bytes(renderer.render(
-            vec!["line".to_string()],
+            vec!["line".to_string()].into(),
             12,
             5,
             not_image,
@@ -477,7 +480,7 @@ mod tests {
     fn diff_renders_only_changed_lines() {
         let mut renderer = DiffRenderer::new();
         renderer.render(
-            vec!["one".to_string(), "two".to_string()],
+            vec!["one".to_string(), "two".to_string()].into(),
             20,
             5,
             not_image,
@@ -486,7 +489,7 @@ mod tests {
         );
 
         let output = cmds_to_bytes(renderer.render(
-            vec!["one".to_string(), "tWO".to_string()],
+            vec!["one".to_string(), "tWO".to_string()].into(),
             20,
             5,
             not_image,
@@ -501,10 +504,17 @@ mod tests {
     fn overflow_clamps_on_diff_path_by_default() {
         let _guard = StrictWidthEnvGuard::unset();
         let mut renderer = DiffRenderer::new();
-        renderer.render(vec!["123456".to_string()], 5, 5, not_image, false, false);
+        renderer.render(
+            vec!["123456".to_string()].into(),
+            5,
+            5,
+            not_image,
+            false,
+            false,
+        );
 
         let output = cmds_to_bytes(renderer.render(
-            vec!["abcdef".to_string()],
+            vec!["abcdef".to_string()].into(),
             5,
             5,
             not_image,
@@ -519,10 +529,24 @@ mod tests {
     fn overflow_panics_on_diff_path_in_strict_mode() {
         let _guard = StrictWidthEnvGuard::set("1");
         let mut renderer = DiffRenderer::new();
-        renderer.render(vec!["123456".to_string()], 5, 5, not_image, false, false);
+        renderer.render(
+            vec!["123456".to_string()].into(),
+            5,
+            5,
+            not_image,
+            false,
+            false,
+        );
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            renderer.render(vec!["abcdef".to_string()], 5, 5, not_image, false, false);
+            renderer.render(
+                vec!["abcdef".to_string()].into(),
+                5,
+                5,
+                not_image,
+                false,
+                false,
+            );
         }));
         assert!(result.is_err());
     }
@@ -530,10 +554,17 @@ mod tests {
     #[test]
     fn identical_render_produces_no_output() {
         let mut renderer = DiffRenderer::new();
-        renderer.render(vec!["line".to_string()], 20, 5, not_image, false, false);
+        renderer.render(
+            vec!["line".to_string()].into(),
+            20,
+            5,
+            not_image,
+            false,
+            false,
+        );
 
         let output = cmds_to_bytes(renderer.render(
-            vec!["line".to_string()],
+            vec!["line".to_string()].into(),
             20,
             5,
             not_image,
@@ -547,7 +578,7 @@ mod tests {
     fn segment_reset_appended_to_non_image_lines() {
         let mut renderer = DiffRenderer::new();
         let output = cmds_to_bytes(renderer.render(
-            vec!["hello".to_string()],
+            vec!["hello".to_string()].into(),
             20,
             5,
             not_image,
@@ -558,14 +589,38 @@ mod tests {
     }
 
     #[test]
+    fn multi_span_line_renders_identically_to_concatenated_line() {
+        let mut renderer_multi = DiffRenderer::new();
+        let multi = Frame::new(vec![Line::new(vec![
+            Span::new("he".to_string()),
+            Span::new("llo".to_string()),
+        ])]);
+        let multi_out = cmds_to_bytes(renderer_multi.render(multi, 20, 5, not_image, false, false));
+
+        let mut renderer_single = DiffRenderer::new();
+        let single: Frame = vec!["hello".to_string()].into();
+        let single_out =
+            cmds_to_bytes(renderer_single.render(single, 20, 5, not_image, false, false));
+
+        assert_eq!(multi_out, single_out);
+    }
+
+    #[test]
     fn image_lines_skip_width_check() {
         let mut renderer = DiffRenderer::new();
         let is_image = |line: &str| line.contains("\x1b_G");
-        renderer.render(vec!["short".to_string()], 5, 5, is_image, false, false);
+        renderer.render(
+            vec!["short".to_string()].into(),
+            5,
+            5,
+            is_image,
+            false,
+            false,
+        );
 
         let image_line = format!("\x1b_G{}", "X".repeat(100));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            renderer.render(vec![image_line], 5, 5, is_image, false, false);
+            renderer.render(vec![image_line].into(), 5, 5, is_image, false, false);
         }));
         assert!(result.is_ok());
     }
