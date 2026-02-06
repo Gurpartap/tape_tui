@@ -2,9 +2,9 @@
 
 use crate::core::component::Component;
 use crate::core::terminal_image::is_image_line;
-use crate::render::slice::wrap_text_with_ansi;
-use crate::render::utils::apply_background_to_line;
-use crate::render::width::visible_width;
+use crate::core::text::slice::wrap_text_with_ansi;
+use crate::core::text::utils::apply_background_to_line;
+use crate::core::text::width::visible_width;
 
 use markdown::{mdast, to_mdast, ParseOptions};
 

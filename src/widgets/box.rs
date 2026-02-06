@@ -5,8 +5,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::core::component::Component;
-use crate::render::utils::apply_background_to_line;
-use crate::render::width::visible_width;
+use crate::core::text::utils::apply_background_to_line;
+use crate::core::text::width::visible_width;
 
 struct RenderCache {
     child_lines: Vec<String>,
@@ -162,7 +162,7 @@ impl Component for Box {
 mod tests {
     use super::Box as BoxWidget;
     use crate::core::component::Component;
-    use crate::render::width::visible_width;
+    use crate::core::text::width::visible_width;
     use std::boxed::Box as StdBox;
     use std::cell::RefCell;
     use std::rc::Rc;

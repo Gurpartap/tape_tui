@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pi_tui::core::component::{Component, Focusable};
-use pi_tui::render::slice::slice_by_column;
+use pi_tui::core::text::slice::slice_by_column;
 use pi_tui::{
     matches_key, set_editor_keybindings, truncate_to_width, visible_width, Editor, EditorAction,
     EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsManager, EditorOptions, EditorPasteMode,

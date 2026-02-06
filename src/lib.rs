@@ -71,6 +71,6 @@ pub fn is_focusable(component: &mut dyn Component) -> bool {
 }
 
 // Utilities
-pub use crate::render::slice::wrap_text_with_ansi;
-pub use crate::render::utils::truncate_to_width;
-pub use crate::render::width::visible_width;
+pub use crate::core::text::slice::wrap_text_with_ansi;
+pub use crate::core::text::utils::truncate_to_width;
+pub use crate::core::text::width::visible_width;

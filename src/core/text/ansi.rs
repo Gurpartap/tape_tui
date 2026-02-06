@@ -264,3 +264,4 @@ impl AnsiCodeTracker {
         self.bg_color = None;
     }
 }
+

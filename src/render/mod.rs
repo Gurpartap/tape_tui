@@ -2,10 +2,6 @@
 
 pub mod renderer;
 pub mod frame;
-pub mod ansi;
-pub mod width;
-pub mod slice;
 pub mod overlay;
-pub mod utils;
 
 pub use frame::{Frame, Line};

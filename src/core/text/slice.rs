@@ -2,8 +2,8 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::render::ansi::{extract_ansi_code, AnsiCodeTracker};
-use crate::render::width::{grapheme_width, visible_width};
+use super::ansi::{extract_ansi_code, AnsiCodeTracker};
+use super::width::{grapheme_width, visible_width};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SliceResult {
@@ -429,3 +429,4 @@ mod tests {
         assert!(!wrapped[1].starts_with(' '));
     }
 }
+

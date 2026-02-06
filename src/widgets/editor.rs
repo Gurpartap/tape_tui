@@ -11,8 +11,8 @@ use crate::core::autocomplete::{AbortSignal, AutocompleteItem, AutocompleteProvi
 use crate::core::component::{Component, Focusable};
 use crate::core::editor_component::EditorComponent;
 use crate::core::keybindings::{get_editor_keybindings, EditorAction};
-use crate::render::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
-use crate::render::width::visible_width;
+use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
+use crate::core::text::width::visible_width;
 use crate::runtime::tui::RenderHandle;
 use crate::widgets::select_list::{SelectItem, SelectList, SelectListTheme};
 

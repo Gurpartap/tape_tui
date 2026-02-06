@@ -4,7 +4,7 @@ use emojis::get as emoji_get;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
-use crate::render::ansi::extract_ansi_code;
+use super::ansi::extract_ansi_code;
 
 const TAB_WIDTH: usize = 3;
 
@@ -81,3 +81,4 @@ mod tests {
         assert_eq!(visible_width("😀"), 2);
     }
 }
+

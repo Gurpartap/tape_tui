@@ -2,7 +2,8 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::render::width::visible_width;
+use super::ansi::extract_ansi_code;
+use super::width::visible_width;
 
 const ANSI_RESET: &str = "\x1b[0m";
 
@@ -56,7 +57,7 @@ pub fn truncate_to_width(text: &str, max_width: usize, ellipsis: &str, pad: bool
     let mut segments: Vec<Segment> = Vec::new();
     let mut idx = 0;
     while idx < text.len() {
-        if let Some(ansi) = crate::render::ansi::extract_ansi_code(text, idx) {
+        if let Some(ansi) = extract_ansi_code(text, idx) {
             segments.push(Segment::Ansi(ansi.code));
             idx += ansi.length;
             continue;
@@ -107,7 +108,7 @@ enum Segment {
 
 fn next_ansi_or_end(input: &str, mut idx: usize) -> usize {
     while idx < input.len() {
-        if crate::render::ansi::extract_ansi_code(input, idx).is_some() {
+        if extract_ansi_code(input, idx).is_some() {
             break;
         }
         let ch = input[idx..].chars().next().expect("missing char");
@@ -119,7 +120,7 @@ fn next_ansi_or_end(input: &str, mut idx: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{apply_background_to_line, grapheme_segments, is_punctuation_char, is_whitespace_char, truncate_to_width};
-    use crate::render::width::visible_width;
+    use crate::core::text::width::visible_width;
 
     #[test]
     fn truncate_returns_original_when_shorter() {
@@ -182,3 +183,4 @@ mod tests {
         assert_eq!(clusters, vec!["a", "🇺🇸"]);
     }
 }
+

@@ -1,7 +1,7 @@
 //! Overlay compositing (Phase 7).
 
-use crate::render::slice::{extract_segments, slice_by_column, slice_with_width};
-use crate::render::width::visible_width;
+use crate::core::text::slice::{extract_segments, slice_by_column, slice_with_width};
+use crate::core::text::width::visible_width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayAnchor {
@@ -329,7 +329,7 @@ fn apply_offset(value: usize, offset: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::width::visible_width;
+    use crate::core::text::width::visible_width;
 
     fn not_image(_: &str) -> bool {
         false

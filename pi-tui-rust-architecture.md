@@ -123,13 +123,16 @@ src/
     component.rs        // Component + Focusable traits (wantsKeyRelease)
     input.rs            // KeyId, KeyEvent, matchesKey/parseKey
     terminal_image.rs   // capabilities, isImageLine, cell dimensions
+    text/
+      mod.rs
+      ansi.rs           // ANSI scanner + style tracker
+      width.rs          // grapheme width + visibleWidth
+      slice.rs          // slice_by_column, extract_segments
+      utils.rs          // truncate_to_width, background padding, grapheme helpers
   render/
     mod.rs
     renderer.rs         // DiffRenderer (synchronized output + diff)
     frame.rs            // Frame = Vec<Line>
-    ansi.rs             // ANSI scanner + style tracker
-    width.rs            // grapheme width + visibleWidth
-    slice.rs            // slice_by_column, extract_segments
     overlay.rs          // compositing helpers (staged)
   runtime/
     mod.rs

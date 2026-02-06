@@ -4,7 +4,7 @@ use crate::core::terminal::Terminal;
 use crate::logging::{
     debug_redraw_enabled, log_debug_redraw, log_tui_debug, tui_debug_enabled, RenderDebugInfo,
 };
-use crate::render::width::visible_width;
+use crate::core::text::width::visible_width;
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
 const SYNC_START: &str = "\x1b[?2026h";

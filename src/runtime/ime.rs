@@ -1,7 +1,7 @@
 //! IME cursor extraction + hardware cursor positioning (Phase 5).
 
 use crate::core::terminal::Terminal;
-use crate::render::width::visible_width;
+use crate::core::text::width::visible_width;
 
 pub const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
 

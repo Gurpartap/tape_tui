@@ -6,9 +6,9 @@ use std::rc::Rc;
 use crate::core::component::Component;
 use crate::core::fuzzy::fuzzy_filter;
 use crate::core::keybindings::{get_editor_keybindings, EditorAction};
-use crate::render::slice::wrap_text_with_ansi;
-use crate::render::utils::truncate_to_width;
-use crate::render::width::visible_width;
+use crate::core::text::slice::wrap_text_with_ansi;
+use crate::core::text::utils::truncate_to_width;
+use crate::core::text::width::visible_width;
 use crate::widgets::input::Input;
 
 pub type SubmenuDone = Box<dyn FnMut(Option<String>)>;

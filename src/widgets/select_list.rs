@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::core::component::Component;
 use crate::core::keybindings::{get_editor_keybindings, EditorAction};
-use crate::render::utils::truncate_to_width;
+use crate::core::text::utils::truncate_to_width;
 
 fn normalize_to_single_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());

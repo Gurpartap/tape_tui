@@ -2,8 +2,8 @@
 
 use crate::core::component::{Component, Focusable};
 use crate::core::keybindings::{get_editor_keybindings, EditorAction};
-use crate::render::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
-use crate::render::width::visible_width;
+use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
+use crate::core::text::width::visible_width;
 
 const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
 const PASTE_START: &str = "\x1b[200~";

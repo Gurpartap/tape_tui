@@ -1,9 +1,9 @@
 //! Text widget (Phase 8).
 
 use crate::core::component::Component;
-use crate::render::slice::wrap_text_with_ansi;
-use crate::render::utils::apply_background_to_line;
-use crate::render::width::visible_width;
+use crate::core::text::slice::wrap_text_with_ansi;
+use crate::core::text::utils::apply_background_to_line;
+use crate::core::text::width::visible_width;
 
 pub struct Text {
     text: String,
@@ -124,7 +124,7 @@ impl Component for Text {
 mod tests {
     use super::Text;
     use crate::core::component::Component;
-    use crate::render::width::visible_width;
+    use crate::core::text::width::visible_width;
 
     #[test]
     fn text_wraps_and_pads_to_width() {

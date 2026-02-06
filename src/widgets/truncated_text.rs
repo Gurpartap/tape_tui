@@ -1,8 +1,8 @@
 //! Truncated text widget (Phase 18).
 
 use crate::core::component::Component;
-use crate::render::utils::truncate_to_width;
-use crate::render::width::visible_width;
+use crate::core::text::utils::truncate_to_width;
+use crate::core::text::width::visible_width;
 
 pub struct TruncatedText {
     text: String,
@@ -64,7 +64,7 @@ impl Component for TruncatedText {
 mod tests {
     use super::TruncatedText;
     use crate::core::component::Component;
-    use crate::render::width::visible_width;
+    use crate::core::text::width::visible_width;
 
     #[test]
     fn truncated_text_truncates_with_ellipsis() {
