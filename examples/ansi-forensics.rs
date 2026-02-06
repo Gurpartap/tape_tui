@@ -769,11 +769,11 @@ fn main() {
 
     let editor = Rc::new(RefCell::new(Editor::new(
         editor_theme(),
+        keybindings.clone(),
         EditorOptions {
             height_mode: Some(EditorHeightMode::FillAvailable),
             paste_mode: Some(EditorPasteMode::Literal),
             render_handle: Some(render_handle.clone()),
-            keybindings: Some(keybindings.clone()),
             ..EditorOptions::default()
         },
     )));

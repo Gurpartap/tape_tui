@@ -2,9 +2,7 @@
 
 use crate::core::component::{Component, Focusable};
 use crate::core::input_event::InputEvent;
-use crate::core::keybindings::{
-    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
-};
+use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
 use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
 use crate::core::text::width::visible_width;
 
@@ -26,24 +24,17 @@ pub struct Input {
 }
 
 impl Input {
-    pub fn new() -> Self {
+    pub fn new(keybindings: EditorKeybindingsHandle) -> Self {
         Self {
             value: String::new(),
             cursor: 0,
             focused: false,
             prompt: "> ".to_string(),
-            keybindings: default_editor_keybindings_handle(),
+            keybindings,
             on_submit: None,
             on_escape: None,
             paste_buffer: String::new(),
             is_in_paste: false,
-        }
-    }
-
-    pub fn new_with_keybindings_handle(keybindings: EditorKeybindingsHandle) -> Self {
-        Self {
-            keybindings,
-            ..Self::new()
         }
     }
 
@@ -226,12 +217,6 @@ impl Input {
         }
 
         Some(ch.to_string())
-    }
-}
-
-impl Default for Input {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -529,6 +514,7 @@ mod tests {
     use crate::core::component::Component;
     use crate::core::input::{parse_key, KeyEventType};
     use crate::core::input_event::InputEvent;
+    use crate::default_editor_keybindings_handle;
 
     fn send(input: &mut Input, data: &str) {
         let event = InputEvent {
@@ -541,7 +527,7 @@ mod tests {
 
     #[test]
     fn input_edits_and_moves_cursor() {
-        let mut input = Input::new();
+        let mut input = Input::new(default_editor_keybindings_handle());
         send(&mut input, "h");
         send(&mut input, "e");
         send(&mut input, "l");
@@ -569,7 +555,7 @@ mod tests {
 
     #[test]
     fn input_paste_and_delete_word() {
-        let mut input = Input::new();
+        let mut input = Input::new(default_editor_keybindings_handle());
         send(&mut input, "\x1b[200~hello\nworld\x1b[201~");
         assert_eq!(input.get_value(), "helloworld");
 
@@ -582,7 +568,7 @@ mod tests {
 
     #[test]
     fn input_has_prompt_by_default() {
-        let mut input = Input::new();
+        let mut input = Input::new(default_editor_keybindings_handle());
         let lines = input.render(10);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].starts_with("> "));

@@ -13,9 +13,7 @@ use crate::core::autocomplete::{
 use crate::core::component::{Component, Focusable};
 use crate::core::editor_component::EditorComponent;
 use crate::core::input_event::InputEvent;
-use crate::core::keybindings::{
-    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
-};
+use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
 use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
 use crate::core::text::width::visible_width;
 use crate::runtime::tui::RenderHandle;
@@ -158,7 +156,6 @@ pub struct EditorOptions {
     pub height_mode: Option<EditorHeightMode>,
     pub paste_mode: Option<EditorPasteMode>,
     pub render_handle: Option<RenderHandle>,
-    pub keybindings: Option<EditorKeybindingsHandle>,
 }
 
 enum JumpMode {
@@ -221,16 +218,17 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn new(theme: EditorTheme, options: EditorOptions) -> Self {
+    pub fn new(
+        theme: EditorTheme,
+        keybindings: EditorKeybindingsHandle,
+        options: EditorOptions,
+    ) -> Self {
         let padding_x = options.padding_x.unwrap_or(0);
         let max_visible = options.autocomplete_max_visible.unwrap_or(5);
         let autocomplete_max_visible = max(3, min(20, max_visible));
         let height_mode = options.height_mode.unwrap_or(EditorHeightMode::Default);
         let paste_mode = options.paste_mode.unwrap_or(EditorPasteMode::Default);
         let render_handle = options.render_handle;
-        let keybindings = options
-            .keybindings
-            .unwrap_or_else(default_editor_keybindings_handle);
         let border_color = theme.border_color;
         let select_list_theme = theme.select_list;
         Self {
@@ -476,7 +474,7 @@ impl Editor {
                 )
             })
             .collect::<Vec<_>>();
-        let mut list = SelectList::new_with_keybindings_handle(
+        let mut list = SelectList::new(
             items,
             self.autocomplete_max_visible,
             self.select_list_theme.clone(),
@@ -668,7 +666,7 @@ impl Editor {
                 )
             })
             .collect::<Vec<_>>();
-        let list = SelectList::new_with_keybindings_handle(
+        let list = SelectList::new(
             items,
             self.autocomplete_max_visible,
             self.select_list_theme.clone(),
@@ -2840,6 +2838,7 @@ mod tests {
     use crate::core::component::Component;
     use crate::core::input::{parse_key, KeyEventType};
     use crate::core::input_event::InputEvent;
+    use crate::default_editor_keybindings_handle;
     use crate::widgets::select_list::SelectListTheme;
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -2887,7 +2886,11 @@ mod tests {
 
     #[test]
     fn editor_moves_across_lines() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.set_text("one\ntwo");
         editor.state.cursor_line = 0;
         editor.state.cursor_col = 3;
@@ -2901,7 +2904,11 @@ mod tests {
 
     #[test]
     fn editor_scrolls_to_keep_cursor_visible() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.set_terminal_rows(10);
         let lines = (0..10).map(|idx| format!("line {idx}")).collect::<Vec<_>>();
         editor.state.lines = lines;
@@ -2914,7 +2921,11 @@ mod tests {
 
     #[test]
     fn editor_renders_cursor_marker_when_focused() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.state.lines = vec!["hi".to_string()];
         editor.state.cursor_line = 0;
         editor.state.cursor_col = 1;
@@ -2930,7 +2941,7 @@ mod tests {
             autocomplete_max_visible: Some(7),
             ..EditorOptions::default()
         };
-        let editor = Editor::new(theme(), options);
+        let editor = Editor::new(theme(), default_editor_keybindings_handle(), options);
         assert_eq!(editor.get_padding_x(), 2);
         assert_eq!(editor.get_autocomplete_max_visible(), 7);
     }
@@ -2942,13 +2953,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let mut default_editor = Editor::new(theme(), EditorOptions::default());
+        let mut default_editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         default_editor.set_terminal_rows(20);
         default_editor.set_text(&text);
         let default_lines = default_editor.render(20);
 
         let mut fill_editor = Editor::new(
             theme(),
+            default_editor_keybindings_handle(),
             EditorOptions {
                 height_mode: Some(EditorHeightMode::FillAvailable),
                 ..EditorOptions::default()
@@ -2966,6 +2982,7 @@ mod tests {
     fn editor_fill_available_pads_short_content_to_terminal_rows() {
         let mut editor = Editor::new(
             theme(),
+            default_editor_keybindings_handle(),
             EditorOptions {
                 height_mode: Some(EditorHeightMode::FillAvailable),
                 ..EditorOptions::default()
@@ -2981,7 +2998,11 @@ mod tests {
 
     #[test]
     fn editor_top_border_when_scrolled() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.set_terminal_rows(10);
         editor.state.lines = (0..10).map(|idx| format!("row {idx}")).collect();
         editor.state.cursor_line = 8;
@@ -2992,7 +3013,11 @@ mod tests {
 
     #[test]
     fn editor_undo_coalesces_words() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         for ch in "hello world".chars() {
             let input = ch.to_string();
             send(&mut editor, &input);
@@ -3005,7 +3030,11 @@ mod tests {
 
     #[test]
     fn editor_kill_and_yank_restore_line() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.set_text("hello world");
         editor.state.cursor_line = 0;
         editor.set_cursor_col(5);
@@ -3019,7 +3048,11 @@ mod tests {
 
     #[test]
     fn editor_large_paste_inserts_marker_and_expands() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         let lines = (0..11).map(|idx| format!("line{idx}")).collect::<Vec<_>>();
         let paste = lines.join("\n");
         let input = format!("\x1b[200~{paste}\x1b[201~");
@@ -3033,6 +3066,7 @@ mod tests {
     fn editor_large_paste_in_literal_mode_inserts_full_text() {
         let mut editor = Editor::new(
             theme(),
+            default_editor_keybindings_handle(),
             EditorOptions {
                 paste_mode: Some(EditorPasteMode::Literal),
                 ..EditorOptions::default()
@@ -3060,7 +3094,11 @@ mod tests {
             PathBuf::from("."),
             None,
         );
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.set_autocomplete_provider(Box::new(provider));
 
         let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -3090,7 +3128,11 @@ mod tests {
             PathBuf::from("."),
             None,
         );
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.set_autocomplete_provider(Box::new(provider));
 
         let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -3160,7 +3202,11 @@ mod tests {
 
     #[test]
     fn editor_async_autocomplete_updates_apply() {
-        let mut editor = Editor::new(theme(), EditorOptions::default());
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
         editor.set_autocomplete_provider(Box::new(AsyncAutocompleteProvider));
 
         send(&mut editor, "@");

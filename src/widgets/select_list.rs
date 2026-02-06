@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use crate::core::component::Component;
 use crate::core::input_event::InputEvent;
-use crate::core::keybindings::{
-    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
-};
+use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
 use crate::core::text::utils::truncate_to_width;
 
 fn normalize_to_single_line(text: &str) -> String {
@@ -69,16 +67,7 @@ pub struct SelectList {
 }
 
 impl SelectList {
-    pub fn new(items: Vec<SelectItem>, max_visible: usize, theme: SelectListTheme) -> Self {
-        Self::new_with_keybindings_handle(
-            items,
-            max_visible,
-            theme,
-            default_editor_keybindings_handle(),
-        )
-    }
-
-    pub fn new_with_keybindings_handle(
+    pub fn new(
         items: Vec<SelectItem>,
         max_visible: usize,
         theme: SelectListTheme,
@@ -346,6 +335,7 @@ mod tests {
     use crate::core::component::Component;
     use crate::core::input::{parse_key, KeyEventType};
     use crate::core::input_event::InputEvent;
+    use crate::default_editor_keybindings_handle;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -376,7 +366,7 @@ mod tests {
             SelectItem::new("two", "two", None),
             SelectItem::new("three", "three", None),
         ];
-        let mut list = SelectList::new(items, 2, theme());
+        let mut list = SelectList::new(items, 2, theme(), default_editor_keybindings_handle());
 
         assert_eq!(list.get_selected_item().unwrap().value, "one");
 
@@ -399,7 +389,7 @@ mod tests {
             SelectItem::new("one", "one", None),
             SelectItem::new("two", "two", None),
         ];
-        let mut list = SelectList::new(items, 2, theme());
+        let mut list = SelectList::new(items, 2, theme(), default_editor_keybindings_handle());
 
         let changes: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let changes_ref = changes.clone();

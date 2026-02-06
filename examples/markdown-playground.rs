@@ -188,8 +188,7 @@ impl PaletteOverlay {
             SelectItem::new("quit", "Quit", Some("Exit the demo".to_string())),
         ];
 
-        let mut list =
-            SelectList::new_with_keybindings_handle(items, 8, select_list_theme(), keybindings);
+        let mut list = SelectList::new(items, 8, select_list_theme(), keybindings);
         {
             let state_for_select = Rc::clone(&state);
             list.set_on_select(Some(Box::new(move |item| {
@@ -472,11 +471,11 @@ fn main() {
 
     let editor = Rc::new(RefCell::new(Editor::new(
         editor_theme(),
+        keybindings.clone(),
         EditorOptions {
             height_mode: Some(EditorHeightMode::FillAvailable),
             paste_mode: Some(EditorPasteMode::Literal),
             render_handle: Some(render_handle.clone()),
-            keybindings: Some(keybindings.clone()),
             ..EditorOptions::default()
         },
     )));

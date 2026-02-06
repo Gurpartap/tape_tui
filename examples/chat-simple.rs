@@ -8,8 +8,9 @@ use pi_tui::core::autocomplete::CommandEntry;
 use pi_tui::core::component::{Component, Focusable};
 use pi_tui::widgets::select_list::SelectListTheme;
 use pi_tui::{
-    CombinedAutocompleteProvider, Editor, EditorOptions, EditorTheme, InputEvent, Loader, Markdown,
-    MarkdownTheme, ProcessTerminal, SlashCommand, Text, TUI,
+    default_editor_keybindings_handle, CombinedAutocompleteProvider, Editor, EditorOptions,
+    EditorTheme, InputEvent, Loader, Markdown, MarkdownTheme, ProcessTerminal, SlashCommand, Text,
+    TUI,
 };
 
 const WELCOME_TEXT: &str =
@@ -254,8 +255,10 @@ fn main() {
     let mut tui = TUI::new(terminal, Rc::clone(&root));
     let render_handle = tui.render_handle();
 
+    let keybindings = default_editor_keybindings_handle();
     let editor = Rc::new(RefCell::new(Editor::new(
         editor_theme(),
+        keybindings.clone(),
         EditorOptions {
             render_handle: Some(render_handle.clone()),
             ..EditorOptions::default()

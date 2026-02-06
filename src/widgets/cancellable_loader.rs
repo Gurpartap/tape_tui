@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use crate::core::component::Component;
 use crate::core::input_event::InputEvent;
-use crate::core::keybindings::{
-    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
-};
+use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
 use crate::runtime::tui::RenderHandle;
 use crate::widgets::loader::Loader;
 
@@ -31,21 +29,6 @@ pub struct CancellableLoader {
 
 impl CancellableLoader {
     pub fn new(
-        render_handle: RenderHandle,
-        spinner_color_fn: Box<dyn Fn(&str) -> String>,
-        message_color_fn: Box<dyn Fn(&str) -> String>,
-        message: Option<String>,
-    ) -> Self {
-        Self::new_with_keybindings_handle(
-            render_handle,
-            spinner_color_fn,
-            message_color_fn,
-            message,
-            default_editor_keybindings_handle(),
-        )
-    }
-
-    pub fn new_with_keybindings_handle(
         render_handle: RenderHandle,
         spinner_color_fn: Box<dyn Fn(&str) -> String>,
         message_color_fn: Box<dyn Fn(&str) -> String>,
@@ -97,7 +80,7 @@ impl CancellableLoader {
         message_color_fn: Box<dyn Fn(&str) -> String>,
         message: Option<String>,
     ) -> Self {
-        let keybindings = default_editor_keybindings_handle();
+        let keybindings = crate::core::keybindings::default_editor_keybindings_handle();
         let loader = super::loader::Loader::with_requester(
             render_requester,
             spinner_color_fn,

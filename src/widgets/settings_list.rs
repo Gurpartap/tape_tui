@@ -6,9 +6,7 @@ use std::rc::Rc;
 use crate::core::component::Component;
 use crate::core::fuzzy::fuzzy_filter;
 use crate::core::input_event::InputEvent;
-use crate::core::keybindings::{
-    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
-};
+use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
 use crate::core::text::slice::wrap_text_with_ansi;
 use crate::core::text::utils::truncate_to_width;
 use crate::core::text::width::visible_width;
@@ -54,7 +52,6 @@ pub struct SettingsListTheme {
 #[derive(Debug, Clone, Default)]
 pub struct SettingsListOptions {
     pub enable_search: bool,
-    pub keybindings: Option<EditorKeybindingsHandle>,
 }
 
 pub struct SettingsList {
@@ -81,16 +78,14 @@ impl SettingsList {
         theme: SettingsListTheme,
         on_change: Box<dyn FnMut(String, String)>,
         on_cancel: Box<dyn FnMut()>,
+        keybindings: EditorKeybindingsHandle,
         options: Option<SettingsListOptions>,
     ) -> Self {
         let options = options.unwrap_or_default();
         let search_enabled = options.enable_search;
-        let keybindings = options
-            .keybindings
-            .unwrap_or_else(default_editor_keybindings_handle);
         let filtered_indices: Vec<usize> = (0..items.len()).collect();
         let search_input = if search_enabled {
-            Some(Input::new_with_keybindings_handle(keybindings.clone()))
+            Some(Input::new(keybindings.clone()))
         } else {
             None
         };
@@ -442,6 +437,7 @@ mod tests {
     use crate::core::component::Component;
     use crate::core::input::{parse_key, KeyEventType};
     use crate::core::input_event::InputEvent;
+    use crate::default_editor_keybindings_handle;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -496,12 +492,14 @@ mod tests {
 
         let on_change = Box::new(|_id: String, _value: String| {});
         let on_cancel = Box::new(|| {});
+        let keybindings = default_editor_keybindings_handle();
         let mut list = SettingsList::new(
             items,
             2,
             theme(),
             on_change,
             on_cancel,
+            keybindings,
             Some(SettingsListOptions {
                 enable_search: true,
                 ..SettingsListOptions::default()
@@ -533,7 +531,15 @@ mod tests {
         });
         let on_cancel = Box::new(|| {});
 
-        let mut list = SettingsList::new(items, 2, theme(), on_change, on_cancel, None);
+        let mut list = SettingsList::new(
+            items,
+            2,
+            theme(),
+            on_change,
+            on_cancel,
+            default_editor_keybindings_handle(),
+            None,
+        );
 
         send(&mut list, "\r");
         assert_eq!(
