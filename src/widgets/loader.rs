@@ -255,14 +255,19 @@ mod tests {
             Some("Working".to_string()),
         );
 
+        // `Loader::start()` requests an initial render. Drain any pre-existing
+        // requests so we can deterministically observe the tick-triggered one.
+        for _ in rx.try_iter() {}
+        let baseline_requests = requests.load(Ordering::SeqCst);
+
         let before = loader.render(20);
 
         sleeper.wake();
         rx.recv_timeout(Duration::from_secs(1))
-            .expect("render request not observed");
+            .expect("tick render request not observed");
         let after = loader.render(20);
 
-        assert!(requests.load(Ordering::SeqCst) >= 1);
+        assert!(requests.load(Ordering::SeqCst) > baseline_requests);
         assert_ne!(before.get(1), after.get(1));
 
         loader.stop();
