@@ -603,21 +603,23 @@ fn count_csi_with_final_byte(bytes: &[u8], final_byte: u8) -> usize {
             i += 1;
             continue;
         }
-        let mut j = i + 2;
-        while j < bytes.len() && j - i <= 32 {
+
+        let start = i;
+        let mut next_i = start + 2;
+        let mut j = start + 2;
+        while j < bytes.len() && j - start <= 32 {
             let b = bytes[j];
             if (0x40..=0x7e).contains(&b) {
                 if b == final_byte {
                     count = count.saturating_add(1);
                 }
-                i = j + 1;
+                next_i = j + 1;
                 break;
             }
             j += 1;
         }
-        if j >= bytes.len() || j - i > 32 {
-            i += 2;
-        }
+
+        i = next_i;
     }
     count
 }
@@ -808,3 +810,13 @@ fn main() {
     tui.stop();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::count_csi_with_final_byte;
+
+    #[test]
+    fn count_csi_with_final_byte_counts_simple_sequence() {
+        let bytes = b"\x1b[H";
+        assert_eq!(count_csi_with_final_byte(bytes, b'H'), 1);
+    }
+}
