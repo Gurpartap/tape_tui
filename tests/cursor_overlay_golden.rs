@@ -1,6 +1,6 @@
 mod fixture;
 
-use pi_tui::core::terminal::Terminal;
+use pi_tui::core::output::TerminalCmd;
 use pi_tui::core::terminal_image::is_image_line;
 use pi_tui::render::overlay::{
     composite_overlays, resolve_overlay_layout, OverlayAnchor, OverlayOptions, RenderedOverlay,
@@ -10,43 +10,23 @@ use pi_tui::runtime::ime::{
     extract_cursor_position, position_hardware_cursor, CursorPos, CURSOR_MARKER,
 };
 
-#[derive(Default)]
-struct TestTerminal {
-    output: String,
-}
-
-impl Terminal for TestTerminal {
-    fn start(
-        &mut self,
-        _on_input: Box<dyn FnMut(String) + Send>,
-        _on_resize: Box<dyn FnMut() + Send>,
-    ) {
+fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
+    let mut out = String::new();
+    for cmd in cmds {
+        match cmd {
+            TerminalCmd::Bytes(data) => out.push_str(&data),
+            TerminalCmd::BytesStatic(data) => out.push_str(data),
+            TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
+            TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+            TerminalCmd::BracketedPasteEnable => out.push_str("\x1b[?2004h"),
+            TerminalCmd::BracketedPasteDisable => out.push_str("\x1b[?2004l"),
+            TerminalCmd::KittyQuery => out.push_str("\x1b[?u"),
+            TerminalCmd::KittyEnable => out.push_str("\x1b[>7u"),
+            TerminalCmd::KittyDisable => out.push_str("\x1b[<u"),
+            TerminalCmd::QueryCellSize => out.push_str("\x1b[16t"),
+        }
     }
-    fn stop(&mut self) {}
-    fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
-    fn write(&mut self, data: &str) {
-        self.output.push_str(data);
-    }
-    fn columns(&self) -> u16 {
-        80
-    }
-    fn rows(&self) -> u16 {
-        24
-    }
-    fn kitty_protocol_active(&self) -> bool {
-        false
-    }
-    fn move_by(&mut self, _lines: i32) {}
-    fn hide_cursor(&mut self) {
-        self.output.push_str("\x1b[?25l");
-    }
-    fn show_cursor(&mut self) {
-        self.output.push_str("\x1b[?25h");
-    }
-    fn clear_line(&mut self) {}
-    fn clear_from_cursor(&mut self) {}
-    fn clear_screen(&mut self) {}
-    fn set_title(&mut self, _title: &str) {}
+    out
 }
 
 #[test]
@@ -57,10 +37,10 @@ fn cursor_marker_and_hardware_cursor_match_fixture() {
     assert_eq!(pos, Some(CursorPos { row: 1, col: 3 }));
     assert_eq!(lines[1], "world");
 
-    let mut term = TestTerminal::default();
-    let new_row = position_hardware_cursor(&mut term, pos, lines.len(), 0, true);
+    let (new_row, cmds) = position_hardware_cursor(pos, lines.len(), 0, true);
     assert_eq!(new_row, 1);
-    assert_eq!(term.output, expected);
+    let output = cmds_to_bytes(cmds);
+    assert_eq!(output, expected);
 }
 
 #[test]

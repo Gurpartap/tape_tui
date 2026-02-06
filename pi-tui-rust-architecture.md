@@ -14,35 +14,35 @@ All details below are aligned with:
 ## Minimum viable core (parity‑critical behaviors)
 
 ### 1) Terminal abstraction + raw mode lifecycle
-**Terminal API must include:**
+**Terminal API must include (I/O only):**
 - `start(onInput, onResize)`
 - `stop()`
 - `drainInput(maxMs, idleMs)`
 - `write(data)`
-- `columns`, `rows`, `kittyProtocolActive`
-- `moveBy(lines)`
-- `hideCursor()`, `showCursor()`
-- `clearLine()`, `clearFromCursor()`, `clearScreen()`
-- `setTitle(title)`
+- `columns`, `rows`
+
+**Output API must include (single output gate):**
+- `TerminalCmd` typed ops (cursor/protocol toggles/queries) + raw bytes.
+- `OutputGate` buffers `TerminalCmd` and flushes them in a deterministic order.
+- `OutputGate::flush(..)` is the only place that calls `Terminal::write(..)`.
 
 **Process terminal behavior (parity):**
 - On `start()`:
   - Store prior raw state; enable raw mode.
   - `stdin.setEncoding("utf8")`, `stdin.resume()`.
-  - Enable bracketed paste: `CSI ?2004 h`.
   - Attach resize handler; trigger `SIGWINCH` to refresh stale dimensions on Unix.
-  - Query Kitty protocol: `CSI ? u` and detect response via `StdinBuffer`.
-- On Kitty response (`CSI ?<flags>u`):
-  - Set global Kitty active; enable protocol with `CSI >7u`.
+  - Start input thread and route sequences to the runtime input queue.
+- On Kitty response (`CSI ?<flags>u`), delivered via the input queue:
+  - Runtime enables kitty keyboard protocol with `CSI >7u` via `OutputGate` (no background-thread writes).
 - `write()` optionally logs to `PI_TUI_WRITE_LOG`.
 - On `stop()`:
-  - Disable bracketed paste: `CSI ?2004 l`.
-  - Disable Kitty protocol if active: `CSI <u`.
+  - Runtime disables bracketed paste: `CSI ?2004 l`.
+  - Runtime disables Kitty protocol if active: `CSI <u`.
   - Remove input/resize handlers.
   - `stdin.pause()` **before** leaving raw mode to avoid Ctrl‑D leakage.
   - Restore original raw mode.
 - `drainInput()`:
-  - Disable Kitty protocol first to avoid new release events.
+  - Runtime disables Kitty protocol first (via `OutputGate`) to avoid new release events.
   - Temporarily detach input handler and wait for idle window to prevent key‑release leakage (slow SSH).
 
 ### 2) Component interface (input filtering parity)
@@ -119,7 +119,8 @@ src/
   lib.rs
   core/
     mod.rs
-    terminal.rs         // Terminal trait + capability types
+    output.rs           // TerminalCmd + OutputGate (single output gate)
+    terminal.rs         // Terminal trait (I/O only) + lifecycle helpers
     component.rs        // Component + Focusable traits (wantsKeyRelease)
     input.rs            // KeyId, KeyEvent, matchesKey/parseKey
     terminal_image.rs   // capabilities, isImageLine, cell dimensions
@@ -141,7 +142,7 @@ src/
     ime.rs              // cursor marker extraction + hardware cursor
   platform/
     mod.rs
-    process_terminal.rs // raw mode + tty IO + kitty query/enable
+    process_terminal.rs // raw mode + tty I/O (no protocol writes from background threads)
     stdin_buffer.rs     // escape-sequence buffering + paste logic
   widgets/              // optional components
 ```
@@ -159,9 +160,11 @@ Layering:
 ```rust
 // core/terminal.rs
 pub trait Terminal {
-    fn start(&mut self,
-             on_input: Box<dyn FnMut(String) + Send>,
-             on_resize: Box<dyn FnMut() + Send>);
+    fn start(
+        &mut self,
+        on_input: Box<dyn FnMut(String) + Send>,
+        on_resize: Box<dyn FnMut() + Send>,
+    );
     fn stop(&mut self);
     fn drain_input(&mut self, max_ms: u64, idle_ms: u64);
 
@@ -169,16 +172,28 @@ pub trait Terminal {
 
     fn columns(&self) -> u16;
     fn rows(&self) -> u16;
-    fn kitty_protocol_active(&self) -> bool;
+}
 
-    fn move_by(&mut self, lines: i32);
-    fn hide_cursor(&mut self);
-    fn show_cursor(&mut self);
+// core/output.rs
+pub enum TerminalCmd {
+    Bytes(String),
+    BytesStatic(&'static str),
+    HideCursor,
+    ShowCursor,
+    BracketedPasteEnable,
+    BracketedPasteDisable,
+    KittyQuery,
+    KittyEnable,
+    KittyDisable,
+    QueryCellSize,
+}
 
-    fn clear_line(&mut self);
-    fn clear_from_cursor(&mut self);
-    fn clear_screen(&mut self);
-    fn set_title(&mut self, title: &str);
+pub struct OutputGate {
+    // buffers TerminalCmd in deterministic order
+}
+
+impl OutputGate {
+    pub fn flush<T: Terminal>(&mut self, term: &mut T);
 }
 
 // core/component.rs
@@ -206,16 +221,19 @@ pub struct DiffRenderer {
 impl DiffRenderer {
     pub fn render(
         &mut self,
-        term: &mut dyn Terminal,
         lines: Vec<String>,
-        cursor: Option<CursorPos>, // IME cursor position if any
+        width: usize,
+        height: usize,
         is_image_line: fn(&str) -> bool,
-    );
+        clear_on_shrink: bool,
+        has_overlays: bool,
+    ) -> Vec<TerminalCmd>;
 }
 
 // runtime/tui.rs
 pub struct TuiRuntime<T: Terminal> {
     terminal: T,
+    output: OutputGate, // single output gate for the entire process
     root: Box<dyn Component>,
     renderer: DiffRenderer,
     focused: Option<usize>,

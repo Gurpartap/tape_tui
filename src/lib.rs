@@ -1,6 +1,6 @@
 //! Rust port of pi-tui (skeleton).
 //!
-//! Invariant: single output gate — only the renderer writes to the terminal.
+//! Invariant: single output gate — only `core::output::OutputGate::flush(..)` writes to the terminal.
 
 pub mod config;
 pub mod logging;

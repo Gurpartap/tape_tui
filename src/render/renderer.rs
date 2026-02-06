@@ -1,6 +1,6 @@
 //! Diff renderer (Phase 4).
 
-use crate::core::terminal::Terminal;
+use crate::core::output::TerminalCmd;
 use crate::core::text::width::visible_width;
 use crate::logging::{
     debug_redraw_enabled, log_debug_redraw, log_tui_debug, tui_debug_enabled, RenderDebugInfo,
@@ -44,12 +44,11 @@ impl DiffRenderer {
 
     fn full_render(
         &mut self,
-        term: &mut dyn Terminal,
         lines: &[String],
         width: usize,
         height: usize,
         clear: bool,
-    ) {
+    ) -> String {
         let mut buffer = String::from(SYNC_START);
         if clear {
             buffer.push_str(CLEAR_ALL);
@@ -61,7 +60,6 @@ impl DiffRenderer {
             buffer.push_str(line);
         }
         buffer.push_str(SYNC_END);
-        term.write(&buffer);
 
         self.cursor_row = lines.len().saturating_sub(1);
         self.hardware_cursor_row = self.cursor_row;
@@ -73,18 +71,20 @@ impl DiffRenderer {
         self.previous_viewport_top = self.max_lines_rendered.saturating_sub(height);
         self.previous_lines = lines.to_vec();
         self.previous_width = width;
+
+        buffer
     }
 
     pub fn render(
         &mut self,
-        term: &mut dyn Terminal,
         mut lines: Vec<String>,
+        width: usize,
+        height: usize,
         is_image_line: fn(&str) -> bool,
         clear_on_shrink: bool,
         has_overlays: bool,
-    ) {
-        let width = term.columns() as usize;
-        let height = term.rows() as usize;
+    ) -> Vec<TerminalCmd> {
+        let mut cmds = Vec::new();
 
         let mut viewport_top = self.max_lines_rendered.saturating_sub(height);
         let mut prev_viewport_top = self.previous_viewport_top;
@@ -113,8 +113,9 @@ impl DiffRenderer {
                     height,
                 );
             }
-            self.full_render(term, &lines, width, height, false);
-            return;
+            let buffer = self.full_render(&lines, width, height, false);
+            cmds.push(TerminalCmd::Bytes(buffer));
+            return cmds;
         }
 
         if width_changed {
@@ -122,8 +123,9 @@ impl DiffRenderer {
                 let reason = format!("width changed ({} -> {})", self.previous_width, width);
                 log_debug_redraw(&reason, self.previous_lines.len(), lines.len(), height);
             }
-            self.full_render(term, &lines, width, height, true);
-            return;
+            let buffer = self.full_render(&lines, width, height, true);
+            cmds.push(TerminalCmd::Bytes(buffer));
+            return cmds;
         }
 
         if clear_on_shrink && lines.len() < self.max_lines_rendered && !has_overlays {
@@ -134,8 +136,9 @@ impl DiffRenderer {
                 );
                 log_debug_redraw(&reason, self.previous_lines.len(), lines.len(), height);
             }
-            self.full_render(term, &lines, width, height, true);
-            return;
+            let buffer = self.full_render(&lines, width, height, true);
+            cmds.push(TerminalCmd::Bytes(buffer));
+            return cmds;
         }
 
         let mut first_changed: Option<usize> = None;
@@ -162,7 +165,7 @@ impl DiffRenderer {
 
         let Some(first_changed) = first_changed else {
             self.previous_viewport_top = self.max_lines_rendered.saturating_sub(height);
-            return;
+            return cmds;
         };
         let last_changed = last_changed.unwrap_or(first_changed);
 
@@ -192,8 +195,9 @@ impl DiffRenderer {
                         let reason = format!("extraLines > height ({} > {})", extra_lines, height);
                         log_debug_redraw(&reason, self.previous_lines.len(), lines.len(), height);
                     }
-                    self.full_render(term, &lines, width, height, true);
-                    return;
+                    let buffer = self.full_render(&lines, width, height, true);
+                    cmds.push(TerminalCmd::Bytes(buffer));
+                    return cmds;
                 }
                 if extra_lines > 0 {
                     buffer.push_str("\x1b[1B");
@@ -208,14 +212,14 @@ impl DiffRenderer {
                     buffer.push_str(&format!("\x1b[{}A", extra_lines));
                 }
                 buffer.push_str(SYNC_END);
-                term.write(&buffer);
+                cmds.push(TerminalCmd::Bytes(buffer));
                 self.cursor_row = target_row;
                 self.hardware_cursor_row = target_row;
             }
             self.previous_lines = lines;
             self.previous_width = width;
             self.previous_viewport_top = self.max_lines_rendered.saturating_sub(height);
-            return;
+            return cmds;
         }
 
         let previous_content_viewport_top = self.previous_lines.len().saturating_sub(height);
@@ -227,8 +231,9 @@ impl DiffRenderer {
                 );
                 log_debug_redraw(&reason, self.previous_lines.len(), lines.len(), height);
             }
-            self.full_render(term, &lines, width, height, true);
-            return;
+            let buffer = self.full_render(&lines, width, height, true);
+            cmds.push(TerminalCmd::Bytes(buffer));
+            return cmds;
         }
 
         let mut buffer = String::from(SYNC_START);
@@ -326,7 +331,7 @@ impl DiffRenderer {
             };
             log_tui_debug(&info);
         }
-        term.write(&buffer);
+        cmds.push(TerminalCmd::Bytes(buffer));
 
         self.cursor_row = lines.len().saturating_sub(1);
         self.hardware_cursor_row = final_cursor_row;
@@ -334,6 +339,8 @@ impl DiffRenderer {
         self.previous_viewport_top = self.max_lines_rendered.saturating_sub(height);
         self.previous_lines = lines;
         self.previous_width = width;
+
+        cmds
     }
 }
 
@@ -348,57 +355,25 @@ fn apply_line_resets(lines: &mut [String], is_image_line: fn(&str) -> bool) {
 #[cfg(test)]
 mod tests {
     use super::DiffRenderer;
-    use crate::core::terminal::Terminal;
+    use crate::core::output::TerminalCmd;
 
-    #[derive(Default)]
-    struct TestTerminal {
-        output: String,
-        columns: u16,
-        rows: u16,
-    }
-
-    impl TestTerminal {
-        fn new(columns: u16, rows: u16) -> Self {
-            Self {
-                output: String::new(),
-                columns,
-                rows,
+    fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
+        let mut out = String::new();
+        for cmd in cmds {
+            match cmd {
+                TerminalCmd::Bytes(data) => out.push_str(&data),
+                TerminalCmd::BytesStatic(data) => out.push_str(data),
+                TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
+                TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+                TerminalCmd::BracketedPasteEnable => out.push_str("\x1b[?2004h"),
+                TerminalCmd::BracketedPasteDisable => out.push_str("\x1b[?2004l"),
+                TerminalCmd::KittyQuery => out.push_str("\x1b[?u"),
+                TerminalCmd::KittyEnable => out.push_str("\x1b[>7u"),
+                TerminalCmd::KittyDisable => out.push_str("\x1b[<u"),
+                TerminalCmd::QueryCellSize => out.push_str("\x1b[16t"),
             }
         }
-
-        fn take_output(&mut self) -> String {
-            std::mem::take(&mut self.output)
-        }
-    }
-
-    impl Terminal for TestTerminal {
-        fn start(
-            &mut self,
-            _on_input: Box<dyn FnMut(String) + Send>,
-            _on_resize: Box<dyn FnMut() + Send>,
-        ) {
-        }
-        fn stop(&mut self) {}
-        fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
-        fn write(&mut self, data: &str) {
-            self.output.push_str(data);
-        }
-        fn columns(&self) -> u16 {
-            self.columns
-        }
-        fn rows(&self) -> u16 {
-            self.rows
-        }
-        fn kitty_protocol_active(&self) -> bool {
-            false
-        }
-        fn move_by(&mut self, _lines: i32) {}
-        fn hide_cursor(&mut self) {}
-        fn show_cursor(&mut self) {}
-        fn clear_line(&mut self) {}
-        fn clear_from_cursor(&mut self) {}
-        fn clear_screen(&mut self) {}
-        fn set_title(&mut self, _title: &str) {}
+        out
     }
 
     fn not_image(_: &str) -> bool {
@@ -408,37 +383,47 @@ mod tests {
     #[test]
     fn width_change_triggers_full_clear() {
         let mut renderer = DiffRenderer::new();
-        let mut term = TestTerminal::new(10, 5);
-        renderer.render(&mut term, vec!["line".to_string()], not_image, false, false);
-        term.take_output();
+        let output = cmds_to_bytes(renderer.render(
+            vec!["line".to_string()],
+            10,
+            5,
+            not_image,
+            false,
+            false,
+        ));
+        assert!(!output.is_empty());
 
-        term.columns = 12;
-        renderer.render(&mut term, vec!["line".to_string()], not_image, false, false);
-        let output = term.take_output();
+        let output = cmds_to_bytes(renderer.render(
+            vec!["line".to_string()],
+            12,
+            5,
+            not_image,
+            false,
+            false,
+        ));
         assert!(output.contains("\x1b[3J\x1b[2J\x1b[H"));
     }
 
     #[test]
     fn diff_renders_only_changed_lines() {
         let mut renderer = DiffRenderer::new();
-        let mut term = TestTerminal::new(20, 5);
         renderer.render(
-            &mut term,
             vec!["one".to_string(), "two".to_string()],
+            20,
+            5,
             not_image,
             false,
             false,
         );
-        term.take_output();
 
-        renderer.render(
-            &mut term,
+        let output = cmds_to_bytes(renderer.render(
             vec!["one".to_string(), "tWO".to_string()],
+            20,
+            5,
             not_image,
             false,
             false,
-        );
-        let output = term.take_output();
+        ));
         assert!(output.contains("tWO"));
         assert!(!output.contains("one"));
     }
@@ -446,24 +431,10 @@ mod tests {
     #[test]
     fn overflow_panics_only_on_diff_path() {
         let mut renderer = DiffRenderer::new();
-        let mut term = TestTerminal::new(5, 5);
-        renderer.render(
-            &mut term,
-            vec!["123456".to_string()],
-            not_image,
-            false,
-            false,
-        );
-        term.take_output();
+        renderer.render(vec!["123456".to_string()], 5, 5, not_image, false, false);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            renderer.render(
-                &mut term,
-                vec!["abcdef".to_string()],
-                not_image,
-                false,
-                false,
-            );
+            renderer.render(vec!["abcdef".to_string()], 5, 5, not_image, false, false);
         }));
         assert!(result.is_err());
     }
@@ -471,41 +442,42 @@ mod tests {
     #[test]
     fn identical_render_produces_no_output() {
         let mut renderer = DiffRenderer::new();
-        let mut term = TestTerminal::new(20, 5);
-        renderer.render(&mut term, vec!["line".to_string()], not_image, false, false);
-        term.take_output();
+        renderer.render(vec!["line".to_string()], 20, 5, not_image, false, false);
 
-        renderer.render(&mut term, vec!["line".to_string()], not_image, false, false);
-        let output = term.take_output();
+        let output = cmds_to_bytes(renderer.render(
+            vec!["line".to_string()],
+            20,
+            5,
+            not_image,
+            false,
+            false,
+        ));
         assert!(output.is_empty(), "expected no output, got: {output:?}");
     }
 
     #[test]
     fn segment_reset_appended_to_non_image_lines() {
         let mut renderer = DiffRenderer::new();
-        let mut term = TestTerminal::new(20, 5);
-        renderer.render(
-            &mut term,
+        let output = cmds_to_bytes(renderer.render(
             vec!["hello".to_string()],
+            20,
+            5,
             not_image,
             false,
             false,
-        );
-        let output = term.take_output();
+        ));
         assert!(output.contains("hello\x1b[0m\x1b]8;;\x07"));
     }
 
     #[test]
     fn image_lines_skip_width_check() {
         let mut renderer = DiffRenderer::new();
-        let mut term = TestTerminal::new(5, 5);
         let is_image = |line: &str| line.contains("\x1b_G");
-        renderer.render(&mut term, vec!["short".to_string()], is_image, false, false);
-        term.take_output();
+        renderer.render(vec!["short".to_string()], 5, 5, is_image, false, false);
 
         let image_line = format!("\x1b_G{}", "X".repeat(100));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            renderer.render(&mut term, vec![image_line], is_image, false, false);
+            renderer.render(vec![image_line], 5, 5, is_image, false, false);
         }));
         assert!(result.is_ok());
     }

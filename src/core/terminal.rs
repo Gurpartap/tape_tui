@@ -21,24 +21,6 @@ pub trait Terminal {
     /// Terminal dimensions.
     fn columns(&self) -> u16;
     fn rows(&self) -> u16;
-
-    /// Whether Kitty keyboard protocol is active.
-    fn kitty_protocol_active(&self) -> bool;
-
-    /// Cursor positioning (relative to current position).
-    fn move_by(&mut self, lines: i32);
-
-    /// Cursor visibility.
-    fn hide_cursor(&mut self);
-    fn show_cursor(&mut self);
-
-    /// Clear operations.
-    fn clear_line(&mut self);
-    fn clear_from_cursor(&mut self);
-    fn clear_screen(&mut self);
-
-    /// Title operations.
-    fn set_title(&mut self, title: &str);
 }
 
 /// RAII guard that drains input and stops the terminal on drop.

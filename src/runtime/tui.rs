@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::core::component::Component;
 use crate::core::input::KeyEventType;
 use crate::core::input_event::{parse_input_events, InputEvent};
+use crate::core::output::{OutputGate, TerminalCmd};
 use crate::core::terminal::Terminal;
 use crate::core::terminal_image::{
     get_capabilities, is_image_line, set_cell_dimensions, CellDimensions,
@@ -25,6 +26,7 @@ const STOP_DRAIN_IDLE_MS: u64 = 50;
 
 pub struct TuiRuntime<T: Terminal> {
     terminal: T,
+    output: OutputGate,
     root: Rc<RefCell<Box<dyn Component>>>,
     renderer: DiffRenderer,
     focus: FocusState,
@@ -38,6 +40,8 @@ pub struct TuiRuntime<T: Terminal> {
     pending_resize: Arc<AtomicBool>,
     input_buffer: String,
     cell_size_query_pending: bool,
+    kitty_keyboard_enabled: bool,
+    kitty_enable_pending: bool,
 }
 
 #[derive(Default)]
@@ -115,6 +119,7 @@ impl<T: Terminal> TuiRuntime<T> {
         let show_hardware_cursor = env_flag("PI_HARDWARE_CURSOR");
         Self {
             terminal,
+            output: OutputGate::new(),
             root,
             renderer: DiffRenderer::new(),
             focus: FocusState::new(),
@@ -128,6 +133,8 @@ impl<T: Terminal> TuiRuntime<T> {
             pending_resize: Arc::new(AtomicBool::new(false)),
             input_buffer: String::new(),
             cell_size_query_pending: false,
+            kitty_keyboard_enabled: false,
+            kitty_enable_pending: false,
         }
     }
 
@@ -204,6 +211,9 @@ impl<T: Terminal> TuiRuntime<T> {
 
     pub fn start(&mut self) {
         self.stopped = false;
+        self.output.clear();
+        self.kitty_keyboard_enabled = false;
+        self.kitty_enable_pending = false;
         let input_queue = Arc::clone(&self.pending_inputs);
         let resize_flag = Arc::clone(&self.pending_resize);
         self.terminal.start(
@@ -216,8 +226,12 @@ impl<T: Terminal> TuiRuntime<T> {
                 resize_flag.store(true, Ordering::SeqCst);
             }),
         );
-        self.terminal.hide_cursor();
+
+        self.output.push(TerminalCmd::BracketedPasteEnable);
+        self.output.push(TerminalCmd::KittyQuery);
+        self.output.push(TerminalCmd::HideCursor);
         self.query_cell_size();
+        self.flush_output();
         self.request_render();
     }
 
@@ -226,7 +240,14 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
         self.place_cursor_at_end();
-        self.terminal.show_cursor();
+        self.output.push(TerminalCmd::ShowCursor);
+        self.output.push(TerminalCmd::BracketedPasteDisable);
+        if self.kitty_keyboard_enabled || self.kitty_enable_pending {
+            self.output.push(TerminalCmd::KittyDisable);
+        }
+        self.flush_output();
+        self.kitty_keyboard_enabled = false;
+        self.kitty_enable_pending = false;
         self.terminal
             .drain_input(STOP_DRAIN_MAX_MS, STOP_DRAIN_IDLE_MS);
         self.terminal.stop();
@@ -268,6 +289,7 @@ impl<T: Terminal> TuiRuntime<T> {
         }
 
         self.render_if_needed();
+        self.flush_output();
     }
 
     pub fn handle_input(&mut self, data: &str) {
@@ -287,8 +309,15 @@ impl<T: Terminal> TuiRuntime<T> {
             data = &owned;
         }
 
-        let kitty_active = self.terminal.kitty_protocol_active();
-        let events = parse_input_events(data, kitty_active);
+        if is_kitty_query_response(data) {
+            if !self.kitty_keyboard_enabled && !self.kitty_enable_pending {
+                self.output.push(TerminalCmd::KittyEnable);
+                self.kitty_enable_pending = true;
+            }
+            return;
+        }
+
+        let events = parse_input_events(data, self.kitty_keyboard_enabled);
         if events.is_empty() {
             return;
         }
@@ -358,22 +387,36 @@ impl<T: Terminal> TuiRuntime<T> {
         let total_lines = lines.len();
         let cursor_pos = extract_cursor_position(&mut lines, height);
         let has_overlays = self.has_overlay();
-        self.renderer.render(
-            &mut self.terminal,
+        let render_cmds = self.renderer.render(
             lines,
+            width,
+            height,
             is_image_line,
             self.clear_on_shrink,
             has_overlays,
         );
+        self.output.extend(render_cmds);
 
-        let updated_row = position_hardware_cursor(
-            &mut self.terminal,
+        let (updated_row, cursor_cmds) = position_hardware_cursor(
             cursor_pos,
             total_lines,
             self.renderer.hardware_cursor_row(),
             self.show_hardware_cursor,
         );
+        self.output.extend(cursor_cmds);
         self.renderer.set_hardware_cursor_row(updated_row);
+        self.flush_output();
+    }
+
+    fn flush_output(&mut self) {
+        if self.output.is_empty() {
+            return;
+        }
+        self.output.flush(&mut self.terminal);
+        if self.kitty_enable_pending {
+            self.kitty_keyboard_enabled = true;
+            self.kitty_enable_pending = false;
+        }
     }
 
     fn place_cursor_at_end(&mut self) {
@@ -384,12 +427,14 @@ impl<T: Terminal> TuiRuntime<T> {
         let target_row = total_lines;
         let current_row = self.renderer.hardware_cursor_row();
         let diff = target_row as i32 - current_row as i32;
+        let mut buffer = String::new();
         if diff > 0 {
-            self.terminal.write(&format!("\x1b[{}B", diff));
+            buffer.push_str(&format!("\x1b[{}B", diff));
         } else if diff < 0 {
-            self.terminal.write(&format!("\x1b[{}A", -diff));
+            buffer.push_str(&format!("\x1b[{}A", -diff));
         }
-        self.terminal.write("\r\n");
+        buffer.push_str("\r\n");
+        self.output.push(TerminalCmd::Bytes(buffer));
         self.renderer.set_hardware_cursor_row(target_row);
     }
 
@@ -398,7 +443,7 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
         self.cell_size_query_pending = true;
-        self.terminal.write("\x1b[16t");
+        self.output.push(TerminalCmd::QueryCellSize);
     }
 
     fn filter_cell_size_response(&mut self, data: &str) -> Option<String> {
@@ -580,6 +625,14 @@ impl<T: Terminal> Drop for TuiRuntime<T> {
     }
 }
 
+fn is_kitty_query_response(sequence: &str) -> bool {
+    if !sequence.starts_with("\x1b[?") || !sequence.ends_with('u') {
+        return false;
+    }
+    let inner = &sequence[3..sequence.len() - 1];
+    !inner.is_empty() && inner.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn env_flag(name: &str) -> bool {
     env::var(name).map(|value| value == "1").unwrap_or(false)
 }
@@ -692,16 +745,6 @@ mod tests {
                 self.rows
             }
         }
-        fn kitty_protocol_active(&self) -> bool {
-            false
-        }
-        fn move_by(&mut self, _lines: i32) {}
-        fn hide_cursor(&mut self) {}
-        fn show_cursor(&mut self) {}
-        fn clear_line(&mut self) {}
-        fn clear_from_cursor(&mut self) {}
-        fn clear_screen(&mut self) {}
-        fn set_title(&mut self, _title: &str) {}
     }
 
     #[derive(Default)]
@@ -856,6 +899,41 @@ mod tests {
     }
 
     #[test]
+    fn output_order_is_protocol_then_frame_then_cursor() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        reset_capabilities_cache();
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        #[derive(Default)]
+        struct CursorMarkerComponent;
+
+        impl Component for CursorMarkerComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec![format!("hello{}", crate::runtime::ime::CURSOR_MARKER)]
+            }
+        }
+
+        let terminal = TestTerminal::new(80, 24);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(CursorMarkerComponent::default())));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start();
+        runtime.terminal.output.clear();
+
+        runtime.handle_input("\x1b[?1u");
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        let expected = "\x1b[>7u\x1b[?2026hhello\x1b[0m\x1b]8;;\x07\x1b[?2026l\x1b[6G\x1b[?25l";
+        assert_eq!(output, expected);
+
+        reset_capabilities_cache();
+    }
+
+    #[test]
     fn overlay_focus_handoff_and_restore() {
         let terminal = TestTerminal::new(80, 24);
         let root_focus = Rc::new(RefCell::new(false));
@@ -954,7 +1032,7 @@ mod tests {
 
     #[derive(Default, Debug)]
     struct TrackingState {
-        show_cursor_calls: usize,
+        writes: String,
         drain_input_calls: usize,
         stop_calls: usize,
         drain_max_ms: Option<u64>,
@@ -997,7 +1075,10 @@ mod tests {
             state.drain_idle_ms = Some(idle_ms);
         }
 
-        fn write(&mut self, _data: &str) {}
+        fn write(&mut self, data: &str) {
+            let mut state = self.state.lock().expect("tracking state lock poisoned");
+            state.writes.push_str(data);
+        }
 
         fn columns(&self) -> u16 {
             80
@@ -1006,24 +1087,6 @@ mod tests {
         fn rows(&self) -> u16 {
             24
         }
-
-        fn kitty_protocol_active(&self) -> bool {
-            false
-        }
-
-        fn move_by(&mut self, _lines: i32) {}
-
-        fn hide_cursor(&mut self) {}
-
-        fn show_cursor(&mut self) {
-            let mut state = self.state.lock().expect("tracking state lock poisoned");
-            state.show_cursor_calls += 1;
-        }
-
-        fn clear_line(&mut self) {}
-        fn clear_from_cursor(&mut self) {}
-        fn clear_screen(&mut self) {}
-        fn set_title(&mut self, _title: &str) {}
     }
 
     #[test]
@@ -1038,7 +1101,11 @@ mod tests {
         drop(runtime);
 
         TrackingTerminal::with_state(&state, |state| {
-            assert_eq!(state.show_cursor_calls, 1);
+            assert!(
+                state.writes.contains("\x1b[?25h"),
+                "expected show-cursor bytes in output, got: {:?}",
+                state.writes
+            );
             assert_eq!(state.drain_input_calls, 1);
             assert_eq!(state.stop_calls, 1);
             assert_eq!(state.drain_max_ms, Some(super::STOP_DRAIN_MAX_MS));
@@ -1059,7 +1126,11 @@ mod tests {
         drop(runtime);
 
         TrackingTerminal::with_state(&state, |state| {
-            assert_eq!(state.show_cursor_calls, 1);
+            assert!(
+                state.writes.contains("\x1b[?25h"),
+                "expected show-cursor bytes in output, got: {:?}",
+                state.writes
+            );
             assert_eq!(state.drain_input_calls, 1);
             assert_eq!(state.stop_calls, 1);
             assert_eq!(state.drain_max_ms, Some(super::STOP_DRAIN_MAX_MS));
@@ -1077,7 +1148,11 @@ mod tests {
         drop(TuiRuntime::new(terminal, root));
 
         TrackingTerminal::with_state(&state, |state| {
-            assert_eq!(state.show_cursor_calls, 0);
+            assert!(
+                state.writes.is_empty(),
+                "unexpected writes: {:?}",
+                state.writes
+            );
             assert_eq!(state.drain_input_calls, 0);
             assert_eq!(state.stop_calls, 0);
         });

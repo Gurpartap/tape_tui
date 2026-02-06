@@ -9,7 +9,7 @@ This roadmap breaks the port into concrete milestones with per‑phase checklist
 
 **Checklist**
 - [ ] Create module layout (`core/`, `render/`, `runtime/`, `platform/`, `widgets/`)
-- [ ] Define “single output gate” rule (renderer is only writer)
+- [ ] Define “single output gate” rule (only `OutputGate::flush(..)` writes to the terminal)
 - [ ] Add env config plumbing:
   - `PI_HARDWARE_CURSOR`, `PI_CLEAR_ON_SHRINK`, `PI_TUI_WRITE_LOG`, `PI_TUI_DEBUG`, `PI_DEBUG_REDRAW`
 - [ ] Add basic logging helpers (render/debug logs)
@@ -24,11 +24,11 @@ This roadmap breaks the port into concrete milestones with per‑phase checklist
 **Goal:** terminal state safety and deterministic lifecycle.
 
 **Checklist**
-- [ ] `Terminal` trait with full parity API
+- [ ] `Terminal` trait with minimal I/O surface (input handlers, size, raw `write(..)`)
+- [ ] `OutputGate` + `TerminalCmd` typed output façade (cursor/protocol toggles + raw bytes)
 - [ ] `ProcessTerminal` implementation:
   - raw mode enter/restore
-  - bracketed paste on/off
-  - Kitty query (`CSI ? u`) + enable/disable (`>7u` / `<u`)
+  - no protocol toggles from the platform layer (routed through `OutputGate`)
   - resize handling + SIGWINCH refresh
   - `stdin.pause()` on stop
   - `drainInput()` with idle/max window

@@ -576,38 +576,6 @@ impl<T: Terminal> Terminal for ForensicsTerminal<T> {
     fn rows(&self) -> u16 {
         self.inner.rows()
     }
-
-    fn kitty_protocol_active(&self) -> bool {
-        self.inner.kitty_protocol_active()
-    }
-
-    fn move_by(&mut self, lines: i32) {
-        self.inner.move_by(lines);
-    }
-
-    fn hide_cursor(&mut self) {
-        self.inner.hide_cursor();
-    }
-
-    fn show_cursor(&mut self) {
-        self.inner.show_cursor();
-    }
-
-    fn clear_line(&mut self) {
-        self.inner.clear_line();
-    }
-
-    fn clear_from_cursor(&mut self) {
-        self.inner.clear_from_cursor();
-    }
-
-    fn clear_screen(&mut self) {
-        self.inner.clear_screen();
-    }
-
-    fn set_title(&mut self, title: &str) {
-        self.inner.set_title(title);
-    }
 }
 
 fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {

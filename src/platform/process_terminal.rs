@@ -19,12 +19,6 @@ use libc::{self, c_int};
 #[cfg(unix)]
 use signal_hook::iterator::Signals;
 
-const BRACKETED_PASTE_ENABLE: &str = "\x1b[?2004h";
-const BRACKETED_PASTE_DISABLE: &str = "\x1b[?2004l";
-const KITTY_QUERY: &str = "\x1b[?u";
-const KITTY_ENABLE: &str = "\x1b[>7u";
-const KITTY_DISABLE: &str = "\x1b[<u";
-
 #[derive(Default)]
 struct InputState {
     handler: Option<Box<dyn FnMut(String) + Send>>,
@@ -35,14 +29,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
         .as_millis() as u64
-}
-
-fn is_kitty_response(sequence: &str) -> bool {
-    if !sequence.starts_with("\x1b[?") || !sequence.ends_with('u') {
-        return false;
-    }
-    let inner = &sequence[3..sequence.len() - 1];
-    !inner.is_empty() && inner.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(unix)]
@@ -141,7 +127,6 @@ pub struct ProcessTerminal {
     stop_flag: Arc<AtomicBool>,
     drain_mode: Arc<AtomicBool>,
     last_input_time: Arc<AtomicU64>,
-    kitty_protocol_active: Arc<AtomicBool>,
     write_log_path: Option<PathBuf>,
     write_log_failed: bool,
     resize_signal_handle: Option<signal_hook::iterator::Handle>,
@@ -168,7 +153,6 @@ impl ProcessTerminal {
             stop_flag: Arc::new(AtomicBool::new(false)),
             drain_mode: Arc::new(AtomicBool::new(false)),
             last_input_time: Arc::new(AtomicU64::new(now_ms())),
-            kitty_protocol_active: Arc::new(AtomicBool::new(false)),
             write_log_path,
             write_log_failed: false,
             resize_signal_handle: None,
@@ -201,12 +185,10 @@ impl ProcessTerminal {
 
     fn start_input_thread(&mut self) {
         let stdin_fd = self.stdin_fd;
-        let stdout_fd = self.stdout_fd;
         let input_state = Arc::clone(&self.input_state);
         let stop_flag = Arc::clone(&self.stop_flag);
         let drain_mode = Arc::clone(&self.drain_mode);
         let last_input_time = Arc::clone(&self.last_input_time);
-        let kitty_protocol_active = Arc::clone(&self.kitty_protocol_active);
 
         self.input_thread = Some(thread::spawn(move || {
             let mut buffer = [0u8; 4096];
@@ -237,14 +219,6 @@ impl ProcessTerminal {
                 for event in events {
                     match event {
                         StdinEvent::Data(sequence) => {
-                            if !kitty_protocol_active.load(Ordering::SeqCst)
-                                && is_kitty_response(&sequence)
-                            {
-                                kitty_protocol_active.store(true, Ordering::SeqCst);
-                                write_fd(stdout_fd, KITTY_ENABLE);
-                                continue;
-                            }
-
                             if drain_mode.load(Ordering::SeqCst) {
                                 continue;
                             }
@@ -342,10 +316,8 @@ impl Terminal for ProcessTerminal {
         self.stop_flag.store(false, Ordering::SeqCst);
         self.drain_mode.store(false, Ordering::SeqCst);
         self.last_input_time.store(now_ms(), Ordering::SeqCst);
-        self.kitty_protocol_active.store(false, Ordering::SeqCst);
 
         self.enable_raw_mode();
-        self.write_control(BRACKETED_PASTE_ENABLE);
 
         self.start_resize_thread();
         unsafe {
@@ -353,17 +325,9 @@ impl Terminal for ProcessTerminal {
         }
 
         self.start_input_thread();
-        self.write_control(KITTY_QUERY);
     }
 
     fn stop(&mut self) {
-        self.write_control(BRACKETED_PASTE_DISABLE);
-
-        if self.kitty_protocol_active.load(Ordering::SeqCst) {
-            self.write_control(KITTY_DISABLE);
-            self.kitty_protocol_active.store(false, Ordering::SeqCst);
-        }
-
         self.stop_input_thread();
         self.stop_resize_thread();
 
@@ -399,11 +363,6 @@ impl Terminal for ProcessTerminal {
     }
 
     fn drain_input(&mut self, max_ms: u64, idle_ms: u64) {
-        if self.kitty_protocol_active.load(Ordering::SeqCst) {
-            self.write_control(KITTY_DISABLE);
-            self.kitty_protocol_active.store(false, Ordering::SeqCst);
-        }
-
         self.drain_mode.store(true, Ordering::SeqCst);
         self.last_input_time.store(now_ms(), Ordering::SeqCst);
 
@@ -453,42 +412,6 @@ impl Terminal for ProcessTerminal {
         read_winsize(self.stdout_fd)
             .map(|(_, rows)| rows)
             .unwrap_or(24)
-    }
-
-    fn kitty_protocol_active(&self) -> bool {
-        self.kitty_protocol_active.load(Ordering::SeqCst)
-    }
-
-    fn move_by(&mut self, lines: i32) {
-        if lines > 0 {
-            self.write_control(&format!("\x1b[{}B", lines));
-        } else if lines < 0 {
-            self.write_control(&format!("\x1b[{}A", -lines));
-        }
-    }
-
-    fn hide_cursor(&mut self) {
-        self.write_control("\x1b[?25l");
-    }
-
-    fn show_cursor(&mut self) {
-        self.write_control("\x1b[?25h");
-    }
-
-    fn clear_line(&mut self) {
-        self.write_control("\x1b[K");
-    }
-
-    fn clear_from_cursor(&mut self) {
-        self.write_control("\x1b[J");
-    }
-
-    fn clear_screen(&mut self) {
-        self.write_control("\x1b[2J\x1b[H");
-    }
-
-    fn set_title(&mut self, title: &str) {
-        self.write_control(&format!("\x1b]0;{}\x07", title));
     }
 }
 
@@ -621,38 +544,6 @@ impl Terminal for ProcessTerminal {
     fn rows(&self) -> u16 {
         24
     }
-
-    fn kitty_protocol_active(&self) -> bool {
-        false
-    }
-
-    fn move_by(&mut self, _lines: i32) {
-        panic!("ProcessTerminal is only supported on Unix platforms");
-    }
-
-    fn hide_cursor(&mut self) {
-        panic!("ProcessTerminal is only supported on Unix platforms");
-    }
-
-    fn show_cursor(&mut self) {
-        panic!("ProcessTerminal is only supported on Unix platforms");
-    }
-
-    fn clear_line(&mut self) {
-        panic!("ProcessTerminal is only supported on Unix platforms");
-    }
-
-    fn clear_from_cursor(&mut self) {
-        panic!("ProcessTerminal is only supported on Unix platforms");
-    }
-
-    fn clear_screen(&mut self) {
-        panic!("ProcessTerminal is only supported on Unix platforms");
-    }
-
-    fn set_title(&mut self, _title: &str) {
-        panic!("ProcessTerminal is only supported on Unix platforms");
-    }
 }
 
 #[cfg(all(test, unix))]
@@ -661,10 +552,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use super::{
-        get_termios, poll_readable, ProcessTerminal, StopTestHooks, BRACKETED_PASTE_DISABLE,
-        BRACKETED_PASTE_ENABLE,
-    };
+    use super::{get_termios, poll_readable, ProcessTerminal, StopTestHooks};
     use crate::core::terminal::Terminal;
 
     #[cfg(unix)]
@@ -746,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn pty_bracketed_paste_toggles_on_start_stop() {
+    fn pty_start_stop_do_not_write_output() {
         let pty = open_pty();
 
         let mut terminal = ProcessTerminal::new();
@@ -755,18 +643,18 @@ mod tests {
 
         terminal.start(Box::new(|_| {}), Box::new(|| {}));
         let output = read_available(pty.master, Duration::from_millis(200));
-        let output_str = String::from_utf8_lossy(&output);
         assert!(
-            output_str.contains(BRACKETED_PASTE_ENABLE),
-            "missing bracketed paste enable: {output_str:?}"
+            output.is_empty(),
+            "expected start() to write no output, got: {:?}",
+            String::from_utf8_lossy(&output)
         );
 
         terminal.stop();
         let output = read_available(pty.master, Duration::from_millis(200));
-        let output_str = String::from_utf8_lossy(&output);
         assert!(
-            output_str.contains(BRACKETED_PASTE_DISABLE),
-            "missing bracketed paste disable: {output_str:?}"
+            output.is_empty(),
+            "expected stop() to write no output, got: {:?}",
+            String::from_utf8_lossy(&output)
         );
     }
 
