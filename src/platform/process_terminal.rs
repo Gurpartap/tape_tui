@@ -604,6 +604,116 @@ where
     PanicHookGuard { previous }
 }
 
+/// Minimal terminal writer for panic/signal cleanup.
+///
+/// This is intentionally best-effort:
+/// - never panics
+/// - never blocks indefinitely
+/// - does not touch termios / raw mode
+#[cfg(all(unix, not(test)))]
+pub(crate) struct HookTerminal {
+    fd: c_int,
+    owns_fd: bool,
+}
+
+#[cfg(all(unix, not(test)))]
+impl HookTerminal {
+    pub(crate) fn new() -> Self {
+        // Prefer the controlling TTY (works even if stdout is redirected).
+        // Fall back to stdout if /dev/tty is unavailable.
+        let fd = unsafe { libc::open(b"/dev/tty\0".as_ptr() as *const _, libc::O_WRONLY) };
+        if fd >= 0 {
+            Self { fd, owns_fd: true }
+        } else {
+            Self {
+                fd: libc::STDOUT_FILENO,
+                owns_fd: false,
+            }
+        }
+    }
+
+    fn write_best_effort(&self, data: &str) {
+        if data.is_empty() {
+            return;
+        }
+
+        let bytes = data.as_bytes();
+        let mut written = 0;
+        while written < bytes.len() {
+            let remaining = &bytes[written..];
+            let result = unsafe {
+                libc::write(
+                    self.fd,
+                    remaining.as_ptr() as *const libc::c_void,
+                    remaining.len(),
+                )
+            };
+            if result > 0 {
+                written = written.saturating_add(result as usize);
+                continue;
+            }
+            if result == 0 {
+                break;
+            }
+
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+
+            // Avoid blocking/retrying forever (e.g. if stdout is a full pipe).
+            break;
+        }
+    }
+}
+
+#[cfg(all(unix, not(test)))]
+impl Default for HookTerminal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(all(unix, not(test)))]
+impl Drop for HookTerminal {
+    fn drop(&mut self) {
+        if self.owns_fd {
+            unsafe {
+                libc::close(self.fd);
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, not(test)))]
+impl Terminal for HookTerminal {
+    fn start(
+        &mut self,
+        _on_input: Box<dyn FnMut(String) + Send>,
+        _on_resize: Box<dyn FnMut() + Send>,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn stop(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
+
+    fn write(&mut self, data: &str) {
+        self.write_best_effort(data);
+    }
+
+    fn columns(&self) -> u16 {
+        80
+    }
+
+    fn rows(&self) -> u16 {
+        24
+    }
+}
+
 #[cfg(not(unix))]
 pub struct ProcessTerminal;
 

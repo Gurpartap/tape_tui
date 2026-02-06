@@ -25,6 +25,36 @@ use crate::runtime::ime::{extract_cursor_position, position_hardware_cursor};
 const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
 
+#[derive(Debug, Default)]
+struct CrashCleanup {
+    ran: AtomicBool,
+}
+
+impl CrashCleanup {
+    fn run<T: Terminal>(&self, terminal: &mut T) {
+        if self.ran.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        // Crash/signal cleanup is best-effort: we may not know which protocol toggles
+        // actually succeeded before the failure. These control sequences are safe and
+        // idempotent (and are ignored by terminals that don't implement them).
+        let mut output = OutputGate::new();
+        output.push(TerminalCmd::ShowCursor);
+        output.push(TerminalCmd::BracketedPasteDisable);
+        output.push(TerminalCmd::KittyDisable);
+        output.flush(terminal);
+    }
+
+    #[cfg(all(unix, not(test)))]
+    fn run_best_effort(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut terminal = crate::platform::process_terminal::HookTerminal::new();
+            self.run(&mut terminal);
+        }));
+    }
+}
+
 pub struct TuiRuntime<T: Terminal> {
     terminal: T,
     output: OutputGate,
@@ -43,6 +73,10 @@ pub struct TuiRuntime<T: Terminal> {
     cell_size_query_pending: bool,
     kitty_keyboard_enabled: bool,
     kitty_enable_pending: bool,
+    #[cfg(all(unix, not(test)))]
+    signal_hook_guard: Option<crate::platform::SignalHookGuard>,
+    #[cfg(all(unix, not(test)))]
+    panic_hook_guard: Option<crate::platform::PanicHookGuard>,
 }
 
 #[derive(Default)]
@@ -136,6 +170,10 @@ impl<T: Terminal> TuiRuntime<T> {
             cell_size_query_pending: false,
             kitty_keyboard_enabled: false,
             kitty_enable_pending: false,
+            #[cfg(all(unix, not(test)))]
+            signal_hook_guard: None,
+            #[cfg(all(unix, not(test)))]
+            panic_hook_guard: None,
         }
     }
 
@@ -214,9 +252,16 @@ impl<T: Terminal> TuiRuntime<T> {
         self.output.clear();
         self.kitty_keyboard_enabled = false;
         self.kitty_enable_pending = false;
+
+        // Mark running early so Drop can attempt cleanup if `Terminal::start()` panics.
+        self.stopped = false;
+
+        #[cfg(all(unix, not(test)))]
+        self.install_cleanup_hooks();
+
         let input_queue = Arc::clone(&self.pending_inputs);
         let resize_flag = Arc::clone(&self.pending_resize);
-        self.terminal.start(
+        if let Err(err) = self.terminal.start(
             Box::new(move |data| {
                 if let Ok(mut queue) = input_queue.lock() {
                     queue.push(data);
@@ -225,8 +270,12 @@ impl<T: Terminal> TuiRuntime<T> {
             Box::new(move || {
                 resize_flag.store(true, Ordering::SeqCst);
             }),
-        )?;
-        self.stopped = false;
+        ) {
+            self.stopped = true;
+            #[cfg(all(unix, not(test)))]
+            self.uninstall_cleanup_hooks();
+            return Err(err);
+        }
 
         self.output.push(TerminalCmd::BracketedPasteEnable);
         self.output.push(TerminalCmd::KittyQuery);
@@ -255,7 +304,28 @@ impl<T: Terminal> TuiRuntime<T> {
             .drain_input(STOP_DRAIN_MAX_MS, STOP_DRAIN_IDLE_MS);
         let result = self.terminal.stop();
         self.stopped = true;
+        #[cfg(all(unix, not(test)))]
+        self.uninstall_cleanup_hooks();
         result
+    }
+
+    #[cfg(all(unix, not(test)))]
+    fn install_cleanup_hooks(&mut self) {
+        let cleanup = Arc::new(CrashCleanup::default());
+        let signal_cleanup = Arc::clone(&cleanup);
+        let panic_cleanup = Arc::clone(&cleanup);
+        self.signal_hook_guard = Some(crate::platform::install_signal_handlers(move || {
+            signal_cleanup.run_best_effort()
+        }));
+        self.panic_hook_guard = Some(crate::platform::install_panic_hook(move || {
+            panic_cleanup.run_best_effort()
+        }));
+    }
+
+    #[cfg(all(unix, not(test)))]
+    fn uninstall_cleanup_hooks(&mut self) {
+        self.signal_hook_guard = None;
+        self.panic_hook_guard = None;
     }
 
     pub fn run_once(&mut self) {
@@ -696,7 +766,7 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_cell_size_response, OverlayOptions, TuiRuntime};
+    use super::{find_cell_size_response, CrashCleanup, OverlayOptions, TuiRuntime};
     use crate::core::component::Component;
     use crate::core::terminal::Terminal;
     use crate::core::terminal_image::{get_cell_dimensions, reset_capabilities_cache};
@@ -837,6 +907,17 @@ mod tests {
         fn is_focused(&self) -> bool {
             *self.focused.borrow()
         }
+    }
+
+    #[test]
+    fn crash_cleanup_writes_expected_bytes_and_is_idempotent() {
+        let cleanup = CrashCleanup::default();
+        let mut terminal = TestTerminal::default();
+
+        cleanup.run(&mut terminal);
+        cleanup.run(&mut terminal);
+
+        assert_eq!(terminal.output, "\x1b[?25h\x1b[?2004l\x1b[<u");
     }
 
     #[test]
