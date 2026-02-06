@@ -11,6 +11,7 @@ use crate::core::autocomplete::{
     AbortSignal, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
 };
 use crate::core::component::{Component, Focusable};
+use crate::core::cursor::CursorPos;
 use crate::core::editor_component::EditorComponent;
 use crate::core::input_event::InputEvent;
 use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
@@ -18,8 +19,6 @@ use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whites
 use crate::core::text::width::visible_width;
 use crate::runtime::tui::RenderHandle;
 use crate::widgets::select_list::{SelectItem, SelectList, SelectListTheme};
-
-const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
 
 const MAX_PASTE_LINES: usize = 10;
 const MAX_PASTE_CHARS: usize = 1000;
@@ -177,6 +176,7 @@ enum AutocompleteState {
 pub struct Editor {
     state: EditorState,
     focused: bool,
+    last_cursor_pos: Option<CursorPos>,
     select_list_theme: SelectListTheme,
     padding_x: usize,
     autocomplete_max_visible: usize,
@@ -234,6 +234,7 @@ impl Editor {
                 cursor_col: 0,
             },
             focused: false,
+            last_cursor_pos: None,
             select_list_theme,
             padding_x,
             autocomplete_max_visible,
@@ -2102,6 +2103,7 @@ impl Component for Editor {
     fn render(&mut self, width: usize) -> Vec<String> {
         self.clamp_cursor();
         self.poll_autocomplete_async();
+        self.last_cursor_pos = None;
 
         let max_padding = width.saturating_sub(1) / 2;
         let padding_x = min(self.padding_x, max_padding);
@@ -2173,9 +2175,9 @@ impl Component for Editor {
             result.push(horizontal.repeat(width));
         }
 
-        let emit_cursor_marker = self.focused && self.autocomplete_state.is_none();
+        let emit_cursor = self.focused && self.autocomplete_state.is_none();
 
-        for layout_line in &visible_lines {
+        for (visible_idx, layout_line) in visible_lines.iter().enumerate() {
             let mut display_text = layout_line.text.clone();
             let mut line_visible_width = visible_width(&display_text);
             let mut cursor_in_padding = false;
@@ -2184,21 +2186,22 @@ impl Component for Editor {
                 if let Some(cursor_pos) = layout_line.cursor_pos {
                     let cursor_pos = min(cursor_pos, display_text.len());
                     let (before, after) = display_text.split_at(cursor_pos);
-                    let marker = if emit_cursor_marker {
-                        CURSOR_MARKER
-                    } else {
-                        ""
-                    };
+
+                    if emit_cursor {
+                        let col = padding_x.saturating_add(visible_width(before));
+                        let row = 1 + visible_idx;
+                        self.last_cursor_pos = Some(CursorPos { row, col });
+                    }
 
                     if !after.is_empty() {
                         let mut graphemes = grapheme_segments(after);
                         let first = graphemes.next().unwrap_or("");
                         let rest = &after[first.len()..];
                         let cursor = format!("\x1b[7m{first}\x1b[0m");
-                        display_text = format!("{before}{marker}{cursor}{rest}");
+                        display_text = format!("{before}{cursor}{rest}");
                     } else {
                         let cursor = "\x1b[7m \x1b[0m";
-                        display_text = format!("{before}{marker}{cursor}");
+                        display_text = format!("{before}{cursor}");
                         line_visible_width = line_visible_width.saturating_add(1);
                         if line_visible_width > content_width && padding_x > 0 {
                             cursor_in_padding = true;
@@ -2244,6 +2247,10 @@ impl Component for Editor {
         }
 
         result
+    }
+
+    fn cursor_pos(&self) -> Option<CursorPos> {
+        self.last_cursor_pos
     }
 
     fn set_terminal_rows(&mut self, rows: usize) {
@@ -2745,6 +2752,7 @@ mod tests {
         CombinedAutocompleteProvider, CommandEntry, CompletionResult, SlashCommand,
     };
     use crate::core::component::Component;
+    use crate::core::cursor::CursorPos;
     use crate::core::input_event::parse_input_events;
     use crate::default_editor_keybindings_handle;
     use crate::widgets::select_list::SelectListTheme;
@@ -2825,7 +2833,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_renders_cursor_marker_when_focused() {
+    fn editor_reports_cursor_pos_when_focused() {
         let mut editor = Editor::new(
             theme(),
             default_editor_keybindings_handle(),
@@ -2836,7 +2844,8 @@ mod tests {
         editor.state.cursor_col = 1;
         editor.focused = true;
         let lines = editor.render(10);
-        assert!(lines.iter().any(|line| line.contains("\x1b_pi:c")));
+        assert!(!lines.iter().any(|line| line.contains("\x1b_pi:c")));
+        assert_eq!(editor.cursor_pos(), Some(CursorPos { row: 1, col: 1 }));
     }
 
     #[test]

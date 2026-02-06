@@ -10,6 +10,13 @@ pub trait Component {
     /// Handle input events.
     fn handle_event(&mut self, _event: &InputEvent) {}
 
+    /// Optional cursor position metadata for this component's last render.
+    ///
+    /// The cursor position is relative to the lines returned from `render()`.
+    fn cursor_pos(&self) -> Option<crate::core::cursor::CursorPos> {
+        None
+    }
+
     /// Invalidate any cached state.
     fn invalidate(&mut self) {}
 

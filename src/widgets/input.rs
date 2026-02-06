@@ -1,18 +1,18 @@
 //! Input widget (Phase 19).
 
 use crate::core::component::{Component, Focusable};
+use crate::core::cursor::CursorPos;
 use crate::core::input_event::InputEvent;
 use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
 use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
 use crate::core::text::width::visible_width;
-
-const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
 
 /// Single-line input component with horizontal scrolling.
 pub struct Input {
     value: String,
     cursor: usize,
     focused: bool,
+    last_cursor_pos: Option<CursorPos>,
     prompt: String,
     keybindings: EditorKeybindingsHandle,
     on_submit: Option<Box<dyn FnMut(String)>>,
@@ -25,6 +25,7 @@ impl Input {
             value: String::new(),
             cursor: 0,
             focused: false,
+            last_cursor_pos: None,
             prompt: "> ".to_string(),
             keybindings,
             on_submit: None,
@@ -188,6 +189,7 @@ impl Input {
 impl Component for Input {
     fn render(&mut self, width: usize) -> Vec<String> {
         self.clamp_cursor();
+        self.last_cursor_pos = None;
 
         let prompt = &self.prompt;
         let available_width = width.saturating_sub(prompt.len());
@@ -253,6 +255,13 @@ impl Component for Input {
         let mut graphemes = grapheme_segments(after_slice);
         let cursor_grapheme = graphemes.next();
 
+        self.last_cursor_pos = if self.focused {
+            let col = visible_width(prompt).saturating_add(visible_width(before_cursor));
+            Some(CursorPos { row: 0, col })
+        } else {
+            None
+        };
+
         let (at_cursor, after_cursor) = if let Some(grapheme) = cursor_grapheme {
             let after_start = cursor_display + grapheme.len();
             let after_cursor = &visible_text[after_start..];
@@ -261,12 +270,9 @@ impl Component for Input {
             (" ", "")
         };
 
-        let marker = if self.focused { CURSOR_MARKER } else { "" };
         let cursor_char = format!("\x1b[7m{at_cursor}\x1b[27m");
-        let mut text_with_cursor =
-            String::with_capacity(visible_text.len() + marker.len() + cursor_char.len());
+        let mut text_with_cursor = String::with_capacity(visible_text.len() + cursor_char.len());
         text_with_cursor.push_str(before_cursor);
-        text_with_cursor.push_str(marker);
         text_with_cursor.push_str(&cursor_char);
         text_with_cursor.push_str(after_cursor);
 
@@ -275,6 +281,10 @@ impl Component for Input {
         let line = format!("{prompt}{text_with_cursor}{padding}");
 
         vec![line]
+    }
+
+    fn cursor_pos(&self) -> Option<CursorPos> {
+        self.last_cursor_pos
     }
 
     fn handle_event(&mut self, event: &InputEvent) {

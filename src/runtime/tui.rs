@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::core::component::Component;
+use crate::core::cursor::CursorPos;
 use crate::core::input::{is_kitty_query_response, KeyEventType};
 use crate::core::input_event::{parse_input_events, InputEvent};
 use crate::core::output::{OutputGate, TerminalCmd};
@@ -618,18 +619,31 @@ impl<T: Terminal> TuiRuntime<T> {
         let width = self.terminal.columns() as usize;
         let height = self.terminal.rows() as usize;
         self.reconcile_focus();
-        let mut lines = {
+        let (mut lines, mut cursor_pos) = {
             let mut root = self.root.borrow_mut();
             root.set_terminal_rows(height);
-            root.render(width)
+            let lines = root.render(width);
+            let cursor_pos = root.cursor_pos();
+            (lines, cursor_pos)
         };
 
         if self.has_overlay() {
-            lines = self.composite_overlay_lines(lines, width, height);
+            let (composited, overlay_cursor) = self.composite_overlay_lines(lines, width, height);
+            lines = composited;
+            if overlay_cursor.is_some() {
+                cursor_pos = overlay_cursor;
+            }
+        }
+
+        if let Some(pos) = cursor_pos {
+            let viewport_top = lines.len().saturating_sub(height);
+            if pos.row < viewport_top || pos.row >= lines.len() {
+                cursor_pos = None;
+            }
         }
 
         let has_overlays = self.has_overlay();
-        let frame = Frame::from_rendered_lines(lines, height);
+        let frame = Frame::from(lines).with_cursor(cursor_pos);
         let cursor_pos = frame.cursor();
         let total_lines = frame.lines().len();
         let render_cmds =
@@ -725,10 +739,10 @@ impl<T: Terminal> TuiRuntime<T> {
         lines: Vec<String>,
         width: usize,
         height: usize,
-    ) -> Vec<String> {
-        let overlays = {
+    ) -> (Vec<String>, Option<CursorPos>) {
+        let (overlays, overlay_cursor) = {
             let state = self.overlays.borrow();
-            let mut rendered = Vec::new();
+            let mut rendered: Vec<(RenderedOverlay, Option<CursorPos>)> = Vec::new();
             for entry in state.entries.iter() {
                 if !self.is_overlay_visible(entry) {
                     continue;
@@ -737,9 +751,15 @@ impl<T: Terminal> TuiRuntime<T> {
                 let mut component = entry.component.borrow_mut();
                 component.set_terminal_rows(height);
                 let mut overlay_lines = component.render(layout.width);
+                let mut cursor_pos = component.cursor_pos();
                 if let Some(max_height) = layout.max_height {
                     if overlay_lines.len() > max_height {
                         overlay_lines.truncate(max_height);
+                    }
+                }
+                if let Some(pos) = cursor_pos {
+                    if pos.row >= overlay_lines.len() {
+                        cursor_pos = None;
                     }
                 }
                 let final_layout = resolve_overlay_layout(
@@ -748,24 +768,61 @@ impl<T: Terminal> TuiRuntime<T> {
                     width,
                     height,
                 );
-                rendered.push(RenderedOverlay {
-                    lines: overlay_lines,
-                    row: final_layout.row,
-                    col: final_layout.col,
-                    width: final_layout.width,
+                rendered.push((
+                    RenderedOverlay {
+                        lines: overlay_lines,
+                        row: final_layout.row,
+                        col: final_layout.col,
+                        width: final_layout.width,
+                    },
+                    cursor_pos,
+                ));
+            }
+
+            let mut min_lines_needed = lines.len();
+            for (overlay, _) in rendered.iter() {
+                min_lines_needed = min_lines_needed.max(overlay.row + overlay.lines.len());
+            }
+            let working_height = self.renderer.max_lines_rendered().max(min_lines_needed);
+            let viewport_start = working_height.saturating_sub(height);
+
+            let mut overlay_cursor: Option<CursorPos> = None;
+            for (overlay, cursor_pos) in rendered.iter() {
+                let Some(cursor_pos) = cursor_pos else {
+                    continue;
+                };
+                if cursor_pos.row >= overlay.lines.len() || cursor_pos.col >= overlay.width {
+                    continue;
+                }
+                let abs_row = viewport_start
+                    .saturating_add(overlay.row)
+                    .saturating_add(cursor_pos.row);
+                if abs_row < lines.len() && is_image_line(&lines[abs_row]) {
+                    continue;
+                }
+                overlay_cursor = Some(CursorPos {
+                    row: abs_row,
+                    col: overlay.col.saturating_add(cursor_pos.col),
                 });
             }
-            rendered
+
+            let overlays = rendered
+                .into_iter()
+                .map(|(overlay, _)| overlay)
+                .collect::<Vec<_>>();
+            (overlays, overlay_cursor)
         };
 
-        composite_overlays(
+        let composited = composite_overlays(
             lines,
             &overlays,
             width,
             height,
             self.renderer.max_lines_rendered(),
             is_image_line,
-        )
+        );
+
+        (composited, overlay_cursor)
     }
 
     fn is_overlay_visible(&self, entry: &OverlayEntry) -> bool {
@@ -930,8 +987,10 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 mod tests {
     use super::{find_cell_size_response, CrashCleanup, OverlayOptions, TuiRuntime};
     use crate::core::component::Component;
+    use crate::core::cursor::CursorPos;
     use crate::core::terminal::Terminal;
     use crate::core::terminal_image::get_cell_dimensions;
+    use crate::render::overlay::SizeValue;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -1152,17 +1211,21 @@ mod tests {
         std::env::remove_var("KITTY_WINDOW_ID");
 
         #[derive(Default)]
-        struct CursorMarkerComponent;
+        struct CursorPosComponent;
 
-        impl Component for CursorMarkerComponent {
+        impl Component for CursorPosComponent {
             fn render(&mut self, _width: usize) -> Vec<String> {
-                vec![format!("hello{}", crate::core::cursor::CURSOR_MARKER)]
+                vec!["hello".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 5 })
             }
         }
 
         let terminal = TestTerminal::new(80, 24);
         let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(CursorMarkerComponent::default())));
+            Rc::new(RefCell::new(Box::new(CursorPosComponent::default())));
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.show_hardware_cursor = false;
 
@@ -1175,6 +1238,62 @@ mod tests {
         let output = runtime.terminal.output.as_str();
         let expected = "\x1b[>7u\x1b[?2026hhello\x1b[0m\x1b]8;;\x07\x1b[?2026l\x1b[6G\x1b[?25l";
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn overlay_cursor_metadata_wins_over_base_cursor() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        struct BaseCursorComponent;
+
+        impl Component for BaseCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["one".to_string(), "two".to_string(), "three".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 0 })
+            }
+        }
+
+        struct OverlayCursorComponent;
+
+        impl Component for OverlayCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["overlay".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 4 })
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 3);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(BaseCursorComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        let overlay: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(OverlayCursorComponent)));
+        let mut options = OverlayOptions::default();
+        options.width = Some(SizeValue::absolute(10));
+        options.row = Some(SizeValue::absolute(1));
+        options.col = Some(SizeValue::absolute(2));
+        runtime.show_overlay(overlay, Some(options));
+
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            output.ends_with("\x1b[1A\x1b[7G\x1b[?25l"),
+            "unexpected output suffix: {output:?}"
+        );
     }
 
     #[test]

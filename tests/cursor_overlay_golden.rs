@@ -7,7 +7,7 @@ use pi_tui::render::overlay::{
     SizeValue,
 };
 use pi_tui::runtime::ime::position_hardware_cursor;
-use pi_tui::{core::cursor::CursorPos, render::Frame, CURSOR_MARKER};
+use pi_tui::{core::cursor::CursorPos, render::Frame};
 
 fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
     let mut out = String::new();
@@ -44,15 +44,15 @@ fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
 }
 
 #[test]
-fn cursor_marker_and_hardware_cursor_match_fixture() {
+fn cursor_metadata_and_hardware_cursor_match_fixture() {
     let expected = fixture::read_unescaped("cursor_output.txt");
-    let lines = vec!["hello".to_string(), format!("wor{CURSOR_MARKER}ld")];
-    let frame = Frame::from_rendered_lines(lines, 2);
-    let pos = frame.cursor();
+    let lines = vec!["hello".to_string(), "world".to_string()];
+    let pos = Some(CursorPos { row: 1, col: 3 });
+    let frame = Frame::from(lines.clone()).with_cursor(pos);
+    assert_eq!(frame.cursor(), pos);
     let total_lines = frame.lines().len();
-    assert_eq!(pos, Some(CursorPos { row: 1, col: 3 }));
     let rendered = frame.into_strings();
-    assert_eq!(rendered[1], "world");
+    assert_eq!(rendered, lines);
 
     let (new_row, cmds) = position_hardware_cursor(pos, total_lines, 0, true);
     assert_eq!(new_row, 1);

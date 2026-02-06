@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::core::component::Component;
+use crate::core::cursor::CursorPos;
 use crate::core::text::utils::apply_background_to_line;
 use crate::core::text::width::visible_width;
 
@@ -19,6 +20,7 @@ pub struct Box {
     children: Vec<Rc<RefCell<StdBox<dyn Component>>>>,
     padding_x: usize,
     padding_y: usize,
+    last_cursor_pos: Option<CursorPos>,
     bg_fn: Option<StdBox<dyn Fn(&str) -> String>>,
     cache: Option<RenderCache>,
 }
@@ -33,6 +35,7 @@ impl Box {
             children: Vec::new(),
             padding_x,
             padding_y,
+            last_cursor_pos: None,
             bg_fn,
             cache: None,
         }
@@ -115,6 +118,7 @@ impl Default for Box {
 impl Component for Box {
     fn render(&mut self, width: usize) -> Vec<String> {
         if self.children.is_empty() {
+            self.last_cursor_pos = None;
             return Vec::new();
         }
 
@@ -122,14 +126,32 @@ impl Component for Box {
         let left_pad = " ".repeat(self.padding_x);
 
         let mut child_lines = Vec::new();
+        let mut last_cursor_pos: Option<CursorPos> = None;
         for child in self.children.iter() {
-            let lines = child.borrow_mut().render(content_width);
+            let start_row = child_lines.len();
+            let mut child = child.borrow_mut();
+            let lines = child.render(content_width);
+            let cursor_pos = child.cursor_pos();
+            drop(child);
+
+            if let Some(pos) = cursor_pos {
+                last_cursor_pos = Some(CursorPos {
+                    row: self
+                        .padding_y
+                        .saturating_add(start_row)
+                        .saturating_add(pos.row),
+                    col: self.padding_x.saturating_add(pos.col),
+                });
+            }
+
             for line in lines {
                 child_lines.push(format!("{left_pad}{line}"));
             }
         }
+        self.last_cursor_pos = last_cursor_pos;
 
         if child_lines.is_empty() {
+            self.last_cursor_pos = None;
             return Vec::new();
         }
 
@@ -159,6 +181,10 @@ impl Component for Box {
         result
     }
 
+    fn cursor_pos(&self) -> Option<CursorPos> {
+        self.last_cursor_pos
+    }
+
     fn invalidate(&mut self) {
         self.invalidate_cache();
         for child in self.children.iter() {
@@ -171,6 +197,7 @@ impl Component for Box {
 mod tests {
     use super::Box as BoxWidget;
     use crate::core::component::Component;
+    use crate::core::cursor::CursorPos;
     use crate::core::text::width::visible_width;
     use std::boxed::Box as StdBox;
     use std::cell::RefCell;
@@ -183,6 +210,21 @@ mod tests {
     impl Component for StaticComponent {
         fn render(&mut self, _width: usize) -> Vec<String> {
             self.lines.clone()
+        }
+    }
+
+    struct CursorComponent {
+        lines: Vec<String>,
+        cursor: Option<CursorPos>,
+    }
+
+    impl Component for CursorComponent {
+        fn render(&mut self, _width: usize) -> Vec<String> {
+            self.lines.clone()
+        }
+
+        fn cursor_pos(&self) -> Option<CursorPos> {
+            self.cursor
         }
     }
 
@@ -201,5 +243,29 @@ mod tests {
         assert_eq!(lines[1], " hi   ");
         assert_eq!(lines[2], "      ");
         assert!(lines.iter().all(|line| visible_width(line) == 6));
+    }
+
+    #[test]
+    fn box_offsets_child_cursor_for_padding_and_prefers_last_child() {
+        let mut boxed = BoxWidget::new(1, 2, None);
+        let first: Rc<RefCell<StdBox<dyn Component>>> =
+            Rc::new(RefCell::new(StdBox::new(CursorComponent {
+                lines: vec!["one".to_string()],
+                cursor: Some(CursorPos { row: 0, col: 0 }),
+            })));
+        let second: Rc<RefCell<StdBox<dyn Component>>> =
+            Rc::new(RefCell::new(StdBox::new(CursorComponent {
+                lines: vec!["two".to_string(), "three".to_string()],
+                cursor: Some(CursorPos { row: 1, col: 2 }),
+            })));
+        boxed.add_child(first);
+        boxed.add_child(second);
+
+        let _ = boxed.render(20);
+        assert_eq!(
+            boxed.cursor_pos(),
+            Some(CursorPos { row: 4, col: 3 }),
+            "expected row=padding_y(2)+first_child_lines(1)+child_row(1)=4; col=padding_x(1)+2=3"
+        );
     }
 }

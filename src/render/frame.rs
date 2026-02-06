@@ -105,6 +105,11 @@ impl Frame {
         frame
     }
 
+    pub fn with_cursor(mut self, cursor: Option<CursorPos>) -> Self {
+        self.cursor = cursor;
+        self
+    }
+
     pub fn lines(&self) -> &[Line] {
         &self.lines
     }
