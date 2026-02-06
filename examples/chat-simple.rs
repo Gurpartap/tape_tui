@@ -8,7 +8,7 @@ use pi_tui::core::autocomplete::CommandEntry;
 use pi_tui::core::component::{Component, Focusable};
 use pi_tui::widgets::select_list::SelectListTheme;
 use pi_tui::{
-    matches_key, CombinedAutocompleteProvider, Editor, EditorOptions, EditorTheme, Loader, Markdown,
+    CombinedAutocompleteProvider, Editor, EditorOptions, EditorTheme, InputEvent, Loader, Markdown,
     MarkdownTheme, ProcessTerminal, SlashCommand, Text, TUI,
 };
 
@@ -156,14 +156,14 @@ impl Component for EditorWrapper {
         self.editor.borrow_mut().render(width)
     }
 
-    fn handle_input(&mut self, data: &str) {
-        if matches_key(data, "ctrl+c") {
+    fn handle_event(&mut self, event: &InputEvent) {
+        if event.key_id.as_deref() == Some("ctrl+c") {
             *self.exit_flag.borrow_mut() = true;
             return;
         }
         {
             let mut editor = self.editor.borrow_mut();
-            editor.handle_input(data);
+            editor.handle_event(event);
         }
         if self.state.borrow().responding {
             self.editor.borrow_mut().set_disable_submit(true);

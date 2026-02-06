@@ -1,6 +1,6 @@
 mod fixture;
 
-use pi_tui::core::input::{matches_key, parse_key, set_kitty_protocol_active};
+use pi_tui::core::input::{matches_key, parse_key};
 
 #[test]
 fn key_vectors_match_fixture() {
@@ -23,13 +23,12 @@ fn key_vectors_match_fixture() {
                 let kitty = parts[1].trim();
                 let input = fixture::unescape(parts[2]);
                 let expected_raw = parts[3].trim();
-                set_kitty_protocol_active(kitty == "1");
                 let expected = if expected_raw == "none" {
                     None
                 } else {
                     Some(fixture::unescape(expected_raw))
                 };
-                let actual = parse_key(&input);
+                let actual = parse_key(&input, kitty == "1");
                 assert_eq!(
                     actual, expected,
                     "line {line_num}: parse_key({input:?}) mismatch"
@@ -49,8 +48,7 @@ fn key_vectors_match_fixture() {
                     "false" => false,
                     other => panic!("line {line_num}: invalid expected value {other}"),
                 };
-                set_kitty_protocol_active(kitty == "1");
-                let actual = matches_key(&input, &key_id);
+                let actual = matches_key(&input, &key_id, kitty == "1");
                 assert_eq!(
                     actual, expected,
                     "line {line_num}: matches_key({input:?}, {key_id:?}) mismatch"
@@ -59,5 +57,4 @@ fn key_vectors_match_fixture() {
             other => panic!("line {line_num}: unknown kind {other}"),
         }
     }
-    set_kitty_protocol_active(false);
 }

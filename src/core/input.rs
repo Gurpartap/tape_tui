@@ -1,11 +1,6 @@
 //! Key parsing and input types (Phase 2).
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[cfg(test)]
-use std::sync::{Mutex, OnceLock};
-
-static KITTY_PROTOCOL_ACTIVE: AtomicBool = AtomicBool::new(false);
+// Intentionally no process-global state.
 
 /// Helper for building key identifiers.
 pub struct Key;
@@ -121,20 +116,6 @@ impl Key {
     }
 }
 
-pub fn set_kitty_protocol_active(active: bool) {
-    KITTY_PROTOCOL_ACTIVE.store(active, Ordering::SeqCst);
-}
-
-pub fn is_kitty_protocol_active() -> bool {
-    KITTY_PROTOCOL_ACTIVE.load(Ordering::SeqCst)
-}
-
-#[cfg(test)]
-pub(crate) fn kitty_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 const MOD_SHIFT: u8 = 1;
 const MOD_ALT: u8 = 2;
 const MOD_CTRL: u8 = 4;
@@ -207,14 +188,13 @@ pub fn is_key_repeat(data: &str) -> bool {
         || data.contains(":2F")
 }
 
-pub fn matches_key(data: &str, key_id: &str) -> bool {
+pub fn matches_key(data: &str, key_id: &str, kitty_active: bool) -> bool {
     let parsed = parse_key_id(key_id);
     let Some(parsed) = parsed else {
         return false;
     };
 
     let modifier = parsed.modifier();
-    let kitty_active = is_kitty_protocol_active();
 
     match parsed.key.as_str() {
         "escape" | "esc" => {
@@ -490,64 +470,117 @@ pub fn matches_key(data: &str, key_id: &str) -> bool {
     }
 }
 
-pub fn parse_key(data: &str) -> Option<String> {
+fn key_name_for_codepoint(codepoint: i32) -> Option<String> {
+    match codepoint {
+        CODEPOINT_ESCAPE => Some("escape".to_string()),
+        CODEPOINT_TAB => Some("tab".to_string()),
+        CODEPOINT_ENTER | CODEPOINT_KP_ENTER => Some("enter".to_string()),
+        CODEPOINT_SPACE => Some("space".to_string()),
+        CODEPOINT_BACKSPACE => Some("backspace".to_string()),
+        KEY_DELETE => Some("delete".to_string()),
+        KEY_INSERT => Some("insert".to_string()),
+        KEY_HOME => Some("home".to_string()),
+        KEY_END => Some("end".to_string()),
+        KEY_PAGE_UP => Some("pageUp".to_string()),
+        KEY_PAGE_DOWN => Some("pageDown".to_string()),
+        ARROW_UP => Some("up".to_string()),
+        ARROW_DOWN => Some("down".to_string()),
+        ARROW_LEFT => Some("left".to_string()),
+        ARROW_RIGHT => Some("right".to_string()),
+        cp if (97..=122).contains(&cp) => Some((cp as u8 as char).to_string()),
+        cp if (65..=90).contains(&cp) => Some(((cp as u8 + 32) as char).to_string()),
+        cp if (48..=57).contains(&cp) => Some((cp as u8 as char).to_string()),
+        cp if (0..=127).contains(&cp) && is_symbol_key(cp as u8 as char) => {
+            Some((cp as u8 as char).to_string())
+        }
+        _ => None,
+    }
+}
+
+fn parse_modify_other_keys_sequence(data: &str) -> Option<(i32, u8)> {
+    let body = data.strip_prefix("\x1b[27;")?;
+    let body = body.strip_suffix('~')?;
+
+    let mut parts = body.split(';');
+    let mod_part = parts.next()?;
+    let key_part = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let mod_value = mod_part.parse::<u8>().ok()?;
+    let keycode = key_part.parse::<i32>().ok()?;
+    Some((keycode, mod_value.saturating_sub(1)))
+}
+
+fn parse_modify_other_keys_key_id(data: &str) -> Option<String> {
+    let (keycode, modifier) = parse_modify_other_keys_sequence(data)?;
+    let key_name = key_name_for_codepoint(keycode)?;
+    if modifier == 0 {
+        return Some(key_name);
+    }
+
+    let mut mods = Vec::new();
+    if modifier & MOD_CTRL != 0 {
+        mods.push("ctrl");
+    }
+    if modifier & MOD_SHIFT != 0 {
+        mods.push("shift");
+    }
+    if modifier & MOD_ALT != 0 {
+        mods.push("alt");
+    }
+
+    if mods.is_empty() {
+        Some(key_name)
+    } else {
+        Some(format!("{}+{}", mods.join("+"), key_name))
+    }
+}
+
+pub fn parse_key(data: &str, kitty_active: bool) -> Option<String> {
     if let Some(kitty) = parse_kitty_sequence(data) {
         let modifier = kitty.modifier & !LOCK_MASK;
-        let mut mods = Vec::new();
-        if modifier & MOD_SHIFT != 0 {
-            mods.push("shift");
-        }
-        if modifier & MOD_CTRL != 0 {
-            mods.push("ctrl");
-        }
-        if modifier & MOD_ALT != 0 {
-            mods.push("alt");
-        }
-
-        let codepoint = kitty.codepoint;
-        let is_latin_letter = codepoint >= 97 && codepoint <= 122;
-        let is_known_symbol = codepoint >= 0 && codepoint <= 127 && is_symbol_key(codepoint as u8 as char);
-        let effective_codepoint = if is_latin_letter || is_known_symbol {
-            codepoint
-        } else {
-            kitty.base_layout_key.unwrap_or(codepoint)
-        };
-
-        let key_name = match effective_codepoint {
-            CODEPOINT_ESCAPE => Some("escape".to_string()),
-            CODEPOINT_TAB => Some("tab".to_string()),
-            CODEPOINT_ENTER | CODEPOINT_KP_ENTER => Some("enter".to_string()),
-            CODEPOINT_SPACE => Some("space".to_string()),
-            CODEPOINT_BACKSPACE => Some("backspace".to_string()),
-            KEY_DELETE => Some("delete".to_string()),
-            KEY_INSERT => Some("insert".to_string()),
-            KEY_HOME => Some("home".to_string()),
-            KEY_END => Some("end".to_string()),
-            KEY_PAGE_UP => Some("pageUp".to_string()),
-            KEY_PAGE_DOWN => Some("pageDown".to_string()),
-            ARROW_UP => Some("up".to_string()),
-            ARROW_DOWN => Some("down".to_string()),
-            ARROW_LEFT => Some("left".to_string()),
-            ARROW_RIGHT => Some("right".to_string()),
-            cp if cp >= 97 && cp <= 122 => Some((cp as u8 as char).to_string()),
-            cp if cp >= 0 && cp <= 127 && is_symbol_key(cp as u8 as char) => {
-                Some((cp as u8 as char).to_string())
+        let key_id = {
+            let mut mods = Vec::new();
+            if modifier & MOD_CTRL != 0 {
+                mods.push("ctrl");
             }
-            _ => None,
-        };
+            if modifier & MOD_SHIFT != 0 {
+                mods.push("shift");
+            }
+            if modifier & MOD_ALT != 0 {
+                mods.push("alt");
+            }
 
-        if let Some(key_name) = key_name {
+            let codepoint = kitty.codepoint;
+            let is_latin_letter = codepoint >= 97 && codepoint <= 122;
+            let is_known_symbol =
+                codepoint >= 0 && codepoint <= 127 && is_symbol_key(codepoint as u8 as char);
+            let effective_codepoint = if is_latin_letter || is_known_symbol {
+                codepoint
+            } else {
+                kitty.base_layout_key.unwrap_or(codepoint)
+            };
+
+            let key_name = key_name_for_codepoint(effective_codepoint)?;
             if mods.is_empty() {
-                return Some(key_name);
+                key_name
+            } else {
+                format!("{}+{}", mods.join("+"), key_name)
             }
-            let mut combined = mods.join("+");
-            combined.push('+');
-            combined.push_str(&key_name);
-            return Some(combined);
+        };
+
+        if !key_id.is_empty() {
+            return Some(key_id);
         }
     }
 
-    if is_kitty_protocol_active() {
+    if let Some(key_id) = parse_modify_other_keys_key_id(data) {
+        return Some(key_id);
+    }
+
+    if kitty_active {
         if data == "\x1b\r" || data == "\n" {
             return Some("shift+enter".to_string());
         }
@@ -556,8 +589,6 @@ pub fn parse_key(data: &str) -> Option<String> {
     if let Some(key_id) = legacy_sequence_key_id(data) {
         return Some(key_id.to_string());
     }
-
-    let kitty_active = is_kitty_protocol_active();
 
     if data == "\x1b" {
         return Some("escape".to_string());
@@ -660,6 +691,10 @@ pub fn parse_key(data: &str) -> Option<String> {
         if (1..=26).contains(&code) {
             let ch = (code + 96) as char;
             return Some(format!("ctrl+{}", ch));
+        }
+        if (b'A'..=b'Z').contains(&code) {
+            let lower = (code + 32) as char;
+            return Some(format!("shift+{}", lower));
         }
         if (32..=126).contains(&code) {
             return Some(data.to_string());
@@ -1120,47 +1155,34 @@ const LEGACY_CTRL_END: [&str; 1] = ["\x1b[8^"];
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        is_key_release, is_key_repeat, kitty_test_lock, matches_key, parse_key,
-        set_kitty_protocol_active, Key,
-    };
+    use super::{is_key_release, is_key_repeat, matches_key, parse_key, Key};
 
     #[test]
     fn kitty_shift_enter_vs_alt_enter() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
-        set_kitty_protocol_active(true);
-        assert_eq!(parse_key("\x1b\r"), Some("shift+enter".to_string()));
-        assert_eq!(parse_key("\n"), Some("shift+enter".to_string()));
-
-        set_kitty_protocol_active(false);
-        assert_eq!(parse_key("\x1b\r"), Some("alt+enter".to_string()));
+        assert_eq!(parse_key("\x1b\r", true), Some("shift+enter".to_string()));
+        assert_eq!(parse_key("\n", true), Some("shift+enter".to_string()));
+        assert_eq!(parse_key("\x1b\r", false), Some("alt+enter".to_string()));
     }
 
     #[test]
     fn modify_other_keys_matches_when_kitty_inactive() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
-        set_kitty_protocol_active(false);
-        assert!(matches_key("\x1b[27;2;13~", "shift+enter"));
+        assert!(matches_key("\x1b[27;2;13~", "shift+enter", false));
     }
 
     #[test]
     fn base_layout_fallback_for_non_latin_only() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
-        set_kitty_protocol_active(true);
-        assert_eq!(parse_key("\x1b[1089::99;5u"), Some("ctrl+c".to_string()));
-        assert_eq!(parse_key("\x1b[99::118;5u"), Some("ctrl+c".to_string()));
+        assert_eq!(parse_key("\x1b[1089::99;5u", true), Some("ctrl+c".to_string()));
+        assert_eq!(parse_key("\x1b[99::118;5u", true), Some("ctrl+c".to_string()));
     }
 
     #[test]
     fn key_release_ignores_paste() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         assert!(!is_key_release("\x1b[200~90:62:3F\x1b[201~"));
         assert!(is_key_release("\x1b[65;1:3u"));
     }
 
     #[test]
     fn key_repeat_ignores_paste() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         assert!(!is_key_repeat("\x1b[200~90:62:2F\x1b[201~"));
         assert!(is_key_repeat("\x1b[65;1:2u"));
     }

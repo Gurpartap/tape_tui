@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::core::component::Component;
-use crate::core::input::{is_key_release, matches_key};
+use crate::core::input::{is_key_release, is_key_repeat, parse_key, KeyEventType};
+use crate::core::input_event::InputEvent;
 use crate::core::terminal::Terminal;
 use crate::core::terminal_image::{get_capabilities, is_image_line, set_cell_dimensions, CellDimensions};
 use crate::render::overlay::{composite_overlays, resolve_overlay_layout, OverlayOptions, RenderedOverlay};
@@ -272,7 +273,22 @@ impl<T: Terminal> TuiRuntime<T> {
             data = &owned;
         }
 
-        if matches_key(data, "shift+ctrl+d") {
+        let kitty_active = self.terminal.kitty_protocol_active();
+        let key_id = parse_key(data, kitty_active);
+        let event_type = if is_key_release(data) {
+            KeyEventType::Release
+        } else if is_key_repeat(data) {
+            KeyEventType::Repeat
+        } else {
+            KeyEventType::Press
+        };
+        let event = InputEvent {
+            raw: data.to_string(),
+            key_id,
+            event_type,
+        };
+
+        if event.event_type == KeyEventType::Press && event.key_id.as_deref() == Some("ctrl+shift+d") {
             if let Some(handler) = self.on_debug.as_mut() {
                 handler();
             }
@@ -284,11 +300,11 @@ impl<T: Terminal> TuiRuntime<T> {
         };
 
         let mut component = component.borrow_mut();
-        if is_key_release(data) && !component.wants_key_release() {
+        if event.event_type == KeyEventType::Release && !component.wants_key_release() {
             return;
         }
 
-        component.handle_input(data);
+        component.handle_event(&event);
         self.request_render();
     }
 

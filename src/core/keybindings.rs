@@ -1,10 +1,7 @@
 //! Editor keybindings (Phase 12).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::LazyLock;
-
-use crate::core::input::matches_key;
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EditorAction {
@@ -147,6 +144,7 @@ pub static DEFAULT_EDITOR_KEYBINDINGS: LazyLock<HashMap<EditorAction, Vec<KeyId>
     map
 });
 
+#[derive(Debug)]
 pub struct EditorKeybindingsManager {
     action_to_keys: HashMap<EditorAction, Vec<KeyId>>,
 }
@@ -164,7 +162,8 @@ impl EditorKeybindingsManager {
         self.action_to_keys.clear();
 
         for (action, keys) in DEFAULT_EDITOR_KEYBINDINGS.iter() {
-            self.action_to_keys.insert(*action, keys.clone());
+            let normalized = keys.iter().map(|key| normalize_key_id(key)).collect();
+            self.action_to_keys.insert(*action, normalized);
         }
 
         for (action, binding) in config.entries.iter() {
@@ -172,21 +171,21 @@ impl EditorKeybindingsManager {
                 KeyBinding::Single(key) => vec![key.clone()],
                 KeyBinding::Multiple(keys) => keys.clone(),
             };
-            self.action_to_keys.insert(*action, key_list);
+            let normalized = key_list.iter().map(|key| normalize_key_id(key)).collect();
+            self.action_to_keys.insert(*action, normalized);
         }
     }
 
-    pub fn matches(&self, data: &str, action: EditorAction) -> bool {
+    pub fn matches(&self, key_id: Option<&str>, action: EditorAction) -> bool {
+        let Some(key_id) = key_id else {
+            return false;
+        };
+        let normalized = normalize_key_id(key_id);
         let keys = match self.action_to_keys.get(&action) {
             Some(keys) => keys,
             None => return false,
         };
-        for key in keys {
-            if matches_key(data, key.as_str()) {
-                return true;
-            }
-        }
-        false
+        keys.iter().any(|key| key.as_str() == normalized)
     }
 
     pub fn get_keys(&self, action: EditorAction) -> Vec<KeyId> {
@@ -198,30 +197,73 @@ impl EditorKeybindingsManager {
     }
 }
 
-static GLOBAL_EDITOR_KEYBINDINGS: OnceLock<Arc<Mutex<EditorKeybindingsManager>>> = OnceLock::new();
+pub type EditorKeybindingsHandle = Arc<Mutex<EditorKeybindingsManager>>;
 
-pub fn get_editor_keybindings() -> Arc<Mutex<EditorKeybindingsManager>> {
-    GLOBAL_EDITOR_KEYBINDINGS
-        .get_or_init(|| Arc::new(Mutex::new(EditorKeybindingsManager::new(EditorKeybindingsConfig::default()))))
-        .clone()
+pub fn default_editor_keybindings_handle() -> EditorKeybindingsHandle {
+    Arc::new(Mutex::new(EditorKeybindingsManager::new(
+        EditorKeybindingsConfig::default(),
+    )))
 }
 
-pub fn set_editor_keybindings(manager: EditorKeybindingsManager) {
-    let global = get_editor_keybindings();
-    let mut guard = global.lock().expect("editor keybindings lock poisoned");
-    *guard = manager;
+fn normalize_key_id(key_id: &str) -> String {
+    let lowered = key_id.to_ascii_lowercase();
+    let parts: Vec<&str> = lowered.split('+').collect();
+    let key = parts.last().copied().unwrap_or("").trim();
+
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    for part in parts.iter() {
+        match part.trim() {
+            "ctrl" => ctrl = true,
+            "shift" => shift = true,
+            "alt" => alt = true,
+            _ => {}
+        }
+    }
+
+    let key = match key {
+        "" => "".to_string(),
+        "esc" => "escape".to_string(),
+        "return" => "enter".to_string(),
+        "pageup" => "pageUp".to_string(),
+        "pagedown" => "pageDown".to_string(),
+        other => other.to_string(),
+    };
+
+    let mut mods = Vec::new();
+    if ctrl {
+        mods.push("ctrl");
+    }
+    if shift {
+        mods.push("shift");
+    }
+    if alt {
+        mods.push("alt");
+    }
+
+    if mods.is_empty() {
+        key
+    } else if key.is_empty() {
+        mods.join("+")
+    } else {
+        format!("{}+{}", mods.join("+"), key)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorAction, EditorKeybindingsConfig, EditorKeybindingsManager, KeyBinding};
+    use super::{
+        default_editor_keybindings_handle, EditorAction, EditorKeybindingsConfig,
+        EditorKeybindingsManager, KeyBinding,
+    };
 
     #[test]
     fn defaults_match_expected_keys() {
         let manager = EditorKeybindingsManager::new(EditorKeybindingsConfig::default());
-        assert!(manager.matches("\x1b[A", EditorAction::CursorUp));
-        assert!(manager.matches("\x1b[B", EditorAction::CursorDown));
-        assert!(manager.matches("\r", EditorAction::Submit));
+        assert!(manager.matches(Some("up"), EditorAction::CursorUp));
+        assert!(manager.matches(Some("down"), EditorAction::CursorDown));
+        assert!(manager.matches(Some("enter"), EditorAction::Submit));
     }
 
     #[test]
@@ -229,7 +271,26 @@ mod tests {
         let mut config = EditorKeybindingsConfig::default();
         config.set(EditorAction::Submit, KeyBinding::Single("ctrl+x".to_string()));
         let manager = EditorKeybindingsManager::new(config);
-        assert!(manager.matches("\x18", EditorAction::Submit));
-        assert!(!manager.matches("\r", EditorAction::Submit));
+        assert!(manager.matches(Some("ctrl+x"), EditorAction::Submit));
+        assert!(!manager.matches(Some("enter"), EditorAction::Submit));
+    }
+
+    #[test]
+    fn handles_are_not_process_global() {
+        let a = default_editor_keybindings_handle();
+        let b = default_editor_keybindings_handle();
+
+        {
+            let mut guard = a.lock().expect("keybindings lock poisoned");
+            let mut config = EditorKeybindingsConfig::default();
+            config.set(EditorAction::Submit, KeyBinding::Single("ctrl+x".to_string()));
+            guard.set_config(config);
+        }
+
+        let a_guard = a.lock().expect("keybindings lock poisoned");
+        let b_guard = b.lock().expect("keybindings lock poisoned");
+        assert!(a_guard.matches(Some("ctrl+x"), EditorAction::Submit));
+        assert!(!b_guard.matches(Some("ctrl+x"), EditorAction::Submit));
+        assert!(b_guard.matches(Some("enter"), EditorAction::Submit));
     }
 }

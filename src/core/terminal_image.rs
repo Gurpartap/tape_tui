@@ -622,7 +622,6 @@ fn image_id_seed() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::input::kitty_test_lock;
     use super::{
         allocate_image_id, delete_all_kitty_images, delete_kitty_image, encode_iterm2, encode_kitty,
         get_cell_dimensions, get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions, get_png_dimensions,
@@ -630,6 +629,7 @@ mod tests {
         ImageDimensions, ImageRenderOptions, Iterm2EncodeOptions, KittyEncodeOptions,
     };
     use std::env;
+    use std::sync::{Mutex, OnceLock};
 
     struct EnvGuard {
         key: &'static str,
@@ -654,6 +654,11 @@ mod tests {
             env::remove_var(key);
         }
         EnvGuard { key, previous }
+    }
+
+    fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -836,7 +841,7 @@ mod tests {
 
     #[test]
     fn calculate_rows_and_render_image_kitty() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
         let _term = set_env_guard("TERM", Some("xterm-256color"));
         let _term_program = set_env_guard("TERM_PROGRAM", Some("kitty"));
         let _kitty = set_env_guard("KITTY_WINDOW_ID", Some("1"));
@@ -872,7 +877,7 @@ mod tests {
 
     #[test]
     fn render_image_respects_max_height_cells() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
         let _term = set_env_guard("TERM", Some("xterm-256color"));
         let _term_program = set_env_guard("TERM_PROGRAM", Some("kitty"));
         let _kitty = set_env_guard("KITTY_WINDOW_ID", Some("1"));
@@ -909,7 +914,7 @@ mod tests {
 
     #[test]
     fn render_image_iterm2_and_fallback() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
         let _term = set_env_guard("TERM", Some("xterm-256color"));
         let _term_program = set_env_guard("TERM_PROGRAM", Some("iterm.app"));
         let _kitty = set_env_guard("KITTY_WINDOW_ID", None);

@@ -11,7 +11,6 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::core::input::set_kitty_protocol_active;
 use crate::core::terminal::Terminal;
 use crate::platform::stdin_buffer::{StdinBuffer, StdinEvent};
 
@@ -242,7 +241,6 @@ impl ProcessTerminal {
                                 && is_kitty_response(&sequence)
                             {
                                 kitty_protocol_active.store(true, Ordering::SeqCst);
-                                set_kitty_protocol_active(true);
                                 write_fd(stdout_fd, KITTY_ENABLE);
                                 continue;
                             }
@@ -335,7 +333,6 @@ impl Terminal for ProcessTerminal {
         self.drain_mode.store(false, Ordering::SeqCst);
         self.last_input_time.store(now_ms(), Ordering::SeqCst);
         self.kitty_protocol_active.store(false, Ordering::SeqCst);
-        set_kitty_protocol_active(false);
 
         self.enable_raw_mode();
         self.write_control(BRACKETED_PASTE_ENABLE);
@@ -355,7 +352,6 @@ impl Terminal for ProcessTerminal {
         if self.kitty_protocol_active.load(Ordering::SeqCst) {
             self.write_control(KITTY_DISABLE);
             self.kitty_protocol_active.store(false, Ordering::SeqCst);
-            set_kitty_protocol_active(false);
         }
 
         self.stop_input_thread();
@@ -390,7 +386,6 @@ impl Terminal for ProcessTerminal {
         if self.kitty_protocol_active.load(Ordering::SeqCst) {
             self.write_control(KITTY_DISABLE);
             self.kitty_protocol_active.store(false, Ordering::SeqCst);
-            set_kitty_protocol_active(false);
         }
 
         self.drain_mode.store(true, Ordering::SeqCst);
@@ -650,7 +645,6 @@ mod tests {
         get_termios, poll_readable, ProcessTerminal, StopTestHooks, BRACKETED_PASTE_DISABLE,
         BRACKETED_PASTE_ENABLE,
     };
-    use crate::core::input::kitty_test_lock;
     use crate::core::terminal::Terminal;
 
     #[cfg(unix)]
@@ -733,7 +727,6 @@ mod tests {
 
     #[test]
     fn pty_bracketed_paste_toggles_on_start_stop() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
 
         let mut terminal = ProcessTerminal::new();
@@ -759,7 +752,6 @@ mod tests {
 
     #[test]
     fn drain_input_returns_within_limits() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
 
         let mut terminal = ProcessTerminal::new();
@@ -781,7 +773,6 @@ mod tests {
 
     #[test]
     fn tcflush_runs_before_raw_mode_restore() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
         let original = get_termios(pty.slave);
 
@@ -878,7 +869,6 @@ mod tests {
 
     #[test]
     fn bracketed_paste_is_rewrapped_for_input_handler() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
         let pty = open_pty();
 
         let (tx, rx) = mpsc::channel();

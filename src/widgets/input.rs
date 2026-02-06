@@ -1,7 +1,10 @@
 //! Input widget (Phase 19).
 
 use crate::core::component::{Component, Focusable};
-use crate::core::keybindings::{get_editor_keybindings, EditorAction};
+use crate::core::input_event::InputEvent;
+use crate::core::keybindings::{
+    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
+};
 use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
 use crate::core::text::width::visible_width;
 
@@ -15,6 +18,7 @@ pub struct Input {
     cursor: usize,
     focused: bool,
     prompt: String,
+    keybindings: EditorKeybindingsHandle,
     on_submit: Option<Box<dyn FnMut(String)>>,
     on_escape: Option<Box<dyn FnMut()>>,
     paste_buffer: String,
@@ -28,10 +32,18 @@ impl Input {
             cursor: 0,
             focused: false,
             prompt: "> ".to_string(),
+            keybindings: default_editor_keybindings_handle(),
             on_submit: None,
             on_escape: None,
             paste_buffer: String::new(),
             is_in_paste: false,
+        }
+    }
+
+    pub fn new_with_keybindings_handle(keybindings: EditorKeybindingsHandle) -> Self {
+        Self {
+            keybindings,
+            ..Self::new()
         }
     }
 
@@ -186,6 +198,35 @@ impl Input {
             }
         }
     }
+
+    fn text_from_key_id(key_id: &str) -> Option<String> {
+        let lowered = key_id.to_ascii_lowercase();
+        let parts: Vec<&str> = lowered.split('+').collect();
+        let key = parts.last().copied().unwrap_or("");
+        let has_ctrl = parts.iter().any(|part| part.trim() == "ctrl");
+        let has_alt = parts.iter().any(|part| part.trim() == "alt");
+        let has_shift = parts.iter().any(|part| part.trim() == "shift");
+
+        if has_ctrl || has_alt {
+            return None;
+        }
+
+        if key == "space" {
+            return Some(" ".to_string());
+        }
+
+        let mut chars = key.chars();
+        let ch = chars.next()?;
+        if chars.next().is_some() {
+            return None;
+        }
+
+        if has_shift && ch.is_ascii_alphabetic() {
+            return Some(ch.to_ascii_uppercase().to_string());
+        }
+
+        Some(ch.to_string())
+    }
 }
 
 impl Default for Input {
@@ -281,10 +322,10 @@ impl Component for Input {
         vec![line]
     }
 
-    fn handle_input(&mut self, data: &str) {
+    fn handle_event(&mut self, event: &InputEvent) {
         self.clamp_cursor();
 
-        let mut data = data.to_string();
+        let mut data = event.raw.clone();
 
         if data.contains(PASTE_START) {
             self.is_in_paste = true;
@@ -301,30 +342,69 @@ impl Component for Input {
                 let remaining = self.paste_buffer[end_index + PASTE_END.len()..].to_string();
                 self.paste_buffer.clear();
                 if !remaining.is_empty() {
-                    self.handle_input(&remaining);
+                    let follow_event = InputEvent {
+                        raw: remaining,
+                        key_id: None,
+                        event_type: event.event_type,
+                    };
+                    self.handle_event(&follow_event);
                 }
             }
             return;
         }
 
-        let kb = get_editor_keybindings();
-        let kb = kb.lock().expect("editor keybindings lock poisoned");
+        let key_id = event.key_id.as_deref();
+        let (
+            is_cancel,
+            is_submit,
+            is_delete_backward,
+            is_delete_forward,
+            is_delete_word_backward,
+            is_delete_to_line_start,
+            is_delete_to_line_end,
+            is_left,
+            is_right,
+            is_line_start,
+            is_line_end,
+            is_word_left,
+            is_word_right,
+        ) = {
+            let kb = self
+                .keybindings
+                .lock()
+                .expect("editor keybindings lock poisoned");
+            (
+                kb.matches(key_id, EditorAction::SelectCancel),
+                kb.matches(key_id, EditorAction::Submit),
+                kb.matches(key_id, EditorAction::DeleteCharBackward),
+                kb.matches(key_id, EditorAction::DeleteCharForward),
+                kb.matches(key_id, EditorAction::DeleteWordBackward),
+                kb.matches(key_id, EditorAction::DeleteToLineStart),
+                kb.matches(key_id, EditorAction::DeleteToLineEnd),
+                kb.matches(key_id, EditorAction::CursorLeft),
+                kb.matches(key_id, EditorAction::CursorRight),
+                kb.matches(key_id, EditorAction::CursorLineStart),
+                kb.matches(key_id, EditorAction::CursorLineEnd),
+                kb.matches(key_id, EditorAction::CursorWordLeft),
+                kb.matches(key_id, EditorAction::CursorWordRight),
+            )
+        };
 
-        if kb.matches(&data, EditorAction::SelectCancel) {
+        if is_cancel {
             if let Some(handler) = self.on_escape.as_mut() {
                 handler();
             }
             return;
         }
 
-        if kb.matches(&data, EditorAction::Submit) || data == "\n" {
+        if is_submit || key_id == Some("shift+enter") {
             if let Some(handler) = self.on_submit.as_mut() {
                 handler(self.value.clone());
             }
             return;
         }
 
-        if kb.matches(&data, EditorAction::DeleteCharBackward) {
+        if is_delete_backward {
             if self.cursor > 0 {
                 let before_cursor = &self.value[..self.cursor];
                 let last = grapheme_segments(before_cursor).last();
@@ -336,7 +416,7 @@ impl Component for Input {
             return;
         }
 
-        if kb.matches(&data, EditorAction::DeleteCharForward) {
+        if is_delete_forward {
             if self.cursor < self.value.len() {
                 let after_cursor = &self.value[self.cursor..];
                 let first = grapheme_segments(after_cursor).next();
@@ -347,23 +427,23 @@ impl Component for Input {
             return;
         }
 
-        if kb.matches(&data, EditorAction::DeleteWordBackward) {
+        if is_delete_word_backward {
             self.delete_word_backwards();
             return;
         }
 
-        if kb.matches(&data, EditorAction::DeleteToLineStart) {
+        if is_delete_to_line_start {
             self.value = self.value[self.cursor..].to_string();
             self.cursor = 0;
             return;
         }
 
-        if kb.matches(&data, EditorAction::DeleteToLineEnd) {
+        if is_delete_to_line_end {
             self.value = self.value[..self.cursor].to_string();
             return;
         }
 
-        if kb.matches(&data, EditorAction::CursorLeft) {
+        if is_left {
             if self.cursor > 0 {
                 let before_cursor = &self.value[..self.cursor];
                 let last = grapheme_segments(before_cursor).last();
@@ -373,7 +453,7 @@ impl Component for Input {
             return;
         }
 
-        if kb.matches(&data, EditorAction::CursorRight) {
+        if is_right {
             if self.cursor < self.value.len() {
                 let after_cursor = &self.value[self.cursor..];
                 let first = grapheme_segments(after_cursor).next();
@@ -383,22 +463,22 @@ impl Component for Input {
             return;
         }
 
-        if kb.matches(&data, EditorAction::CursorLineStart) {
+        if is_line_start {
             self.cursor = 0;
             return;
         }
 
-        if kb.matches(&data, EditorAction::CursorLineEnd) {
+        if is_line_end {
             self.cursor = self.value.len();
             return;
         }
 
-        if kb.matches(&data, EditorAction::CursorWordLeft) {
+        if is_word_left {
             self.move_word_backwards();
             return;
         }
 
-        if kb.matches(&data, EditorAction::CursorWordRight) {
+        if is_word_right {
             self.move_word_forwards();
             return;
         }
@@ -407,7 +487,14 @@ impl Component for Input {
             let code = ch as u32;
             code < 32 || code == 0x7f || (code >= 0x80 && code <= 0x9f)
         });
-        if !has_control_chars {
+
+        if has_control_chars {
+            if let Some(key_id) = key_id {
+                if let Some(text) = Self::text_from_key_id(key_id) {
+                    self.insert_text(&text);
+                }
+            }
+        } else {
             self.insert_text(&data);
         }
     }
@@ -435,44 +522,55 @@ impl Focusable for Input {
 mod tests {
     use super::Input;
     use crate::core::component::Component;
+    use crate::core::input::{parse_key, KeyEventType};
+    use crate::core::input_event::InputEvent;
+
+    fn send(input: &mut Input, data: &str) {
+        let event = InputEvent {
+            raw: data.to_string(),
+            key_id: parse_key(data, false),
+            event_type: KeyEventType::Press,
+        };
+        input.handle_event(&event);
+    }
 
     #[test]
     fn input_edits_and_moves_cursor() {
         let mut input = Input::new();
-        input.handle_input("h");
-        input.handle_input("e");
-        input.handle_input("l");
-        input.handle_input("l");
-        input.handle_input("o");
+        send(&mut input, "h");
+        send(&mut input, "e");
+        send(&mut input, "l");
+        send(&mut input, "l");
+        send(&mut input, "o");
         assert_eq!(input.get_value(), "hello");
         assert_eq!(input.cursor, 5);
 
-        input.handle_input("\x1b[D");
-        input.handle_input("\x1b[D");
+        send(&mut input, "\x1b[D");
+        send(&mut input, "\x1b[D");
         assert_eq!(input.cursor, 3);
 
-        input.handle_input("p");
+        send(&mut input, "p");
         assert_eq!(input.get_value(), "helplo");
         assert_eq!(input.cursor, 4);
 
-        input.handle_input("\x7f");
+        send(&mut input, "\x7f");
         assert_eq!(input.get_value(), "hello");
         assert_eq!(input.cursor, 3);
 
-        input.handle_input("\x1b[C");
-        input.handle_input("\x1b[C");
+        send(&mut input, "\x1b[C");
+        send(&mut input, "\x1b[C");
         assert_eq!(input.cursor, 5);
     }
 
     #[test]
     fn input_paste_and_delete_word() {
         let mut input = Input::new();
-        input.handle_input("\x1b[200~hello\nworld\x1b[201~");
+        send(&mut input, "\x1b[200~hello\nworld\x1b[201~");
         assert_eq!(input.get_value(), "helloworld");
 
-        input.handle_input(" ");
-        input.handle_input("there");
-        input.handle_input("\x17");
+        send(&mut input, " ");
+        send(&mut input, "there");
+        send(&mut input, "\x17");
         assert_eq!(input.get_value(), "helloworld ");
         assert_eq!(input.cursor, "helloworld ".len());
     }

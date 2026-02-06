@@ -4,6 +4,7 @@ pub mod terminal;
 pub mod component;
 pub mod editor_component;
 pub mod input;
+pub mod input_event;
 pub mod keybindings;
 pub mod fuzzy;
 pub mod terminal_image;

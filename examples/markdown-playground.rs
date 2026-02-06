@@ -6,10 +6,11 @@ use std::time::Duration;
 use pi_tui::core::component::{Component, Focusable};
 use pi_tui::core::text::slice::slice_by_column;
 use pi_tui::{
-    matches_key, set_editor_keybindings, truncate_to_width, visible_width, Editor, EditorAction,
-    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsManager, EditorOptions, EditorPasteMode,
-    EditorTheme, Markdown, MarkdownTheme, OverlayAnchor, OverlayMargin, OverlayOptions, OverlayHandle,
-    ProcessTerminal, SelectItem, SelectList, SelectListTheme, SizeValue, TUI,
+    default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
+    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions, EditorPasteMode,
+    EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme, OverlayAnchor, OverlayMargin,
+    OverlayHandle, OverlayOptions, ProcessTerminal, SelectItem, SelectList, SelectListTheme, SizeValue,
+    TUI,
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
@@ -168,7 +169,11 @@ struct PaletteOverlay {
 }
 
 impl PaletteOverlay {
-    fn new(state: Rc<RefCell<PaletteState>>, exit_flag: Rc<RefCell<bool>>) -> Self {
+    fn new(
+        state: Rc<RefCell<PaletteState>>,
+        exit_flag: Rc<RefCell<bool>>,
+        keybindings: EditorKeybindingsHandle,
+    ) -> Self {
         let items = vec![
             SelectItem::new(
                 "insert_sample",
@@ -183,7 +188,8 @@ impl PaletteOverlay {
             SelectItem::new("quit", "Quit", Some("Exit the demo".to_string())),
         ];
 
-        let mut list = SelectList::new(items, 8, select_list_theme());
+        let mut list =
+            SelectList::new_with_keybindings_handle(items, 8, select_list_theme(), keybindings);
         {
             let state_for_select = Rc::clone(&state);
             list.set_on_select(Some(Box::new(move |item| {
@@ -232,16 +238,19 @@ impl Component for PaletteOverlay {
         lines
     }
 
-    fn handle_input(&mut self, data: &str) {
-        if matches_key(data, "ctrl+c") {
-            *self.exit_flag.borrow_mut() = true;
-            return;
+    fn handle_event(&mut self, event: &InputEvent) {
+        if event.event_type == KeyEventType::Press {
+            if event.key_id.as_deref() == Some("ctrl+c") {
+                *self.exit_flag.borrow_mut() = true;
+                return;
+            }
+            if event.key_id.as_deref() == Some("ctrl+p") {
+                self.state.borrow_mut().action = Some(PaletteAction::Close);
+                return;
+            }
         }
-        if matches_key(data, "ctrl+p") {
-            self.state.borrow_mut().action = Some(PaletteAction::Close);
-            return;
-        }
-        self.list.handle_input(data);
+
+        self.list.handle_event(event);
     }
 
     fn invalidate(&mut self) {
@@ -274,17 +283,19 @@ impl Component for EditorWrapper {
         self.editor.borrow_mut().render(width)
     }
 
-    fn handle_input(&mut self, data: &str) {
-        if matches_key(data, "ctrl+c") {
-            *self.exit_flag.borrow_mut() = true;
-            return;
-        }
-        if matches_key(data, "ctrl+p") {
-            self.palette.borrow_mut().toggle_requested = true;
-            return;
+    fn handle_event(&mut self, event: &InputEvent) {
+        if event.event_type == KeyEventType::Press {
+            if event.key_id.as_deref() == Some("ctrl+c") {
+                *self.exit_flag.borrow_mut() = true;
+                return;
+            }
+            if event.key_id.as_deref() == Some("ctrl+p") {
+                self.palette.borrow_mut().toggle_requested = true;
+                return;
+            }
         }
 
-        self.editor.borrow_mut().handle_input(data);
+        self.editor.borrow_mut().handle_event(event);
     }
 
     fn invalidate(&mut self) {
@@ -435,18 +446,20 @@ fn overlay_options() -> OverlayOptions {
     options
 }
 
-fn install_playground_keybindings() {
+fn install_playground_keybindings(handle: &EditorKeybindingsHandle) {
     let mut config = EditorKeybindingsConfig::new();
     config.set(EditorAction::Submit, Vec::<String>::new());
     config.set(
         EditorAction::NewLine,
         vec!["enter".to_string(), "shift+enter".to_string()],
     );
-    set_editor_keybindings(EditorKeybindingsManager::new(config));
+    let mut kb = handle.lock().expect("editor keybindings lock poisoned");
+    kb.set_config(config);
 }
 
 fn main() {
-    install_playground_keybindings();
+    let keybindings = default_editor_keybindings_handle();
+    install_playground_keybindings(&keybindings);
 
     let terminal = ProcessTerminal::new();
     let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(EmptyComponent)));
@@ -463,6 +476,7 @@ fn main() {
             height_mode: Some(EditorHeightMode::FillAvailable),
             paste_mode: Some(EditorPasteMode::Literal),
             render_handle: Some(render_handle.clone()),
+            keybindings: Some(keybindings.clone()),
             ..EditorOptions::default()
         },
     )));
@@ -509,7 +523,11 @@ fn main() {
                 tui.request_render();
             } else {
                 let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
-                    PaletteOverlay::new(Rc::clone(&palette_state), Rc::clone(&exit_flag)),
+                    PaletteOverlay::new(
+                        Rc::clone(&palette_state),
+                        Rc::clone(&exit_flag),
+                        keybindings.clone(),
+                    ),
                 )));
                 let handle = tui.show_overlay(Rc::clone(&overlay), Some(overlay_options()));
                 palette_handle = Some(handle);

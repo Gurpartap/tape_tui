@@ -5,7 +5,10 @@ use std::rc::Rc;
 
 use crate::core::component::Component;
 use crate::core::fuzzy::fuzzy_filter;
-use crate::core::keybindings::{get_editor_keybindings, EditorAction};
+use crate::core::input_event::InputEvent;
+use crate::core::keybindings::{
+    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
+};
 use crate::core::text::slice::wrap_text_with_ansi;
 use crate::core::text::utils::truncate_to_width;
 use crate::core::text::width::visible_width;
@@ -44,9 +47,10 @@ pub struct SettingsListTheme {
     pub hint: Box<dyn Fn(&str) -> String>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SettingsListOptions {
     pub enable_search: bool,
+    pub keybindings: Option<EditorKeybindingsHandle>,
 }
 
 pub struct SettingsList {
@@ -55,6 +59,7 @@ pub struct SettingsList {
     theme: SettingsListTheme,
     selected_index: usize,
     max_visible: usize,
+    keybindings: EditorKeybindingsHandle,
     on_change: Box<dyn FnMut(String, String)>,
     on_cancel: Box<dyn FnMut()>,
     search_input: Option<Input>,
@@ -76,8 +81,15 @@ impl SettingsList {
     ) -> Self {
         let options = options.unwrap_or_default();
         let search_enabled = options.enable_search;
+        let keybindings = options
+            .keybindings
+            .unwrap_or_else(default_editor_keybindings_handle);
         let filtered_indices: Vec<usize> = (0..items.len()).collect();
-        let search_input = if search_enabled { Some(Input::new()) } else { None };
+        let search_input = if search_enabled {
+            Some(Input::new_with_keybindings_handle(keybindings.clone()))
+        } else {
+            None
+        };
 
         Self {
             items,
@@ -85,6 +97,7 @@ impl SettingsList {
             theme,
             selected_index: 0,
             max_visible,
+            keybindings,
             on_change,
             on_cancel,
             search_input,
@@ -336,21 +349,23 @@ impl Component for SettingsList {
         self.render_main_list(width)
     }
 
-    fn handle_input(&mut self, data: &str) {
+    fn handle_event(&mut self, event: &InputEvent) {
         if let Some(component) = self.submenu_component.as_mut() {
-            component.handle_input(data);
+            component.handle_event(event);
             self.apply_submenu_result();
             return;
         }
 
-        let kb = get_editor_keybindings();
         let (select_up, select_down, select_confirm, select_cancel) = {
-            let kb = kb.lock().expect("editor keybindings lock poisoned");
+            let kb = self
+                .keybindings
+                .lock()
+                .expect("editor keybindings lock poisoned");
             (
-                kb.matches(data, EditorAction::SelectUp),
-                kb.matches(data, EditorAction::SelectDown),
-                kb.matches(data, EditorAction::SelectConfirm),
-                kb.matches(data, EditorAction::SelectCancel),
+                kb.matches(event.key_id.as_deref(), EditorAction::SelectUp),
+                kb.matches(event.key_id.as_deref(), EditorAction::SelectDown),
+                kb.matches(event.key_id.as_deref(), EditorAction::SelectConfirm),
+                kb.matches(event.key_id.as_deref(), EditorAction::SelectCancel),
             )
         };
 
@@ -373,17 +388,27 @@ impl Component for SettingsList {
             } else {
                 self.selected_index + 1
             };
-        } else if select_confirm || data == " " {
+        } else if select_confirm || event.key_id.as_deref() == Some("space") {
             self.activate_item();
         } else if select_cancel {
             (self.on_cancel)();
         } else if self.search_enabled {
             let query = if let Some(search_input) = self.search_input.as_mut() {
-                let sanitized: String = data.chars().filter(|ch| *ch != ' ').collect();
+                let sanitized: String = event.raw.chars().filter(|ch| *ch != ' ').collect();
                 if sanitized.is_empty() {
                     return;
                 }
-                search_input.handle_input(&sanitized);
+                let sanitized_key_id = if sanitized == event.raw {
+                    event.key_id.clone()
+                } else {
+                    None
+                };
+                let sanitized_event = InputEvent {
+                    raw: sanitized,
+                    key_id: sanitized_key_id,
+                    event_type: event.event_type,
+                };
+                search_input.handle_event(&sanitized_event);
                 Some(search_input.get_value().to_string())
             } else {
                 None
@@ -406,6 +431,8 @@ impl Component for SettingsList {
 mod tests {
     use super::{SettingItem, SettingsList, SettingsListOptions, SettingsListTheme, SubmenuDone};
     use crate::core::component::Component;
+    use crate::core::input::{parse_key, KeyEventType};
+    use crate::core::input_event::InputEvent;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -441,6 +468,15 @@ mod tests {
         }
     }
 
+    fn send(list: &mut SettingsList, data: &str) {
+        let event = InputEvent {
+            raw: data.to_string(),
+            key_id: parse_key(data, false),
+            event_type: KeyEventType::Press,
+        };
+        list.handle_event(&event);
+    }
+
     #[test]
     fn settings_list_search_and_navigation() {
         let items = vec![
@@ -457,14 +493,17 @@ mod tests {
             theme(),
             on_change,
             on_cancel,
-            Some(SettingsListOptions { enable_search: true }),
+            Some(SettingsListOptions {
+                enable_search: true,
+                ..SettingsListOptions::default()
+            }),
         );
 
-        list.handle_input("be");
+        send(&mut list, "be");
         assert_eq!(list.filtered_indices.len(), 1);
         assert_eq!(list.display_item_index(list.selected_index), Some(1));
 
-        list.handle_input("\x1b[B");
+        send(&mut list, "\x1b[B");
         assert_eq!(list.selected_index, 0);
     }
 
@@ -487,12 +526,12 @@ mod tests {
 
         let mut list = SettingsList::new(items, 2, theme(), on_change, on_cancel, None);
 
-        list.handle_input("\r");
+        send(&mut list, "\r");
         assert_eq!(changes.borrow().as_slice(), &[("mode".to_string(), "on".to_string())]);
 
-        list.handle_input("\x1b[B");
-        list.handle_input("\r");
-        list.handle_input("x");
+        send(&mut list, "\x1b[B");
+        send(&mut list, "\r");
+        send(&mut list, "x");
 
         assert_eq!(changes.borrow().len(), 2);
         assert_eq!(changes.borrow()[1], ("submenu".to_string(), "updated".to_string()));

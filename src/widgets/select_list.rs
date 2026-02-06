@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use crate::core::component::Component;
-use crate::core::keybindings::{get_editor_keybindings, EditorAction};
+use crate::core::input_event::InputEvent;
+use crate::core::keybindings::{
+    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
+};
 use crate::core::text::utils::truncate_to_width;
 
 fn normalize_to_single_line(text: &str) -> String {
@@ -55,6 +58,7 @@ pub struct SelectList {
     selected_index: usize,
     max_visible: usize,
     theme: SelectListTheme,
+    keybindings: EditorKeybindingsHandle,
     on_select: Option<Box<dyn FnMut(SelectItem)>>,
     on_cancel: Option<Box<dyn FnMut()>>,
     on_selection_change: Option<Box<dyn FnMut(SelectItem)>>,
@@ -62,12 +66,22 @@ pub struct SelectList {
 
 impl SelectList {
     pub fn new(items: Vec<SelectItem>, max_visible: usize, theme: SelectListTheme) -> Self {
+        Self::new_with_keybindings_handle(items, max_visible, theme, default_editor_keybindings_handle())
+    }
+
+    pub fn new_with_keybindings_handle(
+        items: Vec<SelectItem>,
+        max_visible: usize,
+        theme: SelectListTheme,
+        keybindings: EditorKeybindingsHandle,
+    ) -> Self {
         Self {
             filtered_items: items.clone(),
             items,
             selected_index: 0,
             max_visible,
             theme,
+            keybindings,
             on_select: None,
             on_cancel: None,
             on_selection_change: None,
@@ -219,40 +233,72 @@ impl Component for SelectList {
         lines
     }
 
-    fn handle_input(&mut self, data: &str) {
-        let kb = get_editor_keybindings();
-        let kb = kb.lock().expect("editor keybindings lock poisoned");
+    fn handle_event(&mut self, event: &InputEvent) {
+        let key_id = event.key_id.as_deref();
 
-        if kb.matches(data, EditorAction::SelectUp) {
-            if self.filtered_items.is_empty() {
-                return;
-            }
-            if self.selected_index == 0 {
-                self.selected_index = self.filtered_items.len() - 1;
+        enum Action {
+            Up,
+            Down,
+            Confirm,
+            Cancel,
+            None,
+        }
+
+        let action = {
+            let kb = self
+                .keybindings
+                .lock()
+                .expect("editor keybindings lock poisoned");
+
+            if kb.matches(key_id, EditorAction::SelectUp) {
+                Action::Up
+            } else if kb.matches(key_id, EditorAction::SelectDown) {
+                Action::Down
+            } else if kb.matches(key_id, EditorAction::SelectConfirm) {
+                Action::Confirm
+            } else if kb.matches(key_id, EditorAction::SelectCancel) {
+                Action::Cancel
             } else {
-                self.selected_index -= 1;
+                Action::None
             }
-            self.notify_selection_change();
-        } else if kb.matches(data, EditorAction::SelectDown) {
-            if self.filtered_items.is_empty() {
-                return;
+        };
+
+        match action {
+            Action::Up => {
+                if self.filtered_items.is_empty() {
+                    return;
+                }
+                if self.selected_index == 0 {
+                    self.selected_index = self.filtered_items.len() - 1;
+                } else {
+                    self.selected_index -= 1;
+                }
+                self.notify_selection_change();
             }
-            if self.selected_index == self.filtered_items.len() - 1 {
-                self.selected_index = 0;
-            } else {
-                self.selected_index += 1;
+            Action::Down => {
+                if self.filtered_items.is_empty() {
+                    return;
+                }
+                if self.selected_index == self.filtered_items.len() - 1 {
+                    self.selected_index = 0;
+                } else {
+                    self.selected_index += 1;
+                }
+                self.notify_selection_change();
             }
-            self.notify_selection_change();
-        } else if kb.matches(data, EditorAction::SelectConfirm) {
-            if let Some(item) = self.filtered_items.get(self.selected_index) {
-                if let Some(handler) = self.on_select.as_mut() {
-                    handler(item.clone());
+            Action::Confirm => {
+                if let Some(item) = self.filtered_items.get(self.selected_index) {
+                    if let Some(handler) = self.on_select.as_mut() {
+                        handler(item.clone());
+                    }
                 }
             }
-        } else if kb.matches(data, EditorAction::SelectCancel) {
-            if let Some(handler) = self.on_cancel.as_mut() {
-                handler();
+            Action::Cancel => {
+                if let Some(handler) = self.on_cancel.as_mut() {
+                    handler();
+                }
             }
+            Action::None => {}
         }
     }
 
@@ -265,6 +311,8 @@ impl Component for SelectList {
 mod tests {
     use super::{SelectItem, SelectList, SelectListTheme};
     use crate::core::component::Component;
+    use crate::core::input::{parse_key, KeyEventType};
+    use crate::core::input_event::InputEvent;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -279,6 +327,15 @@ mod tests {
         }
     }
 
+    fn send(list: &mut SelectList, data: &str) {
+        let event = InputEvent {
+            raw: data.to_string(),
+            key_id: parse_key(data, false),
+            event_type: KeyEventType::Press,
+        };
+        list.handle_event(&event);
+    }
+
     #[test]
     fn select_list_navigates_and_wraps() {
         let items = vec![
@@ -290,16 +347,16 @@ mod tests {
 
         assert_eq!(list.get_selected_item().unwrap().value, "one");
 
-        list.handle_input("\x1b[B");
+        send(&mut list, "\x1b[B");
         assert_eq!(list.get_selected_item().unwrap().value, "two");
 
-        list.handle_input("\x1b[B");
+        send(&mut list, "\x1b[B");
         assert_eq!(list.get_selected_item().unwrap().value, "three");
 
-        list.handle_input("\x1b[B");
+        send(&mut list, "\x1b[B");
         assert_eq!(list.get_selected_item().unwrap().value, "one");
 
-        list.handle_input("\x1b[A");
+        send(&mut list, "\x1b[A");
         assert_eq!(list.get_selected_item().unwrap().value, "three");
     }
 
@@ -329,13 +386,13 @@ mod tests {
             *cancelled_ref.borrow_mut() = true;
         })));
 
-        list.handle_input("\x1b[B");
+        send(&mut list, "\x1b[B");
         assert_eq!(changes.borrow().as_slice(), &["two"]);
 
-        list.handle_input("\r");
+        send(&mut list, "\r");
         assert_eq!(selected.borrow().as_slice(), &["two"]);
 
-        list.handle_input("\x1b");
+        send(&mut list, "\x1b");
         assert!(*cancelled.borrow());
     }
 }

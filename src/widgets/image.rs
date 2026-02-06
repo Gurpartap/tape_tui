@@ -134,9 +134,9 @@ impl Component for Image {
 mod tests {
     use super::{Image, ImageOptions, ImageTheme};
     use crate::core::component::Component;
-    use crate::core::input::kitty_test_lock;
     use crate::core::terminal_image::{reset_capabilities_cache, ImageDimensions};
     use std::env;
+    use std::sync::{Mutex, OnceLock};
 
     struct EnvGuard {
         key: &'static str,
@@ -169,9 +169,14 @@ mod tests {
         }
     }
 
+    fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn image_renders_kitty_sequence_rows() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
         let _term = set_env_guard("TERM", Some("xterm-256color"));
         let _term_program = set_env_guard("TERM_PROGRAM", Some("kitty"));
         let _kitty = set_env_guard("KITTY_WINDOW_ID", Some("1"));
@@ -203,7 +208,7 @@ mod tests {
 
     #[test]
     fn image_falls_back_without_capabilities() {
-        let _guard = kitty_test_lock().lock().expect("test lock poisoned");
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
         let _term = set_env_guard("TERM", Some("xterm-256color"));
         let _term_program = set_env_guard("TERM_PROGRAM", Some("vscode"));
         let _kitty = set_env_guard("KITTY_WINDOW_ID", None);

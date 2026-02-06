@@ -31,15 +31,15 @@ pub use crate::core::fuzzy::{fuzzy_filter, fuzzy_match, FuzzyMatch};
 
 // Keybindings
 pub use crate::core::keybindings::{
-    get_editor_keybindings, set_editor_keybindings, EditorAction, EditorKeybindingsConfig,
+    default_editor_keybindings_handle, EditorAction, EditorKeybindingsConfig, EditorKeybindingsHandle,
     EditorKeybindingsManager, KeyId, DEFAULT_EDITOR_KEYBINDINGS,
 };
 
 // Keyboard input handling
 pub use crate::core::input::{
-    is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key,
-    set_kitty_protocol_active, Key, KeyEventType,
+    is_key_release, is_key_repeat, matches_key, parse_key, Key, KeyEventType,
 };
+pub use crate::core::input_event::InputEvent;
 
 // Input buffering
 pub use crate::platform::stdin_buffer::{StdinBuffer, StdinBufferEventMap, StdinBufferOptions};

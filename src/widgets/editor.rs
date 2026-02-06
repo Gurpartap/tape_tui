@@ -10,7 +10,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::core::autocomplete::{AbortSignal, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions};
 use crate::core::component::{Component, Focusable};
 use crate::core::editor_component::EditorComponent;
-use crate::core::keybindings::{get_editor_keybindings, EditorAction};
+use crate::core::input_event::InputEvent;
+use crate::core::keybindings::{
+    default_editor_keybindings_handle, EditorAction, EditorKeybindingsHandle,
+};
 use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
 use crate::core::text::width::visible_width;
 use crate::runtime::tui::RenderHandle;
@@ -153,6 +156,7 @@ pub struct EditorOptions {
     pub height_mode: Option<EditorHeightMode>,
     pub paste_mode: Option<EditorPasteMode>,
     pub render_handle: Option<RenderHandle>,
+    pub keybindings: Option<EditorKeybindingsHandle>,
 }
 
 enum JumpMode {
@@ -180,6 +184,7 @@ pub struct Editor {
     padding_x: usize,
     autocomplete_max_visible: usize,
     render_handle: Option<RenderHandle>,
+    keybindings: EditorKeybindingsHandle,
     autocomplete_provider: Option<Box<dyn AutocompleteProvider>>,
     autocomplete_list: Option<SelectList>,
     autocomplete_state: Option<AutocompleteState>,
@@ -221,6 +226,9 @@ impl Editor {
         let height_mode = options.height_mode.unwrap_or(EditorHeightMode::Default);
         let paste_mode = options.paste_mode.unwrap_or(EditorPasteMode::Default);
         let render_handle = options.render_handle;
+        let keybindings = options
+            .keybindings
+            .unwrap_or_else(default_editor_keybindings_handle);
         let border_color = theme.border_color;
         let select_list_theme = theme.select_list;
         Self {
@@ -234,6 +242,7 @@ impl Editor {
             padding_x,
             autocomplete_max_visible,
             render_handle,
+            keybindings,
             autocomplete_provider: None,
             autocomplete_list: None,
             autocomplete_state: None,
@@ -459,7 +468,12 @@ impl Editor {
             .iter()
             .map(|item| SelectItem::new(item.value.clone(), item.label.clone(), item.description.clone()))
             .collect::<Vec<_>>();
-        let mut list = SelectList::new(items, self.autocomplete_max_visible, self.select_list_theme.clone());
+        let mut list = SelectList::new_with_keybindings_handle(
+            items,
+            self.autocomplete_max_visible,
+            self.select_list_theme.clone(),
+            self.keybindings.clone(),
+        );
         if let Some(index) = selected_index {
             list.set_selected_index(index);
         }
@@ -629,7 +643,12 @@ impl Editor {
             .iter()
             .map(|item| SelectItem::new(item.value.clone(), item.label.clone(), item.description.clone()))
             .collect::<Vec<_>>();
-        let list = SelectList::new(items, self.autocomplete_max_visible, self.select_list_theme.clone());
+        let list = SelectList::new_with_keybindings_handle(
+            items,
+            self.autocomplete_max_visible,
+            self.select_list_theme.clone(),
+            self.keybindings.clone(),
+        );
 
         self.autocomplete_prefix = suggestions.prefix;
         self.autocomplete_list = Some(list);
@@ -981,33 +1000,6 @@ impl Editor {
         self.set_cursor_col(0);
 
         self.emit_change();
-    }
-
-    fn should_submit_on_backslash_enter(
-        &self,
-        data: &str,
-        keybindings: &crate::core::keybindings::EditorKeybindingsManager,
-    ) -> bool {
-        if self.disable_submit {
-            return false;
-        }
-        if !crate::core::input::matches_key(data, "enter") {
-            return false;
-        }
-        let submit_keys = keybindings.get_keys(EditorAction::Submit);
-        let has_shift_enter = submit_keys
-            .iter()
-            .any(|key| key == "shift+enter" || key == "shift+return");
-        if !has_shift_enter {
-            return false;
-        }
-        let current_line = self
-            .state
-            .lines
-            .get(self.state.cursor_line)
-            .map(String::as_str)
-            .unwrap_or("");
-        self.state.cursor_col > 0 && current_line[..self.state.cursor_col].ends_with('\\')
     }
 
     fn submit_value(&mut self) {
@@ -2208,26 +2200,33 @@ impl Component for Editor {
         Editor::set_terminal_rows(self, rows);
     }
 
-    fn handle_input(&mut self, data: &str) {
+    fn handle_event(&mut self, event: &InputEvent) {
         self.clamp_cursor();
         self.poll_autocomplete_async();
 
-        let mut data = data.to_string();
+        let key_id = event.key_id.as_deref();
+        let mut data = event.raw.clone();
 
-        {
-            let kb = get_editor_keybindings();
-            let kb = kb.lock().expect("editor keybindings lock poisoned");
-            if let Some(jump_mode) = self.jump_mode.take() {
-                if kb.matches(&data, EditorAction::JumpForward)
-                    || kb.matches(&data, EditorAction::JumpBackward)
-                {
-                    return;
-                }
+        if let Some(jump_mode) = self.jump_mode.take() {
+            let is_jump_key = {
+                let kb = self
+                    .keybindings
+                    .lock()
+                    .expect("editor keybindings lock poisoned");
+                kb.matches(key_id, EditorAction::JumpForward) || kb.matches(key_id, EditorAction::JumpBackward)
+            };
+            if is_jump_key {
+                return;
+            }
 
-                if data.chars().next().map(|ch| (ch as u32) >= 32).unwrap_or(false) {
-                    self.jump_to_char(&data, jump_mode);
-                    return;
-                }
+            let target = decode_kitty_printable(&data).or_else(|| {
+                data.chars()
+                    .next()
+                    .and_then(|ch| if (ch as u32) >= 32 { Some(ch.to_string()) } else { None })
+            });
+            if let Some(target) = target {
+                self.jump_to_char(&target, jump_mode);
+                return;
             }
         }
 
@@ -2248,23 +2247,33 @@ impl Component for Editor {
                 let remaining = self.paste_buffer[end_index + PASTE_END.len()..].to_string();
                 self.paste_buffer.clear();
                 if !remaining.is_empty() {
-                    self.handle_input(&remaining);
+                    let follow_event = InputEvent {
+                        raw: remaining,
+                        key_id: None,
+                        event_type: event.event_type,
+                    };
+                    self.handle_event(&follow_event);
                 }
             }
             return;
         }
 
-        let kb = get_editor_keybindings();
-        let kb = kb.lock().expect("editor keybindings lock poisoned");
-
-        let is_copy = kb.matches(&data, EditorAction::Copy);
-        let is_undo = kb.matches(&data, EditorAction::Undo);
-        let is_select_cancel = kb.matches(&data, EditorAction::SelectCancel);
-        let is_select_up = kb.matches(&data, EditorAction::SelectUp);
-        let is_select_down = kb.matches(&data, EditorAction::SelectDown);
-        let is_tab = kb.matches(&data, EditorAction::Tab);
-        let is_select_confirm = kb.matches(&data, EditorAction::SelectConfirm);
-        drop(kb);
+        let (is_copy, is_undo, is_select_cancel, is_select_up, is_select_down, is_tab, is_select_confirm) =
+            {
+                let kb = self
+                    .keybindings
+                    .lock()
+                    .expect("editor keybindings lock poisoned");
+                (
+                    kb.matches(key_id, EditorAction::Copy),
+                    kb.matches(key_id, EditorAction::Undo),
+                    kb.matches(key_id, EditorAction::SelectCancel),
+                    kb.matches(key_id, EditorAction::SelectUp),
+                    kb.matches(key_id, EditorAction::SelectDown),
+                    kb.matches(key_id, EditorAction::Tab),
+                    kb.matches(key_id, EditorAction::SelectConfirm),
+                )
+            };
 
         if is_copy {
             return;
@@ -2283,7 +2292,7 @@ impl Component for Editor {
 
             if is_select_up || is_select_down {
                 if let Some(list) = self.autocomplete_list.as_mut() {
-                    list.handle_input(&data);
+                    list.handle_event(event);
                     self.autocomplete_selection_changed = true;
                     self.autocomplete_selected_value =
                         list.get_selected_item().map(|item| item.value.clone());
@@ -2372,153 +2381,206 @@ impl Component for Editor {
             return;
         }
 
-        let kb = get_editor_keybindings();
-        let kb = kb.lock().expect("editor keybindings lock poisoned");
-
-        if kb.matches(&data, EditorAction::DeleteToLineEnd) {
-            self.delete_to_end_of_line();
-            return;
-        }
-        if kb.matches(&data, EditorAction::DeleteToLineStart) {
-            self.delete_to_start_of_line();
-            return;
-        }
-        if kb.matches(&data, EditorAction::DeleteWordBackward) {
-            self.delete_word_backwards();
-            return;
-        }
-        if kb.matches(&data, EditorAction::DeleteWordForward) {
-            self.delete_word_forwards();
-            return;
-        }
-        if kb.matches(&data, EditorAction::DeleteCharBackward)
-            || crate::core::input::matches_key(&data, "shift+backspace")
-        {
-            self.handle_backspace();
-            return;
-        }
-        if kb.matches(&data, EditorAction::DeleteCharForward)
-            || crate::core::input::matches_key(&data, "shift+delete")
-        {
-            self.handle_forward_delete();
-            return;
+        enum Action {
+            DeleteToLineEnd,
+            DeleteToLineStart,
+            DeleteWordBackward,
+            DeleteWordForward,
+            Backspace,
+            ForwardDelete,
+            Yank,
+            YankPop,
+            CursorLineStart,
+            CursorLineEnd,
+            CursorWordLeft,
+            CursorWordRight,
+            NewLine,
+            Submit,
+            CursorUp,
+            CursorDown,
+            CursorRight,
+            CursorLeft,
+            PageUp,
+            PageDown,
+            JumpForward,
+            JumpBackward,
         }
 
-        if kb.matches(&data, EditorAction::Yank) {
-            self.yank();
-            return;
-        }
-        if kb.matches(&data, EditorAction::YankPop) {
-            self.yank_pop();
-            return;
-        }
+        let action = {
+            let kb = self
+                .keybindings
+                .lock()
+                .expect("editor keybindings lock poisoned");
 
-        if kb.matches(&data, EditorAction::CursorLineStart) {
-            self.move_to_line_start();
-            return;
-        }
-        if kb.matches(&data, EditorAction::CursorLineEnd) {
-            self.move_to_line_end();
-            return;
-        }
-        if kb.matches(&data, EditorAction::CursorWordLeft) {
-            self.move_word_backwards();
-            return;
-        }
-        if kb.matches(&data, EditorAction::CursorWordRight) {
-            self.move_word_forwards();
-            return;
-        }
+            if kb.matches(key_id, EditorAction::DeleteToLineEnd) {
+                Some(Action::DeleteToLineEnd)
+            } else if kb.matches(key_id, EditorAction::DeleteToLineStart) {
+                Some(Action::DeleteToLineStart)
+            } else if kb.matches(key_id, EditorAction::DeleteWordBackward) {
+                Some(Action::DeleteWordBackward)
+            } else if kb.matches(key_id, EditorAction::DeleteWordForward) {
+                Some(Action::DeleteWordForward)
+            } else if kb.matches(key_id, EditorAction::DeleteCharBackward) || key_id == Some("shift+backspace") {
+                Some(Action::Backspace)
+            } else if kb.matches(key_id, EditorAction::DeleteCharForward) || key_id == Some("shift+delete") {
+                Some(Action::ForwardDelete)
+            } else if kb.matches(key_id, EditorAction::Yank) {
+                Some(Action::Yank)
+            } else if kb.matches(key_id, EditorAction::YankPop) {
+                Some(Action::YankPop)
+            } else if kb.matches(key_id, EditorAction::CursorLineStart) {
+                Some(Action::CursorLineStart)
+            } else if kb.matches(key_id, EditorAction::CursorLineEnd) {
+                Some(Action::CursorLineEnd)
+            } else if kb.matches(key_id, EditorAction::CursorWordLeft) {
+                Some(Action::CursorWordLeft)
+            } else if kb.matches(key_id, EditorAction::CursorWordRight) {
+                Some(Action::CursorWordRight)
+            } else if kb.matches(key_id, EditorAction::NewLine) {
+                Some(Action::NewLine)
+            } else if kb.matches(key_id, EditorAction::Submit) {
+                Some(Action::Submit)
+            } else if kb.matches(key_id, EditorAction::CursorUp) {
+                Some(Action::CursorUp)
+            } else if kb.matches(key_id, EditorAction::CursorDown) {
+                Some(Action::CursorDown)
+            } else if kb.matches(key_id, EditorAction::CursorRight) {
+                Some(Action::CursorRight)
+            } else if kb.matches(key_id, EditorAction::CursorLeft) {
+                Some(Action::CursorLeft)
+            } else if kb.matches(key_id, EditorAction::PageUp) {
+                Some(Action::PageUp)
+            } else if kb.matches(key_id, EditorAction::PageDown) {
+                Some(Action::PageDown)
+            } else if kb.matches(key_id, EditorAction::JumpForward) {
+                Some(Action::JumpForward)
+            } else if kb.matches(key_id, EditorAction::JumpBackward) {
+                Some(Action::JumpBackward)
+            } else {
+                None
+            }
+        };
 
-        let is_new_line = kb.matches(&data, EditorAction::NewLine)
-            || (data.as_bytes().first() == Some(&b'\n') && data.len() > 1)
-            || data == "\x1b\r"
-            || data == "\x1b[13;2~"
-            || (data.len() > 1 && data.contains('\x1b') && data.contains('\r'))
-            || data == "\n";
-        if is_new_line {
-            if self.should_submit_on_backslash_enter(&data, &kb) {
-                self.handle_backspace();
-                self.submit_value();
+        match action {
+            Some(Action::DeleteToLineEnd) => {
+                self.delete_to_end_of_line();
                 return;
             }
-            self.add_new_line();
-            return;
-        }
-
-        if kb.matches(&data, EditorAction::Submit) {
-            if self.disable_submit {
+            Some(Action::DeleteToLineStart) => {
+                self.delete_to_start_of_line();
                 return;
             }
-
-            let current_line = self
-                .state
-                .lines
-                .get(self.state.cursor_line)
-                .map(String::as_str)
-                .unwrap_or("");
-            if self.state.cursor_col > 0 && current_line[..self.state.cursor_col].ends_with('\\') {
+            Some(Action::DeleteWordBackward) => {
+                self.delete_word_backwards();
+                return;
+            }
+            Some(Action::DeleteWordForward) => {
+                self.delete_word_forwards();
+                return;
+            }
+            Some(Action::Backspace) => {
                 self.handle_backspace();
+                return;
+            }
+            Some(Action::ForwardDelete) => {
+                self.handle_forward_delete();
+                return;
+            }
+            Some(Action::Yank) => {
+                self.yank();
+                return;
+            }
+            Some(Action::YankPop) => {
+                self.yank_pop();
+                return;
+            }
+            Some(Action::CursorLineStart) => {
+                self.move_to_line_start();
+                return;
+            }
+            Some(Action::CursorLineEnd) => {
+                self.move_to_line_end();
+                return;
+            }
+            Some(Action::CursorWordLeft) => {
+                self.move_word_backwards();
+                return;
+            }
+            Some(Action::CursorWordRight) => {
+                self.move_word_forwards();
+                return;
+            }
+            Some(Action::NewLine) => {
                 self.add_new_line();
                 return;
             }
+            Some(Action::Submit) => {
+                if self.disable_submit {
+                    return;
+                }
 
-            self.submit_value();
-            return;
-        }
+                let current_line = self
+                    .state
+                    .lines
+                    .get(self.state.cursor_line)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if self.state.cursor_col > 0 && current_line[..self.state.cursor_col].ends_with('\\') {
+                    self.handle_backspace();
+                    self.add_new_line();
+                    return;
+                }
 
-        if kb.matches(&data, EditorAction::CursorUp) {
-            if self.is_editor_empty() {
-                self.navigate_history(-1);
-            } else if self.history_index > -1 && self.is_on_first_visual_line() {
-                self.navigate_history(-1);
-            } else if self.is_on_first_visual_line() {
-                self.move_to_line_start();
-            } else {
-                self.move_cursor(-1, 0);
+                self.submit_value();
+                return;
             }
-            return;
-        }
-        if kb.matches(&data, EditorAction::CursorDown) {
-            if self.history_index > -1 && self.is_on_last_visual_line() {
-                self.navigate_history(1);
-            } else if self.is_on_last_visual_line() {
-                self.move_to_line_end();
-            } else {
-                self.move_cursor(1, 0);
+            Some(Action::CursorUp) => {
+                if self.is_editor_empty() {
+                    self.navigate_history(-1);
+                } else if self.history_index > -1 && self.is_on_first_visual_line() {
+                    self.navigate_history(-1);
+                } else if self.is_on_first_visual_line() {
+                    self.move_to_line_start();
+                } else {
+                    self.move_cursor(-1, 0);
+                }
+                return;
             }
-            return;
-        }
-        if kb.matches(&data, EditorAction::CursorRight) {
-            self.move_cursor(0, 1);
-            return;
-        }
-        if kb.matches(&data, EditorAction::CursorLeft) {
-            self.move_cursor(0, -1);
-            return;
-        }
-
-        if kb.matches(&data, EditorAction::PageUp) {
-            self.page_scroll(-1);
-            return;
-        }
-        if kb.matches(&data, EditorAction::PageDown) {
-            self.page_scroll(1);
-            return;
-        }
-
-        if kb.matches(&data, EditorAction::JumpForward) {
-            self.jump_mode = Some(JumpMode::Forward);
-            return;
-        }
-        if kb.matches(&data, EditorAction::JumpBackward) {
-            self.jump_mode = Some(JumpMode::Backward);
-            return;
-        }
-
-        if crate::core::input::matches_key(&data, "shift+space") {
-            self.insert_character(" ", false);
-            return;
+            Some(Action::CursorDown) => {
+                if self.history_index > -1 && self.is_on_last_visual_line() {
+                    self.navigate_history(1);
+                } else if self.is_on_last_visual_line() {
+                    self.move_to_line_end();
+                } else {
+                    self.move_cursor(1, 0);
+                }
+                return;
+            }
+            Some(Action::CursorRight) => {
+                self.move_cursor(0, 1);
+                return;
+            }
+            Some(Action::CursorLeft) => {
+                self.move_cursor(0, -1);
+                return;
+            }
+            Some(Action::PageUp) => {
+                self.page_scroll(-1);
+                return;
+            }
+            Some(Action::PageDown) => {
+                self.page_scroll(1);
+                return;
+            }
+            Some(Action::JumpForward) => {
+                self.jump_mode = Some(JumpMode::Forward);
+                return;
+            }
+            Some(Action::JumpBackward) => {
+                self.jump_mode = Some(JumpMode::Backward);
+                return;
+            }
+            None => {}
         }
 
         if let Some(decoded) = decode_kitty_printable(&data) {
@@ -2682,6 +2744,8 @@ mod tests {
         CommandEntry, CompletionResult, SlashCommand,
     };
     use crate::core::component::Component;
+    use crate::core::input::{parse_key, KeyEventType};
+    use crate::core::input_event::InputEvent;
     use crate::widgets::select_list::SelectListTheme;
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -2701,6 +2765,15 @@ mod tests {
                 no_match: Arc::new(|text| text.to_string()),
             },
         }
+    }
+
+    fn send(editor: &mut Editor, data: &str) {
+        let event = InputEvent {
+            raw: data.to_string(),
+            key_id: parse_key(data, false),
+            event_type: KeyEventType::Press,
+        };
+        editor.handle_event(&event);
     }
 
     #[test]
@@ -2725,10 +2798,10 @@ mod tests {
         editor.state.cursor_line = 0;
         editor.state.cursor_col = 3;
 
-        editor.handle_input("\x1b[C");
+        send(&mut editor, "\x1b[C");
         assert_eq!(editor.get_cursor(), (1, 0));
 
-        editor.handle_input("\x1b[D");
+        send(&mut editor, "\x1b[D");
         assert_eq!(editor.get_cursor(), (0, 3));
     }
 
@@ -2825,11 +2898,11 @@ mod tests {
         let mut editor = Editor::new(theme(), EditorOptions::default());
         for ch in "hello world".chars() {
             let input = ch.to_string();
-            editor.handle_input(&input);
+            send(&mut editor, &input);
         }
-        editor.handle_input("\x1f"); // ctrl+-
+        send(&mut editor, "\x1f"); // ctrl+-
         assert_eq!(editor.get_text(), "hello");
-        editor.handle_input("\x1f");
+        send(&mut editor, "\x1f");
         assert_eq!(editor.get_text(), "");
     }
 
@@ -2840,10 +2913,10 @@ mod tests {
         editor.state.cursor_line = 0;
         editor.set_cursor_col(5);
 
-        editor.handle_input("\x0b"); // ctrl+k
+        send(&mut editor, "\x0b"); // ctrl+k
         assert_eq!(editor.get_text(), "hello");
 
-        editor.handle_input("\x19"); // ctrl+y
+        send(&mut editor, "\x19"); // ctrl+y
         assert_eq!(editor.get_text(), "hello world");
     }
 
@@ -2853,7 +2926,7 @@ mod tests {
         let lines = (0..11).map(|idx| format!("line{idx}")).collect::<Vec<_>>();
         let paste = lines.join("\n");
         let input = format!("\x1b[200~{paste}\x1b[201~");
-        editor.handle_input(&input);
+        send(&mut editor, &input);
         let text = editor.get_text();
         assert!(text.contains("[paste #1 +11 lines]"));
         assert_eq!(editor.get_expanded_text(), paste);
@@ -2871,7 +2944,7 @@ mod tests {
         let lines = (0..11).map(|idx| format!("line{idx}")).collect::<Vec<_>>();
         let paste = lines.join("\n");
         let input = format!("\x1b[200~{paste}\x1b[201~");
-        editor.handle_input(&input);
+        send(&mut editor, &input);
         let text = editor.get_text();
         assert!(text.contains('\n'));
         assert!(!text.contains("[paste #"));
@@ -2899,10 +2972,10 @@ mod tests {
             submitted_ref.borrow_mut().push(text);
         })));
 
-        editor.handle_input("/");
+        send(&mut editor, "/");
         assert!(editor.autocomplete_state.is_some());
 
-        editor.handle_input("\t");
+        send(&mut editor, "\t");
         assert_eq!(editor.get_text(), "/help ");
         assert!(editor.autocomplete_state.is_none());
         assert!(submitted.borrow().is_empty());
@@ -2929,8 +3002,8 @@ mod tests {
             submitted_ref.borrow_mut().push(text);
         })));
 
-        editor.handle_input("/");
-        editor.handle_input("\r");
+        send(&mut editor, "/");
+        send(&mut editor, "\r");
 
         assert_eq!(submitted.borrow().as_slice(), &["/help"]);
         assert_eq!(editor.get_text(), "");
@@ -2993,7 +3066,7 @@ mod tests {
         let mut editor = Editor::new(theme(), EditorOptions::default());
         editor.set_autocomplete_provider(Box::new(AsyncAutocompleteProvider));
 
-        editor.handle_input("@");
+        send(&mut editor, "@");
         thread::sleep(Duration::from_millis(20));
         editor.poll_autocomplete_async();
 

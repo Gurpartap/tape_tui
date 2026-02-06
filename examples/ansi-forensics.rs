@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use pi_tui::core::component::{Component, Focusable};
 use pi_tui::core::text::slice::slice_by_column;
 use pi_tui::{
-    matches_key, set_editor_keybindings, truncate_to_width, visible_width, Editor, EditorAction,
-    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsManager, EditorOptions, EditorPasteMode,
-    EditorTheme, Markdown, MarkdownTheme, ProcessTerminal, Terminal, TUI,
+    default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
+    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions, EditorPasteMode,
+    EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme, ProcessTerminal, Terminal, TUI,
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
@@ -397,22 +397,24 @@ impl Component for EditorWrapper {
         self.editor.borrow_mut().render(width)
     }
 
-    fn handle_input(&mut self, data: &str) {
-        if matches_key(data, "ctrl+c") {
-            *self.exit_flag.borrow_mut() = true;
-            return;
-        }
-        if matches_key(data, "ctrl+t") {
-            let mut state = self.state.borrow_mut();
-            state.auto_tick = !state.auto_tick;
-            return;
-        }
-        if matches_key(data, "ctrl+l") {
-            self.state.borrow_mut().clear_ticks();
-            return;
+    fn handle_event(&mut self, event: &InputEvent) {
+        if event.event_type == KeyEventType::Press {
+            if event.key_id.as_deref() == Some("ctrl+c") {
+                *self.exit_flag.borrow_mut() = true;
+                return;
+            }
+            if event.key_id.as_deref() == Some("ctrl+t") {
+                let mut state = self.state.borrow_mut();
+                state.auto_tick = !state.auto_tick;
+                return;
+            }
+            if event.key_id.as_deref() == Some("ctrl+l") {
+                self.state.borrow_mut().clear_ticks();
+                return;
+            }
         }
 
-        self.editor.borrow_mut().handle_input(data);
+        self.editor.borrow_mut().handle_event(event);
     }
 
     fn invalidate(&mut self) {
@@ -713,7 +715,7 @@ fn derive_stats(capture: TickCapture) -> TickStats {
     }
 }
 
-fn install_demo_keybindings() {
+fn install_demo_keybindings(handle: &EditorKeybindingsHandle) {
     // Make the embedded editor behave like a multi-line scratchpad: Enter inserts a newline.
     let mut config = EditorKeybindingsConfig::new();
     config.set(EditorAction::Submit, Vec::<String>::new());
@@ -721,11 +723,13 @@ fn install_demo_keybindings() {
         EditorAction::NewLine,
         vec!["enter".to_string(), "shift+enter".to_string()],
     );
-    set_editor_keybindings(EditorKeybindingsManager::new(config));
+    let mut kb = handle.lock().expect("editor keybindings lock poisoned");
+    kb.set_config(config);
 }
 
 fn main() {
-    install_demo_keybindings();
+    let keybindings = default_editor_keybindings_handle();
+    install_demo_keybindings(&keybindings);
 
     let collector = Arc::new(Mutex::new(Collector::new(64 * 1024)));
     let terminal = ForensicsTerminal::new(ProcessTerminal::new(), Arc::clone(&collector));
@@ -746,6 +750,7 @@ fn main() {
             height_mode: Some(EditorHeightMode::FillAvailable),
             paste_mode: Some(EditorPasteMode::Literal),
             render_handle: Some(render_handle.clone()),
+            keybindings: Some(keybindings.clone()),
             ..EditorOptions::default()
         },
     )));
