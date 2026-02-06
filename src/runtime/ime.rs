@@ -52,17 +52,12 @@ pub fn position_hardware_cursor(
     let target_col = cursor_pos.col;
     let row_delta = target_row as i32 - hardware_cursor_row as i32;
 
-    let mut buffer = String::new();
     if row_delta > 0 {
-        buffer.push_str(&format!("\x1b[{}B", row_delta));
+        cmds.push(TerminalCmd::MoveDown(row_delta as usize));
     } else if row_delta < 0 {
-        buffer.push_str(&format!("\x1b[{}A", -row_delta));
+        cmds.push(TerminalCmd::MoveUp((-row_delta) as usize));
     }
-    buffer.push_str(&format!("\x1b[{}G", target_col + 1));
-
-    if !buffer.is_empty() {
-        cmds.push(TerminalCmd::Bytes(buffer));
-    }
+    cmds.push(TerminalCmd::ColumnAbs(target_col + 1));
 
     if show_hardware_cursor {
         cmds.push(TerminalCmd::ShowCursor);
@@ -91,14 +86,14 @@ mod tests {
         let pos = CursorPos { row: 2, col: 3 };
         let (new_row, cmds) = position_hardware_cursor(Some(pos), 3, 0, true);
         assert_eq!(new_row, 2);
-        assert!(
-            cmds.iter().any(|cmd| matches!(cmd, TerminalCmd::Bytes(data) if data.contains("\x1b[2B") && data.contains("\x1b[4G"))),
-            "missing cursor positioning bytes: {cmds:?}"
-        );
-        assert!(
-            cmds.iter()
-                .any(|cmd| matches!(cmd, TerminalCmd::ShowCursor)),
-            "missing show cursor: {cmds:?}"
+        assert_eq!(
+            cmds,
+            vec![
+                TerminalCmd::MoveDown(2),
+                TerminalCmd::ColumnAbs(4),
+                TerminalCmd::ShowCursor
+            ],
+            "unexpected cursor positioning cmds: {cmds:?}"
         );
     }
 }

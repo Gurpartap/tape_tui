@@ -15,6 +15,16 @@ pub enum TerminalCmd {
     HideCursor,
     ShowCursor,
 
+    /// Cursor movement.
+    ///
+    /// Semantics:
+    /// - `MoveUp`/`MoveDown`: move the cursor by `n` rows. `n == 0` is a no-op.
+    /// - `ColumnAbs`: move the cursor to an absolute 1-based column (ANSI `CSI n G`).
+    ///   `n == 0` is a no-op.
+    MoveUp(usize),
+    MoveDown(usize),
+    ColumnAbs(usize),
+
     /// Protocol toggles.
     BracketedPasteEnable,
     BracketedPasteDisable,
@@ -77,6 +87,21 @@ impl OutputGate {
                 TerminalCmd::BytesStatic(data) => out.push_str(data),
                 TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
                 TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+                TerminalCmd::MoveUp(n) => {
+                    if n > 0 {
+                        out.push_str(&format!("\x1b[{n}A"));
+                    }
+                }
+                TerminalCmd::MoveDown(n) => {
+                    if n > 0 {
+                        out.push_str(&format!("\x1b[{n}B"));
+                    }
+                }
+                TerminalCmd::ColumnAbs(n) => {
+                    if n > 0 {
+                        out.push_str(&format!("\x1b[{n}G"));
+                    }
+                }
                 TerminalCmd::BracketedPasteEnable => out.push_str("\x1b[?2004h"),
                 TerminalCmd::BracketedPasteDisable => out.push_str("\x1b[?2004l"),
                 TerminalCmd::KittyQuery => out.push_str("\x1b[?u"),
@@ -133,6 +158,21 @@ mod tests {
                 TerminalCmd::BytesStatic(data) => out.push_str(data),
                 TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
                 TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+                TerminalCmd::MoveUp(n) => {
+                    if *n > 0 {
+                        out.push_str(&format!("\x1b[{n}A"));
+                    }
+                }
+                TerminalCmd::MoveDown(n) => {
+                    if *n > 0 {
+                        out.push_str(&format!("\x1b[{n}B"));
+                    }
+                }
+                TerminalCmd::ColumnAbs(n) => {
+                    if *n > 0 {
+                        out.push_str(&format!("\x1b[{n}G"));
+                    }
+                }
                 TerminalCmd::BracketedPasteEnable => out.push_str("\x1b[?2004h"),
                 TerminalCmd::BracketedPasteDisable => out.push_str("\x1b[?2004l"),
                 TerminalCmd::KittyQuery => out.push_str("\x1b[?u"),
@@ -150,6 +190,8 @@ mod tests {
             TerminalCmd::HideCursor,
             TerminalCmd::BytesStatic("hello"),
             TerminalCmd::Bytes(" world".to_string()),
+            TerminalCmd::MoveDown(2),
+            TerminalCmd::ColumnAbs(4),
             TerminalCmd::BracketedPasteEnable,
             TerminalCmd::KittyQuery,
             TerminalCmd::QueryCellSize,
@@ -168,6 +210,22 @@ mod tests {
         gate.flush(&mut term);
 
         assert_eq!(term.output, expected);
+        assert_eq!(term.write_calls, 1);
+    }
+
+    #[test]
+    fn cursor_cmds_encode_to_ansi_sequences() {
+        let mut gate = OutputGate::new();
+        gate.extend([
+            TerminalCmd::MoveUp(2),
+            TerminalCmd::MoveDown(3),
+            TerminalCmd::ColumnAbs(4),
+        ]);
+
+        let mut term = RecordingTerminal::default();
+        gate.flush(&mut term);
+
+        assert_eq!(term.output, "\x1b[2A\x1b[3B\x1b[4G");
         assert_eq!(term.write_calls, 1);
     }
 

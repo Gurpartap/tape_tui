@@ -507,14 +507,12 @@ impl<T: Terminal> TuiRuntime<T> {
         let target_row = total_lines;
         let current_row = self.renderer.hardware_cursor_row();
         let diff = target_row as i32 - current_row as i32;
-        let mut buffer = String::new();
         if diff > 0 {
-            buffer.push_str(&format!("\x1b[{}B", diff));
+            self.output.push(TerminalCmd::MoveDown(diff as usize));
         } else if diff < 0 {
-            buffer.push_str(&format!("\x1b[{}A", -diff));
+            self.output.push(TerminalCmd::MoveUp((-diff) as usize));
         }
-        buffer.push_str("\r\n");
-        self.output.push(TerminalCmd::Bytes(buffer));
+        self.output.push(TerminalCmd::BytesStatic("\r\n"));
         self.renderer.set_hardware_cursor_row(target_row);
     }
 
