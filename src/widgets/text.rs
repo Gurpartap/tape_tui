@@ -4,6 +4,7 @@ use crate::core::component::Component;
 use crate::core::text::slice::wrap_text_with_ansi;
 use crate::core::text::utils::apply_background_to_line;
 use crate::core::text::width::visible_width;
+use crate::Frame;
 
 pub struct Text {
     text: String,
@@ -12,7 +13,7 @@ pub struct Text {
     custom_bg_fn: Option<Box<dyn Fn(&str) -> String>>,
     cached_text: Option<String>,
     cached_width: Option<usize>,
-    cached_lines: Option<Vec<String>>,
+    cached_frame: Option<Frame>,
 }
 
 impl Text {
@@ -24,7 +25,7 @@ impl Text {
             custom_bg_fn: None,
             cached_text: None,
             cached_width: None,
-            cached_lines: None,
+            cached_frame: None,
         }
     }
 
@@ -36,7 +37,7 @@ impl Text {
             custom_bg_fn: None,
             cached_text: None,
             cached_width: None,
-            cached_lines: None,
+            cached_frame: None,
         }
     }
 
@@ -55,21 +56,20 @@ impl Text {
         self.custom_bg_fn = custom_bg_fn;
         self.invalidate();
     }
-}
 
-impl Component for Text {
-    fn render(&mut self, width: usize) -> Vec<String> {
-        if let Some(cached) = self.cached_lines.as_ref() {
+    fn render_frame(&mut self, width: usize) -> Frame {
+        if let Some(cached) = self.cached_frame.as_ref() {
             if self.cached_text.as_deref() == Some(&self.text) && self.cached_width == Some(width) {
                 return cached.clone();
             }
         }
 
         if self.text.trim().is_empty() {
+            let frame = Frame::new(Vec::new());
             self.cached_text = Some(self.text.clone());
             self.cached_width = Some(width);
-            self.cached_lines = Some(Vec::new());
-            return Vec::new();
+            self.cached_frame = Some(frame.clone());
+            return frame;
         }
 
         let normalized = self.text.replace('\t', "   ");
@@ -106,17 +106,25 @@ impl Component for Text {
         result.extend(content_lines);
         result.extend(empty_lines);
 
+        let frame: Frame = result.into();
+
         self.cached_text = Some(self.text.clone());
         self.cached_width = Some(width);
-        self.cached_lines = Some(result.clone());
+        self.cached_frame = Some(frame.clone());
 
-        result
+        frame
+    }
+}
+
+impl Component for Text {
+    fn render(&mut self, width: usize) -> Vec<String> {
+        self.render_frame(width).into_strings()
     }
 
     fn invalidate(&mut self) {
         self.cached_text = None;
         self.cached_width = None;
-        self.cached_lines = None;
+        self.cached_frame = None;
     }
 }
 
@@ -134,5 +142,23 @@ mod tests {
         assert_eq!(lines[0], "word");
         assert_eq!(lines[1], "word");
         assert!(lines.iter().all(|line| visible_width(line) <= 4));
+    }
+
+    #[test]
+    fn text_typed_frame_output_round_trips_losslessly() {
+        let mut text = Text::with_padding("\x1b[31mred\x1b[0m\tword", 1, 1);
+        text.set_custom_bg_fn(Some(Box::new(|line| format!("<{line}>"))));
+
+        let width = 10;
+        let rendered = text.render(width);
+
+        // Force a fresh typed render to ensure `render_frame(..).into_strings()` is byte-identical.
+        text.invalidate();
+        let from_frame = text.render_frame(width).into_strings();
+
+        assert_eq!(from_frame.len(), rendered.len());
+        for (frame_line, render_line) in from_frame.iter().zip(rendered.iter()) {
+            assert_eq!(frame_line.as_bytes(), render_line.as_bytes());
+        }
     }
 }

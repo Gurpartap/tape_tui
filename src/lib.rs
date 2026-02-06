@@ -63,6 +63,7 @@ pub use crate::core::terminal_image::{
 // TUI runtime + overlays
 pub use crate::core::component::{Component, Focusable};
 pub use crate::render::overlay::{OverlayAnchor, OverlayMargin, OverlayOptions, SizeValue};
+pub use crate::render::{Frame, Line, Span};
 pub use crate::runtime::ime::CURSOR_MARKER;
 pub use crate::runtime::tui::OverlayHandle;
 
