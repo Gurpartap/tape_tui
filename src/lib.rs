@@ -57,7 +57,7 @@ pub use crate::core::terminal_image::{
     get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions, get_png_dimensions,
     get_webp_dimensions, image_fallback, render_image, reset_capabilities_cache,
     set_cell_dimensions, CellDimensions, ImageDimensions, ImageProtocol, ImageRenderOptions,
-    TerminalCapabilities,
+    TerminalCapabilities, TerminalImageState,
 };
 
 // TUI runtime + overlays

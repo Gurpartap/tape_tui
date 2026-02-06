@@ -2,7 +2,7 @@
 
 use std::env;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,15 +45,30 @@ pub struct ImageRenderResult {
     pub image_id: Option<u32>,
 }
 
-static CAPABILITIES: OnceLock<Mutex<Option<TerminalCapabilities>>> = OnceLock::new();
-static CELL_DIMENSIONS: OnceLock<Mutex<CellDimensions>> = OnceLock::new();
+#[derive(Debug)]
+pub struct TerminalImageState {
+    capabilities: Mutex<Option<TerminalCapabilities>>,
+    cell_dimensions: Mutex<CellDimensions>,
+    image_id_counter: AtomicU32,
+}
+
+impl Default for TerminalImageState {
+    fn default() -> Self {
+        Self {
+            capabilities: Mutex::new(None),
+            cell_dimensions: Mutex::new(CellDimensions {
+                width_px: 9,
+                height_px: 18,
+            }),
+            image_id_counter: AtomicU32::new(0),
+        }
+    }
+}
 
 const KITTY_PREFIX: &str = "\x1b_G";
 const ITERM2_PREFIX: &str = "\x1b]1337;File=";
 const KITTY_CHUNK_SIZE: usize = 4096;
 const KITTY_ID_MAX: u32 = 0xffff_fffe;
-
-static IMAGE_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone, Default)]
 pub struct KittyEncodeOptions {
@@ -71,24 +86,18 @@ pub struct Iterm2EncodeOptions {
     pub inline: Option<bool>,
 }
 
-pub fn get_cell_dimensions() -> CellDimensions {
-    let lock = CELL_DIMENSIONS.get_or_init(|| {
-        Mutex::new(CellDimensions {
-            width_px: 9,
-            height_px: 18,
-        })
-    });
-    *lock.lock().expect("cell dimensions lock poisoned")
+pub fn get_cell_dimensions(state: &TerminalImageState) -> CellDimensions {
+    *state
+        .cell_dimensions
+        .lock()
+        .expect("cell dimensions lock poisoned")
 }
 
-pub fn set_cell_dimensions(dims: CellDimensions) {
-    let lock = CELL_DIMENSIONS.get_or_init(|| {
-        Mutex::new(CellDimensions {
-            width_px: 9,
-            height_px: 18,
-        })
-    });
-    let mut current = lock.lock().expect("cell dimensions lock poisoned");
+pub fn set_cell_dimensions(state: &TerminalImageState, dims: CellDimensions) {
+    let mut current = state
+        .cell_dimensions
+        .lock()
+        .expect("cell dimensions lock poisoned");
     *current = dims;
 }
 
@@ -156,9 +165,11 @@ pub fn detect_capabilities() -> TerminalCapabilities {
     }
 }
 
-pub fn get_capabilities() -> TerminalCapabilities {
-    let lock = CAPABILITIES.get_or_init(|| Mutex::new(None));
-    let mut cached = lock.lock().expect("capabilities lock poisoned");
+pub fn get_capabilities(state: &TerminalImageState) -> TerminalCapabilities {
+    let mut cached = state
+        .capabilities
+        .lock()
+        .expect("capabilities lock poisoned");
     if let Some(value) = *cached {
         return value;
     }
@@ -167,11 +178,12 @@ pub fn get_capabilities() -> TerminalCapabilities {
     detected
 }
 
-pub fn reset_capabilities_cache() {
-    if let Some(lock) = CAPABILITIES.get() {
-        let mut cached = lock.lock().expect("capabilities lock poisoned");
-        *cached = None;
-    }
+pub fn reset_capabilities_cache(state: &TerminalImageState) {
+    let mut cached = state
+        .capabilities
+        .lock()
+        .expect("capabilities lock poisoned");
+    *cached = None;
 }
 
 pub fn is_image_line(line: &str) -> bool {
@@ -181,8 +193,10 @@ pub fn is_image_line(line: &str) -> bool {
     line.contains(KITTY_PREFIX) || line.contains(ITERM2_PREFIX)
 }
 
-pub fn allocate_image_id() -> u32 {
-    let counter = IMAGE_ID_COUNTER.fetch_add(0x9e37_79b9, Ordering::Relaxed);
+pub fn allocate_image_id(state: &TerminalImageState) -> u32 {
+    let counter = state
+        .image_id_counter
+        .fetch_add(0x9e37_79b9, Ordering::Relaxed);
     let mut value = image_id_seed().wrapping_add(counter);
     value ^= value << 13;
     value ^= value >> 17;
@@ -436,15 +450,16 @@ pub fn get_image_dimensions(base64_data: &str, mime_type: &str) -> Option<ImageD
 }
 
 pub fn render_image(
+    state: &TerminalImageState,
     base64_data: &str,
     image_dimensions: ImageDimensions,
     options: &ImageRenderOptions,
 ) -> Option<ImageRenderResult> {
-    let caps = get_capabilities();
+    let caps = get_capabilities(state);
     let images = caps.images?;
 
     let max_width = options.max_width_cells.unwrap_or(80).max(1);
-    let cell_dimensions = get_cell_dimensions();
+    let cell_dimensions = get_cell_dimensions(state);
     let (width_cells, rows) = fit_image_within_cells(
         image_dimensions,
         cell_dimensions,
@@ -652,8 +667,9 @@ mod tests {
         allocate_image_id, delete_all_kitty_images, delete_kitty_image, encode_iterm2,
         encode_kitty, get_cell_dimensions, get_gif_dimensions, get_image_dimensions,
         get_jpeg_dimensions, get_png_dimensions, get_webp_dimensions, image_fallback,
-        is_image_line, render_image, set_cell_dimensions, CellDimensions, ImageDimensions,
-        ImageRenderOptions, Iterm2EncodeOptions, KittyEncodeOptions,
+        is_image_line, render_image, reset_capabilities_cache, set_cell_dimensions, CellDimensions,
+        ImageDimensions, ImageRenderOptions, Iterm2EncodeOptions, KittyEncodeOptions,
+        TerminalImageState,
     };
     use std::env;
     use std::sync::{Mutex, OnceLock};
@@ -697,20 +713,22 @@ mod tests {
 
     #[test]
     fn cell_dimensions_update() {
-        let original = get_cell_dimensions();
+        let state = TerminalImageState::default();
+        let original = get_cell_dimensions(&state);
         let updated = CellDimensions {
             width_px: original.width_px + 1,
             height_px: original.height_px + 2,
         };
-        set_cell_dimensions(updated);
-        assert_eq!(get_cell_dimensions(), updated);
-        set_cell_dimensions(original);
+        set_cell_dimensions(&state, updated);
+        assert_eq!(get_cell_dimensions(&state), updated);
+        set_cell_dimensions(&state, original);
     }
 
     #[test]
     fn allocate_image_id_is_in_range() {
+        let state = TerminalImageState::default();
         for _ in 0..100 {
-            let id = allocate_image_id();
+            let id = allocate_image_id(&state);
             assert!(id >= 1 && id <= 0xffff_fffe);
         }
     }
@@ -919,13 +937,17 @@ mod tests {
         let _wezterm = set_env_guard("WEZTERM_PANE", None);
         let _iterm = set_env_guard("ITERM_SESSION_ID", None);
         let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
-        super::reset_capabilities_cache();
+        let state = TerminalImageState::default();
+        reset_capabilities_cache(&state);
 
-        let original = get_cell_dimensions();
-        set_cell_dimensions(CellDimensions {
-            width_px: 10,
-            height_px: 10,
-        });
+        let original = get_cell_dimensions(&state);
+        set_cell_dimensions(
+            &state,
+            CellDimensions {
+                width_px: 10,
+                height_px: 10,
+            },
+        );
 
         let dims = ImageDimensions {
             width_px: 100,
@@ -937,13 +959,13 @@ mod tests {
             preserve_aspect_ratio: None,
             image_id: Some(9),
         };
-        let result = render_image("AAAA", dims, &options).expect("kitty render");
+        let result = render_image(&state, "AAAA", dims, &options).expect("kitty render");
         assert!(result.sequence.starts_with("\x1b_G"));
         assert_eq!(result.rows, 5);
         assert_eq!(result.image_id, Some(9));
 
-        set_cell_dimensions(original);
-        super::reset_capabilities_cache();
+        set_cell_dimensions(&state, original);
+        reset_capabilities_cache(&state);
     }
 
     #[test]
@@ -955,13 +977,17 @@ mod tests {
         let _wezterm = set_env_guard("WEZTERM_PANE", None);
         let _iterm = set_env_guard("ITERM_SESSION_ID", None);
         let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
-        super::reset_capabilities_cache();
+        let state = TerminalImageState::default();
+        reset_capabilities_cache(&state);
 
-        let original = get_cell_dimensions();
-        set_cell_dimensions(CellDimensions {
-            width_px: 10,
-            height_px: 10,
-        });
+        let original = get_cell_dimensions(&state);
+        set_cell_dimensions(
+            &state,
+            CellDimensions {
+                width_px: 10,
+                height_px: 10,
+            },
+        );
 
         let dims = ImageDimensions {
             width_px: 100,
@@ -973,14 +999,14 @@ mod tests {
             preserve_aspect_ratio: None,
             image_id: Some(9),
         };
-        let result = render_image("AAAA", dims, &options).expect("kitty render");
+        let result = render_image(&state, "AAAA", dims, &options).expect("kitty render");
         assert!(result.rows <= 3);
         assert_eq!(result.rows, 3);
         assert!(result.sequence.contains("c=3"));
         assert!(result.sequence.contains("r=3"));
 
-        set_cell_dimensions(original);
-        super::reset_capabilities_cache();
+        set_cell_dimensions(&state, original);
+        reset_capabilities_cache(&state);
     }
 
     #[test]
@@ -991,7 +1017,8 @@ mod tests {
         let _kitty = set_env_guard("KITTY_WINDOW_ID", None);
         let _wezterm = set_env_guard("WEZTERM_PANE", None);
         let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
-        super::reset_capabilities_cache();
+        let state = TerminalImageState::default();
+        reset_capabilities_cache(&state);
 
         let dims = ImageDimensions {
             width_px: 200,
@@ -1003,7 +1030,7 @@ mod tests {
             preserve_aspect_ratio: Some(false),
             image_id: None,
         };
-        let result = render_image("AAAA", dims, &options).expect("iterm render");
+        let result = render_image(&state, "AAAA", dims, &options).expect("iterm render");
         assert!(result.sequence.starts_with("\x1b]1337;File="));
         assert!(result.sequence.contains("width=20;height=auto"));
         assert!(result.sequence.contains("preserveAspectRatio=0"));
@@ -1013,6 +1040,6 @@ mod tests {
         let fallback = image_fallback("image/png", Some(dims), Some("file.png"));
         assert_eq!(fallback, "[Image: file.png [image/png] 200x100]");
 
-        super::reset_capabilities_cache();
+        reset_capabilities_cache(&state);
     }
 }

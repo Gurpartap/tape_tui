@@ -13,7 +13,7 @@ use crate::core::input_event::{parse_input_events, InputEvent};
 use crate::core::output::{OutputGate, TerminalCmd};
 use crate::core::terminal::Terminal;
 use crate::core::terminal_image::{
-    get_capabilities, is_image_line, set_cell_dimensions, CellDimensions,
+    get_capabilities, is_image_line, set_cell_dimensions, CellDimensions, TerminalImageState,
 };
 use crate::render::overlay::{
     composite_overlays, resolve_overlay_layout, OverlayOptions, RenderedOverlay,
@@ -58,6 +58,7 @@ impl CrashCleanup {
 pub struct TuiRuntime<T: Terminal> {
     terminal: T,
     output: OutputGate,
+    terminal_image_state: Arc<TerminalImageState>,
     root: Rc<RefCell<Box<dyn Component>>>,
     renderer: DiffRenderer,
     focus: FocusState,
@@ -155,6 +156,7 @@ impl<T: Terminal> TuiRuntime<T> {
         Self {
             terminal,
             output: OutputGate::new(),
+            terminal_image_state: Arc::new(TerminalImageState::default()),
             root,
             renderer: DiffRenderer::new(),
             focus: FocusState::new(),
@@ -185,6 +187,10 @@ impl<T: Terminal> TuiRuntime<T> {
         RenderHandle {
             requested: Arc::clone(&self.render_requested),
         }
+    }
+
+    pub fn terminal_image_state(&self) -> Arc<TerminalImageState> {
+        Arc::clone(&self.terminal_image_state)
     }
 
     pub fn set_focus(&mut self, target: Rc<RefCell<Box<dyn Component>>>) {
@@ -513,7 +519,10 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     fn query_cell_size(&mut self) {
-        if get_capabilities().images.is_none() {
+        if get_capabilities(self.terminal_image_state.as_ref())
+            .images
+            .is_none()
+        {
             return;
         }
         self.cell_size_query_pending = true;
@@ -526,10 +535,13 @@ impl<T: Terminal> TuiRuntime<T> {
         if let Some((start, end, height_px, width_px)) = find_cell_size_response(&self.input_buffer)
         {
             if height_px > 0 && width_px > 0 {
-                set_cell_dimensions(CellDimensions {
-                    width_px,
-                    height_px,
-                });
+                set_cell_dimensions(
+                    self.terminal_image_state.as_ref(),
+                    CellDimensions {
+                        width_px,
+                        height_px,
+                    },
+                );
                 {
                     let mut root = self.root.borrow_mut();
                     root.invalidate();
@@ -769,7 +781,7 @@ mod tests {
     use super::{find_cell_size_response, CrashCleanup, OverlayOptions, TuiRuntime};
     use crate::core::component::Component;
     use crate::core::terminal::Terminal;
-    use crate::core::terminal_image::{get_cell_dimensions, reset_capabilities_cache};
+    use crate::core::terminal_image::get_cell_dimensions;
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::Ordering;
@@ -957,7 +969,6 @@ mod tests {
     #[test]
     fn cell_size_query_triggers_invalidate_and_render() {
         let _guard = env_test_lock().lock().expect("test lock poisoned");
-        reset_capabilities_cache();
         std::env::set_var("TERM_PROGRAM", "kitty");
 
         let terminal = TestTerminal::default();
@@ -978,18 +989,16 @@ mod tests {
         assert_eq!(state.borrow().invalidates, 1);
         assert_eq!(state.borrow().renders, 2);
 
-        let dims = get_cell_dimensions();
+        let dims = get_cell_dimensions(runtime.terminal_image_state.as_ref());
         assert_eq!(dims.width_px, 10);
         assert_eq!(dims.height_px, 20);
 
         std::env::remove_var("TERM_PROGRAM");
-        reset_capabilities_cache();
     }
 
     #[test]
     fn output_order_is_protocol_then_frame_then_cursor() {
         let _guard = env_test_lock().lock().expect("test lock poisoned");
-        reset_capabilities_cache();
         std::env::remove_var("TERM_PROGRAM");
         std::env::remove_var("KITTY_WINDOW_ID");
 
@@ -1017,8 +1026,35 @@ mod tests {
         let output = runtime.terminal.output.as_str();
         let expected = "\x1b[>7u\x1b[?2026hhello\x1b[0m\x1b]8;;\x07\x1b[?2026l\x1b[6G\x1b[?25l";
         assert_eq!(output, expected);
+    }
 
-        reset_capabilities_cache();
+    #[test]
+    fn cell_dimensions_are_runtime_scoped() {
+        let terminal_a = TestTerminal::default();
+        let terminal_b = TestTerminal::default();
+
+        let root_a: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+        let root_b: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+
+        let mut runtime_a = TuiRuntime::new(terminal_a, root_a);
+        let mut runtime_b = TuiRuntime::new(terminal_b, root_b);
+
+        runtime_a.cell_size_query_pending = true;
+        runtime_b.cell_size_query_pending = true;
+
+        runtime_a.handle_input("\x1b[6;20;10t");
+        let dims_a = get_cell_dimensions(runtime_a.terminal_image_state.as_ref());
+        assert_eq!(dims_a.width_px, 10);
+        assert_eq!(dims_a.height_px, 20);
+
+        runtime_b.handle_input("\x1b[6;40;30t");
+        let dims_a_again = get_cell_dimensions(runtime_a.terminal_image_state.as_ref());
+        let dims_b = get_cell_dimensions(runtime_b.terminal_image_state.as_ref());
+        assert_eq!(dims_a_again, dims_a);
+        assert_eq!(dims_b.width_px, 30);
+        assert_eq!(dims_b.height_px, 40);
     }
 
     #[test]

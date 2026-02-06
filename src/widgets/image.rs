@@ -1,9 +1,11 @@
 //! Image widget (Phase 24).
 
+use std::sync::Arc;
+
 use crate::core::component::Component;
 use crate::core::terminal_image::{
     get_capabilities, get_image_dimensions, image_fallback, render_image, ImageDimensions,
-    ImageRenderOptions,
+    ImageRenderOptions, TerminalImageState,
 };
 
 pub struct ImageTheme {
@@ -16,6 +18,7 @@ pub struct ImageOptions {
     pub max_height_cells: Option<u32>,
     pub filename: Option<String>,
     pub image_id: Option<u32>,
+    pub terminal_image_state: Option<Arc<TerminalImageState>>,
 }
 
 pub struct Image {
@@ -24,6 +27,7 @@ pub struct Image {
     dimensions: ImageDimensions,
     theme: ImageTheme,
     options: ImageOptions,
+    terminal_image_state: Arc<TerminalImageState>,
     image_id: Option<u32>,
     cached_lines: Option<Vec<String>>,
     cached_width: Option<usize>,
@@ -45,6 +49,11 @@ impl Image {
                 width_px: 800,
                 height_px: 600,
             });
+        let terminal_image_state = options
+            .terminal_image_state
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::new(TerminalImageState::default()));
         let image_id = options.image_id;
         Self {
             base64_data,
@@ -52,6 +61,7 @@ impl Image {
             dimensions,
             theme,
             options,
+            terminal_image_state,
             image_id,
             cached_lines: None,
             cached_width: None,
@@ -78,11 +88,12 @@ impl Component for Image {
             .unwrap_or(60)
             .min(max_width_limit);
 
-        let caps = get_capabilities();
+        let caps = get_capabilities(self.terminal_image_state.as_ref());
         let mut lines = Vec::new();
 
         if caps.images.is_some() {
             let result = render_image(
+                self.terminal_image_state.as_ref(),
                 &self.base64_data,
                 self.dimensions,
                 &ImageRenderOptions {
@@ -142,8 +153,11 @@ impl Component for Image {
 mod tests {
     use super::{Image, ImageOptions, ImageTheme};
     use crate::core::component::Component;
-    use crate::core::terminal_image::{reset_capabilities_cache, ImageDimensions};
+    use crate::core::terminal_image::{
+        reset_capabilities_cache, ImageDimensions, TerminalImageState,
+    };
     use std::env;
+    use std::sync::Arc;
     use std::sync::{Mutex, OnceLock};
 
     struct EnvGuard {
@@ -191,13 +205,15 @@ mod tests {
         let _wezterm = set_env_guard("WEZTERM_PANE", None);
         let _iterm = set_env_guard("ITERM_SESSION_ID", None);
         let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
-        reset_capabilities_cache();
+        let terminal_image_state = Arc::new(TerminalImageState::default());
+        reset_capabilities_cache(terminal_image_state.as_ref());
 
         let options = ImageOptions {
             max_width_cells: Some(10),
             max_height_cells: None,
             filename: None,
             image_id: Some(5),
+            terminal_image_state: Some(Arc::clone(&terminal_image_state)),
         };
         let dims = ImageDimensions {
             width_px: 100,
@@ -211,7 +227,7 @@ mod tests {
         assert!(lines.last().unwrap().contains("\x1b_G"));
         assert!(lines.last().unwrap().starts_with("\x1b[2A"));
 
-        reset_capabilities_cache();
+        reset_capabilities_cache(terminal_image_state.as_ref());
     }
 
     #[test]
@@ -223,13 +239,15 @@ mod tests {
         let _wezterm = set_env_guard("WEZTERM_PANE", None);
         let _iterm = set_env_guard("ITERM_SESSION_ID", None);
         let _ghostty = set_env_guard("GHOSTTY_RESOURCES_DIR", None);
-        reset_capabilities_cache();
+        let terminal_image_state = Arc::new(TerminalImageState::default());
+        reset_capabilities_cache(terminal_image_state.as_ref());
 
         let options = ImageOptions {
             max_width_cells: None,
             max_height_cells: None,
             filename: Some("file.png".to_string()),
             image_id: None,
+            terminal_image_state: Some(Arc::clone(&terminal_image_state)),
         };
         let dims = ImageDimensions {
             width_px: 200,
@@ -241,6 +259,6 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "<[Image: file.png [image/png] 200x100]>");
 
-        reset_capabilities_cache();
+        reset_capabilities_cache(terminal_image_state.as_ref());
     }
 }
