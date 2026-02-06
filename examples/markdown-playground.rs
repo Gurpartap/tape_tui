@@ -480,7 +480,7 @@ fn install_playground_keybindings(handle: &EditorKeybindingsHandle) {
     kb.set_config(config);
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let keybindings = default_editor_keybindings_handle();
     install_playground_keybindings(&keybindings);
 
@@ -527,7 +527,7 @@ fn main() {
 
     let mut palette_handle: Option<OverlayHandle> = None;
 
-    tui.start();
+    tui.start()?;
 
     loop {
         tui.run_once();
@@ -585,6 +585,9 @@ fn main() {
 
         thread::sleep(Duration::from_millis(16));
     }
+
+    tui.stop()?;
+    Ok(())
 }
 
 #[derive(Default)]

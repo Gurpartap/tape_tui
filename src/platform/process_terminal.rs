@@ -157,21 +157,22 @@ fn poll_readable(fd: c_int, timeout_ms: i32) -> bool {
 }
 
 #[cfg(unix)]
-fn get_termios(fd: c_int) -> libc::termios {
+fn get_termios(fd: c_int) -> std::io::Result<libc::termios> {
     let mut termios = unsafe { std::mem::zeroed::<libc::termios>() };
     let result = unsafe { libc::tcgetattr(fd, &mut termios) };
     if result != 0 {
-        panic!("failed to read terminal attributes");
+        return Err(std::io::Error::last_os_error());
     }
-    termios
+    Ok(termios)
 }
 
 #[cfg(unix)]
-fn set_termios(fd: c_int, termios: &libc::termios) {
+fn set_termios(fd: c_int, termios: &libc::termios) -> std::io::Result<()> {
     let result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios) };
     if result != 0 {
-        panic!("failed to set terminal attributes");
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -241,9 +242,9 @@ impl ProcessTerminal {
         }
     }
 
-    fn enable_raw_mode(&mut self) {
+    fn enable_raw_mode(&mut self) -> std::io::Result<()> {
         if self.original_termios.is_none() {
-            self.original_termios = Some(get_termios(self.stdin_fd));
+            self.original_termios = Some(get_termios(self.stdin_fd)?);
         }
         let mut raw = self
             .original_termios
@@ -253,13 +254,14 @@ impl ProcessTerminal {
         unsafe {
             libc::cfmakeraw(&mut raw);
         }
-        set_termios(self.stdin_fd, &raw);
+        set_termios(self.stdin_fd, &raw)
     }
 
-    fn restore_raw_mode(&mut self) {
+    fn restore_raw_mode(&mut self) -> std::io::Result<()> {
         if let Some(original) = self.original_termios.as_ref() {
-            set_termios(self.stdin_fd, original);
+            set_termios(self.stdin_fd, original)?;
         }
+        Ok(())
     }
 
     fn start_input_thread(&mut self) {
@@ -376,7 +378,7 @@ impl Terminal for ProcessTerminal {
         &mut self,
         on_input: Box<dyn FnMut(String) + Send>,
         on_resize: Box<dyn FnMut() + Send>,
-    ) {
+    ) -> std::io::Result<()> {
         {
             let mut state = self
                 .input_state
@@ -396,7 +398,23 @@ impl Terminal for ProcessTerminal {
         self.drain_mode.store(false, Ordering::SeqCst);
         self.last_input_time.store(now_ms(), Ordering::SeqCst);
 
-        self.enable_raw_mode();
+        if let Err(err) = self.enable_raw_mode() {
+            {
+                let mut state = self
+                    .input_state
+                    .lock()
+                    .expect("input handler lock poisoned");
+                state.handler = None;
+            }
+            {
+                let mut handler = self
+                    .resize_handler
+                    .lock()
+                    .expect("resize handler lock poisoned");
+                *handler = None;
+            }
+            return Err(err);
+        }
 
         self.start_resize_thread();
         unsafe {
@@ -404,9 +422,11 @@ impl Terminal for ProcessTerminal {
         }
 
         self.start_input_thread();
+
+        Ok(())
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> std::io::Result<()> {
         self.stop_input_thread();
         self.stop_resize_thread();
 
@@ -438,7 +458,7 @@ impl Terminal for ProcessTerminal {
             hooks.after_flush();
         }
 
-        self.restore_raw_mode();
+        self.restore_raw_mode()
     }
 
     fn drain_input(&mut self, max_ms: u64, idle_ms: u64) {
@@ -600,11 +620,11 @@ impl Terminal for ProcessTerminal {
         &mut self,
         _on_input: Box<dyn FnMut(String) + Send>,
         _on_resize: Box<dyn FnMut() + Send>,
-    ) {
+    ) -> std::io::Result<()> {
         panic!("ProcessTerminal is only supported on Unix platforms");
     }
 
-    fn stop(&mut self) {
+    fn stop(&mut self) -> std::io::Result<()> {
         panic!("ProcessTerminal is only supported on Unix platforms");
     }
 
@@ -720,7 +740,9 @@ mod tests {
         terminal.stdin_fd = pty.slave;
         terminal.stdout_fd = pty.slave;
 
-        terminal.start(Box::new(|_| {}), Box::new(|| {}));
+        terminal
+            .start(Box::new(|_| {}), Box::new(|| {}))
+            .expect("terminal start");
         let output = read_available(pty.master, Duration::from_millis(200));
         assert!(
             output.is_empty(),
@@ -728,7 +750,7 @@ mod tests {
             String::from_utf8_lossy(&output)
         );
 
-        terminal.stop();
+        terminal.stop().expect("terminal stop");
         let output = read_available(pty.master, Duration::from_millis(200));
         assert!(
             output.is_empty(),
@@ -745,7 +767,9 @@ mod tests {
         terminal.stdin_fd = pty.slave;
         terminal.stdout_fd = pty.slave;
 
-        terminal.start(Box::new(|_| {}), Box::new(|| {}));
+        terminal
+            .start(Box::new(|_| {}), Box::new(|| {}))
+            .expect("terminal start");
 
         let start = Instant::now();
         terminal.drain_input(200, 50);
@@ -755,13 +779,13 @@ mod tests {
             "drain_input exceeded max window: {elapsed:?}"
         );
 
-        terminal.stop();
+        terminal.stop().expect("terminal stop");
     }
 
     #[test]
     fn tcflush_runs_before_raw_mode_restore() {
         let pty = open_pty();
-        let original = get_termios(pty.slave);
+        let original = get_termios(pty.slave).expect("get termios");
 
         let (before_ready_tx, before_ready_rx) = mpsc::channel();
         let (before_go_tx, before_go_rx) = mpsc::channel();
@@ -778,7 +802,9 @@ mod tests {
             after_flush_go: after_go_rx,
         });
 
-        terminal.start(Box::new(|_| {}), Box::new(|| {}));
+        terminal
+            .start(Box::new(|_| {}), Box::new(|| {}))
+            .expect("terminal start");
 
         struct StopRelease {
             before_go: Option<mpsc::Sender<()>>,
@@ -802,7 +828,7 @@ mod tests {
         };
 
         let stop_thread = std::thread::spawn(move || {
-            terminal.stop();
+            terminal.stop().expect("terminal stop");
         });
 
         before_ready_rx
@@ -822,7 +848,7 @@ mod tests {
             .recv_timeout(Duration::from_millis(200))
             .expect("stop did not reach after_flush hook");
 
-        let raw = get_termios(pty.slave);
+        let raw = get_termios(pty.slave).expect("get termios");
         assert_eq!(raw.c_lflag & libc::ICANON, 0, "raw mode restored too early");
 
         match read_nonblocking(pty.slave) {
@@ -840,7 +866,7 @@ mod tests {
 
         stop_thread.join().expect("stop thread panicked");
 
-        let restored = get_termios(pty.slave);
+        let restored = get_termios(pty.slave).expect("get termios");
         assert_eq!(
             restored.c_lflag & libc::ICANON,
             original.c_lflag & libc::ICANON,
@@ -857,12 +883,14 @@ mod tests {
         terminal.stdin_fd = pty.slave;
         terminal.stdout_fd = pty.slave;
 
-        terminal.start(
-            Box::new(move |data| {
-                let _ = tx.send(data);
-            }),
-            Box::new(|| {}),
-        );
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
 
         let payload = b"\x1b[200~hello\x1b[201~";
         let _ = unsafe {
@@ -878,7 +906,22 @@ mod tests {
             .expect("missing paste event");
         assert_eq!(received, "\x1b[200~hello\x1b[201~");
 
-        terminal.stop();
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    fn start_returns_err_on_tcgetattr_failure() {
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = -1;
+        terminal.stdout_fd = -1;
+
+        let result = terminal.start(Box::new(|_| {}), Box::new(|| {}));
+        let err = result.expect_err("expected start to fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EBADF),
+            "expected EBADF, got: {err:?}"
+        );
     }
 
     #[test]

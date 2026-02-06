@@ -249,7 +249,7 @@ fn pick_response() -> String {
     RESPONSES[nanos % RESPONSES.len()].to_string()
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let terminal = ProcessTerminal::new();
     let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
     let mut tui = TUI::new(terminal, Rc::clone(&root));
@@ -356,7 +356,7 @@ fn main() {
         ))));
     tui.set_focus(Rc::clone(&editor_wrapper));
 
-    tui.start();
+    tui.start()?;
 
     loop {
         tui.run_once();
@@ -393,5 +393,6 @@ fn main() {
         thread::sleep(Duration::from_millis(16));
     }
 
-    tui.stop();
+    tui.stop()?;
+    Ok(())
 }

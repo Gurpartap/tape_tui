@@ -7,10 +7,10 @@ pub trait Terminal {
         &mut self,
         on_input: Box<dyn FnMut(String) + Send>,
         on_resize: Box<dyn FnMut() + Send>,
-    );
+    ) -> std::io::Result<()>;
 
     /// Stop the terminal and restore state.
-    fn stop(&mut self);
+    fn stop(&mut self) -> std::io::Result<()>;
 
     /// Drain stdin before exiting to prevent key release leakage over slow connections.
     fn drain_input(&mut self, max_ms: u64, idle_ms: u64);
@@ -65,7 +65,7 @@ impl<T: Terminal> Drop for TerminalGuard<T> {
     fn drop(&mut self) {
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.drain_input(self.max_drain_ms, self.idle_drain_ms);
-            terminal.stop();
+            let _ = terminal.stop();
         }
     }
 }

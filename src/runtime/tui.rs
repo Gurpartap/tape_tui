@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::env;
+use std::io;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -209,8 +210,7 @@ impl<T: Terminal> TuiRuntime<T> {
             .any(|entry| self.is_overlay_visible(entry))
     }
 
-    pub fn start(&mut self) {
-        self.stopped = false;
+    pub fn start(&mut self) -> io::Result<()> {
         self.output.clear();
         self.kitty_keyboard_enabled = false;
         self.kitty_enable_pending = false;
@@ -225,7 +225,8 @@ impl<T: Terminal> TuiRuntime<T> {
             Box::new(move || {
                 resize_flag.store(true, Ordering::SeqCst);
             }),
-        );
+        )?;
+        self.stopped = false;
 
         self.output.push(TerminalCmd::BracketedPasteEnable);
         self.output.push(TerminalCmd::KittyQuery);
@@ -233,11 +234,13 @@ impl<T: Terminal> TuiRuntime<T> {
         self.query_cell_size();
         self.flush_output();
         self.request_render();
+
+        Ok(())
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) -> io::Result<()> {
         if self.stopped {
-            return;
+            return Ok(());
         }
         self.place_cursor_at_end();
         self.output.push(TerminalCmd::ShowCursor);
@@ -250,8 +253,9 @@ impl<T: Terminal> TuiRuntime<T> {
         self.kitty_enable_pending = false;
         self.terminal
             .drain_input(STOP_DRAIN_MAX_MS, STOP_DRAIN_IDLE_MS);
-        self.terminal.stop();
+        let result = self.terminal.stop();
         self.stopped = true;
+        result
     }
 
     pub fn run_once(&mut self) {
@@ -620,7 +624,7 @@ impl<T: Terminal> Drop for TuiRuntime<T> {
 
         // Best-effort cleanup: never panic in Drop (especially during unwind).
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.stop();
+            let _ = self.stop();
         }));
     }
 }
@@ -724,9 +728,12 @@ mod tests {
             &mut self,
             _on_input: Box<dyn FnMut(String) + Send>,
             _on_resize: Box<dyn FnMut() + Send>,
-        ) {
+        ) -> std::io::Result<()> {
+            Ok(())
         }
-        fn stop(&mut self) {}
+        fn stop(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
         fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
         fn write(&mut self, data: &str) {
             self.output.push_str(data);
@@ -880,7 +887,7 @@ mod tests {
         let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
         let mut runtime = TuiRuntime::new(terminal, root);
 
-        runtime.start();
+        runtime.start().expect("runtime start");
         assert!(runtime.terminal.output.contains("\x1b[16t"));
         runtime.render_if_needed();
         assert_eq!(state.borrow().renders, 1);
@@ -920,7 +927,7 @@ mod tests {
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.show_hardware_cursor = false;
 
-        runtime.start();
+        runtime.start().expect("runtime start");
         runtime.terminal.output.clear();
 
         runtime.handle_input("\x1b[?1u");
@@ -945,7 +952,7 @@ mod tests {
         let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
         let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
 
-        runtime.start();
+        runtime.start().expect("runtime start");
         runtime.set_focus(Rc::clone(&root));
         assert!(*root_focus.borrow());
 
@@ -977,7 +984,7 @@ mod tests {
         );
         let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
         let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
-        runtime.start();
+        runtime.start().expect("runtime start");
         runtime.set_focus(Rc::clone(&root));
 
         let overlay_focus = Rc::new(RefCell::new(false));
@@ -1011,7 +1018,7 @@ mod tests {
         let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
         let mut runtime = TuiRuntime::new(terminal, root);
 
-        runtime.start();
+        runtime.start().expect("runtime start");
         runtime.render_if_needed();
         let baseline = state.borrow().renders;
 
@@ -1060,12 +1067,14 @@ mod tests {
             &mut self,
             _on_input: Box<dyn FnMut(String) + Send>,
             _on_resize: Box<dyn FnMut() + Send>,
-        ) {
+        ) -> std::io::Result<()> {
+            Ok(())
         }
 
-        fn stop(&mut self) {
+        fn stop(&mut self) -> std::io::Result<()> {
             let mut state = self.state.lock().expect("tracking state lock poisoned");
             state.stop_calls += 1;
+            Ok(())
         }
 
         fn drain_input(&mut self, max_ms: u64, idle_ms: u64) {
@@ -1097,7 +1106,7 @@ mod tests {
             Rc::new(RefCell::new(Box::new(DummyComponent::default())));
 
         let mut runtime = TuiRuntime::new(terminal, root);
-        runtime.start();
+        runtime.start().expect("runtime start");
         drop(runtime);
 
         TrackingTerminal::with_state(&state, |state| {
@@ -1121,8 +1130,8 @@ mod tests {
             Rc::new(RefCell::new(Box::new(DummyComponent::default())));
 
         let mut runtime = TuiRuntime::new(terminal, root);
-        runtime.start();
-        runtime.stop();
+        runtime.start().expect("runtime start");
+        runtime.stop().expect("runtime stop");
         drop(runtime);
 
         TrackingTerminal::with_state(&state, |state| {

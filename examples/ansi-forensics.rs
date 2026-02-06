@@ -550,12 +550,12 @@ impl<T: Terminal> Terminal for ForensicsTerminal<T> {
         &mut self,
         on_input: Box<dyn FnMut(String) + Send>,
         on_resize: Box<dyn FnMut() + Send>,
-    ) {
-        self.inner.start(on_input, on_resize);
+    ) -> std::io::Result<()> {
+        self.inner.start(on_input, on_resize)
     }
 
-    fn stop(&mut self) {
-        self.inner.stop();
+    fn stop(&mut self) -> std::io::Result<()> {
+        self.inner.stop()
     }
 
     fn drain_input(&mut self, max_ms: u64, idle_ms: u64) {
@@ -736,7 +736,7 @@ fn install_demo_keybindings(handle: &EditorKeybindingsHandle) {
     kb.set_config(config);
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let keybindings = default_editor_keybindings_handle();
     install_demo_keybindings(&keybindings);
 
@@ -787,7 +787,7 @@ fn main() {
     let start = Instant::now();
     let mut last_clock_update = Instant::now();
 
-    tui.start();
+    tui.start()?;
     render_handle.request_render();
 
     loop {
@@ -824,7 +824,8 @@ fn main() {
         std::thread::sleep(Duration::from_millis(16));
     }
 
-    tui.stop();
+    tui.stop()?;
+    Ok(())
 }
 
 #[cfg(test)]
