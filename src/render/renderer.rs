@@ -1,6 +1,7 @@
 //! Diff renderer (Phase 4).
 
 use crate::core::output::TerminalCmd;
+use crate::core::text::slice::slice_by_column;
 use crate::core::text::width::visible_width;
 use crate::logging::{
     debug_redraw_enabled, log_debug_redraw, log_tui_debug, tui_debug_enabled, RenderDebugInfo,
@@ -286,15 +287,23 @@ impl DiffRenderer {
             }
             buffer.push_str("\x1b[2K");
             let line = &lines[i];
-            if !is_image_line(line) && visible_width(line) > width {
-                panic!(
-                    "Rendered line {} exceeds terminal width ({} > {}).",
-                    i,
-                    visible_width(line),
-                    width
-                );
+            if is_image_line(line) {
+                buffer.push_str(line);
+                continue;
             }
-            buffer.push_str(line);
+
+            let line_width = visible_width(line);
+            if line_width > width {
+                if strict_width_enabled() {
+                    panic!(
+                        "Rendered line {} exceeds terminal width ({} > {}). PI_STRICT_WIDTH is set.",
+                        i, line_width, width
+                    );
+                }
+                buffer.push_str(&clamp_non_image_line_to_width(line, width));
+            } else {
+                buffer.push_str(line);
+            }
         }
 
         let mut final_cursor_row = render_end;
@@ -352,10 +361,55 @@ fn apply_line_resets(lines: &mut [String], is_image_line: fn(&str) -> bool) {
     }
 }
 
+fn strict_width_enabled() -> bool {
+    // Strict width checking is enabled when PI_STRICT_WIDTH is set to a non-empty value.
+    std::env::var_os("PI_STRICT_WIDTH").map_or(false, |val| !val.is_empty())
+}
+
+fn clamp_non_image_line_to_width(line: &str, width: usize) -> String {
+    let mut clamped = slice_by_column(line, 0, width, true);
+    clamped.push_str(SEGMENT_RESET);
+    clamped
+}
+
 #[cfg(test)]
 mod tests {
     use super::DiffRenderer;
     use crate::core::output::TerminalCmd;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct StrictWidthEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<OsString>,
+    }
+
+    impl StrictWidthEnvGuard {
+        fn set(value: &str) -> Self {
+            let lock = ENV_LOCK.lock().expect("env lock poisoned");
+            let prev = std::env::var_os("PI_STRICT_WIDTH");
+            std::env::set_var("PI_STRICT_WIDTH", value);
+            Self { _lock: lock, prev }
+        }
+
+        fn unset() -> Self {
+            let lock = ENV_LOCK.lock().expect("env lock poisoned");
+            let prev = std::env::var_os("PI_STRICT_WIDTH");
+            std::env::remove_var("PI_STRICT_WIDTH");
+            Self { _lock: lock, prev }
+        }
+    }
+
+    impl Drop for StrictWidthEnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(val) => std::env::set_var("PI_STRICT_WIDTH", val),
+                None => std::env::remove_var("PI_STRICT_WIDTH"),
+            }
+        }
+    }
 
     fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
         let mut out = String::new();
@@ -429,7 +483,26 @@ mod tests {
     }
 
     #[test]
-    fn overflow_panics_only_on_diff_path() {
+    fn overflow_clamps_on_diff_path_by_default() {
+        let _guard = StrictWidthEnvGuard::unset();
+        let mut renderer = DiffRenderer::new();
+        renderer.render(vec!["123456".to_string()], 5, 5, not_image, false, false);
+
+        let output = cmds_to_bytes(renderer.render(
+            vec!["abcdef".to_string()],
+            5,
+            5,
+            not_image,
+            false,
+            false,
+        ));
+        assert!(output.contains("abcde\x1b[0m\x1b]8;;\x07"));
+        assert!(!output.contains("abcdef"));
+    }
+
+    #[test]
+    fn overflow_panics_on_diff_path_in_strict_mode() {
+        let _guard = StrictWidthEnvGuard::set("1");
         let mut renderer = DiffRenderer::new();
         renderer.render(vec!["123456".to_string()], 5, 5, not_image, false, false);
 
