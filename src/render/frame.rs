@@ -4,6 +4,8 @@
 //! rendering behavior. The rest of the pipeline continues to operate on `Vec<String>`
 //! until later phases migrate call sites.
 
+use crate::core::cursor::CursorPos;
+
 /// A contiguous run of rendered text.
 ///
 /// Styling (colors, attributes) will be added in later phases. For now, a span is
@@ -85,15 +87,30 @@ impl From<String> for Line {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
     lines: Vec<Line>,
+    cursor: Option<CursorPos>,
 }
 
 impl Frame {
     pub fn new(lines: Vec<Line>) -> Self {
-        Self { lines }
+        Self {
+            lines,
+            cursor: None,
+        }
+    }
+
+    pub fn from_rendered_lines(mut lines: Vec<String>, height: usize) -> Self {
+        let cursor = crate::core::cursor::extract_cursor_marker(&mut lines, height);
+        let mut frame: Frame = lines.into();
+        frame.cursor = cursor;
+        frame
     }
 
     pub fn lines(&self) -> &[Line] {
         &self.lines
+    }
+
+    pub fn cursor(&self) -> Option<CursorPos> {
+        self.cursor
     }
 
     pub fn into_lines(self) -> Vec<Line> {

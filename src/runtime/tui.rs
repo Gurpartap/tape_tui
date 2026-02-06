@@ -21,7 +21,7 @@ use crate::render::overlay::{
 use crate::render::renderer::DiffRenderer;
 use crate::render::Frame;
 use crate::runtime::focus::FocusState;
-use crate::runtime::ime::{extract_cursor_position, position_hardware_cursor};
+use crate::runtime::ime::position_hardware_cursor;
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
@@ -628,10 +628,10 @@ impl<T: Terminal> TuiRuntime<T> {
             lines = self.composite_overlay_lines(lines, width, height);
         }
 
-        let total_lines = lines.len();
-        let cursor_pos = extract_cursor_position(&mut lines, height);
         let has_overlays = self.has_overlay();
-        let frame: Frame = lines.into();
+        let frame = Frame::from_rendered_lines(lines, height);
+        let cursor_pos = frame.cursor();
+        let total_lines = frame.lines().len();
         let render_cmds =
             self.renderer
                 .render(frame, width, height, self.clear_on_shrink, has_overlays);
@@ -1156,7 +1156,7 @@ mod tests {
 
         impl Component for CursorMarkerComponent {
             fn render(&mut self, _width: usize) -> Vec<String> {
-                vec![format!("hello{}", crate::runtime::ime::CURSOR_MARKER)]
+                vec![format!("hello{}", crate::core::cursor::CURSOR_MARKER)]
             }
         }
 

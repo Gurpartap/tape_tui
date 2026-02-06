@@ -6,9 +6,8 @@ use pi_tui::render::overlay::{
     composite_overlays, resolve_overlay_layout, OverlayAnchor, OverlayOptions, RenderedOverlay,
     SizeValue,
 };
-use pi_tui::runtime::ime::{
-    extract_cursor_position, position_hardware_cursor, CursorPos, CURSOR_MARKER,
-};
+use pi_tui::runtime::ime::position_hardware_cursor;
+use pi_tui::{core::cursor::CursorPos, render::Frame, CURSOR_MARKER};
 
 fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
     let mut out = String::new();
@@ -47,12 +46,15 @@ fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
 #[test]
 fn cursor_marker_and_hardware_cursor_match_fixture() {
     let expected = fixture::read_unescaped("cursor_output.txt");
-    let mut lines = vec!["hello".to_string(), format!("wor{CURSOR_MARKER}ld")];
-    let pos = extract_cursor_position(&mut lines, 2);
+    let lines = vec!["hello".to_string(), format!("wor{CURSOR_MARKER}ld")];
+    let frame = Frame::from_rendered_lines(lines, 2);
+    let pos = frame.cursor();
+    let total_lines = frame.lines().len();
     assert_eq!(pos, Some(CursorPos { row: 1, col: 3 }));
-    assert_eq!(lines[1], "world");
+    let rendered = frame.into_strings();
+    assert_eq!(rendered[1], "world");
 
-    let (new_row, cmds) = position_hardware_cursor(pos, lines.len(), 0, true);
+    let (new_row, cmds) = position_hardware_cursor(pos, total_lines, 0, true);
     assert_eq!(new_row, 1);
     let output = cmds_to_bytes(cmds);
     assert_eq!(output, expected);

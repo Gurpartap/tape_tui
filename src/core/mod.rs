@@ -2,6 +2,7 @@
 
 pub mod autocomplete;
 pub mod component;
+pub mod cursor;
 pub mod editor_component;
 pub mod fuzzy;
 pub mod input;
