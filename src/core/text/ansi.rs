@@ -141,7 +141,8 @@ impl AnsiCodeTracker {
             let code = parts[idx].parse::<u16>().unwrap_or(0);
             if code == 38 || code == 48 {
                 if idx + 2 < parts.len() && parts[idx + 1] == "5" {
-                    let color_code = format!("{};{};{}", parts[idx], parts[idx + 1], parts[idx + 2]);
+                    let color_code =
+                        format!("{};{};{}", parts[idx], parts[idx + 1], parts[idx + 2]);
                     if code == 38 {
                         self.fg_color = Some(color_code);
                     } else {
@@ -264,4 +265,3 @@ impl AnsiCodeTracker {
         self.bg_color = None;
     }
 }
-

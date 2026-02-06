@@ -81,4 +81,3 @@ mod tests {
         assert_eq!(visible_width("😀"), 2);
     }
 }
-

@@ -177,7 +177,11 @@ impl Markdown {
         }
     }
 
-    fn render_inline_nodes(&mut self, nodes: &[mdast::Node], context: &InlineStyleContext) -> String {
+    fn render_inline_nodes(
+        &mut self,
+        nodes: &[mdast::Node],
+        context: &InlineStyleContext,
+    ) -> String {
         let style_prefix = context.style_prefix.as_str();
         let kind = context.kind;
 
@@ -234,7 +238,11 @@ impl Markdown {
                     result.push_str(&self.apply_inline_style_with_newlines(&html.value, kind));
                 }
                 mdast::Node::Image(image) => {
-                    let alt = if image.alt.is_empty() { image.url.as_str() } else { image.alt.as_str() };
+                    let alt = if image.alt.is_empty() {
+                        image.url.as_str()
+                    } else {
+                        image.alt.as_str()
+                    };
                     result.push_str(&self.apply_inline_style_with_newlines(alt, kind));
                 }
                 mdast::Node::InlineMath(math) => {
@@ -275,7 +283,11 @@ impl Markdown {
             if is_nested_list_line(first_line) {
                 lines.push(first_line.clone());
             } else {
-                lines.push(format!("{indent}{}{}", (self.theme.list_bullet)(&bullet), first_line));
+                lines.push(format!(
+                    "{indent}{}{}",
+                    (self.theme.list_bullet)(&bullet),
+                    first_line
+                ));
             }
 
             for line in item_lines.iter().skip(1) {
@@ -304,7 +316,8 @@ impl Markdown {
                     lines.extend(text.split('\n').map(|line| line.to_string()));
                 }
                 mdast::Node::Text(text) => {
-                    let text = self.render_inline_nodes(&[mdast::Node::Text(text.clone())], &context);
+                    let text =
+                        self.render_inline_nodes(&[mdast::Node::Text(text.clone())], &context);
                     lines.extend(text.split('\n').map(|line| line.to_string()));
                 }
                 mdast::Node::Code(code) => {
@@ -352,7 +365,8 @@ impl Markdown {
     }
 
     fn render_blockquote(&mut self, blockquote: &mdast::Blockquote, width: usize) -> Vec<String> {
-        let style_prefix = self.get_style_prefix(|text| (self.theme.quote)(&(self.theme.italic)(text)));
+        let style_prefix =
+            self.get_style_prefix(|text| (self.theme.quote)(&(self.theme.italic)(text)));
         let context = InlineStyleContext {
             kind: InlineStyleKind::Quote,
             style_prefix,
@@ -365,7 +379,11 @@ impl Markdown {
         for line in quote_text.split('\n') {
             let wrapped = wrap_text_with_ansi(line, quote_content_width);
             for wrapped_line in wrapped {
-                lines.push(format!("{}{}", (self.theme.quote_border)("│ "), wrapped_line));
+                lines.push(format!(
+                    "{}{}",
+                    (self.theme.quote_border)("│ "),
+                    wrapped_line
+                ));
             }
         }
 
@@ -388,7 +406,12 @@ impl Markdown {
         wrap_text_with_ansi(text, max_width.max(1))
     }
 
-    fn render_table(&mut self, table: &mdast::Table, width: usize, raw: Option<&str>) -> Vec<String> {
+    fn render_table(
+        &mut self,
+        table: &mdast::Table,
+        width: usize,
+        raw: Option<&str>,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         let header_row = match table.children.first() {
             Some(mdast::Node::TableRow(row)) => row,
@@ -427,7 +450,9 @@ impl Markdown {
         for (col_idx, cell) in header_row.children.iter().enumerate() {
             let cell_text = render_cell_text(self, cell);
             natural_widths[col_idx] = visible_width(&cell_text);
-            min_word_widths[col_idx] = self.get_longest_word_width(&cell_text, Some(max_unbroken_word_width)).max(1);
+            min_word_widths[col_idx] = self
+                .get_longest_word_width(&cell_text, Some(max_unbroken_word_width))
+                .max(1);
         }
 
         for row in rows.iter().skip(1) {
@@ -537,7 +562,11 @@ impl Markdown {
             let cell_text = render_cell_text(self, cell);
             header_lines.push(self.wrap_cell_text(&cell_text, column_widths[idx]));
         }
-        let header_line_count = header_lines.iter().map(|lines| lines.len()).max().unwrap_or(0);
+        let header_line_count = header_lines
+            .iter()
+            .map(|lines| lines.len())
+            .max()
+            .unwrap_or(0);
 
         for line_idx in 0..header_line_count {
             let mut row_parts = Vec::with_capacity(num_cols);
@@ -585,7 +614,8 @@ impl Markdown {
             }
         }
 
-        let bottom_border_cells: Vec<String> = column_widths.iter().map(|w| "─".repeat(*w)).collect();
+        let bottom_border_cells: Vec<String> =
+            column_widths.iter().map(|w| "─".repeat(*w)).collect();
         lines.push(format!("└─{}─┘", bottom_border_cells.join("─┴─")));
         lines.push(String::new());
         lines
@@ -605,11 +635,15 @@ impl Markdown {
                 let context = self.default_inline_context();
                 let heading_text = self.render_inline_nodes(&heading.children, &context);
                 let styled = match heading.depth {
-                    1 => (self.theme.heading)(&(self.theme.bold)(&(self.theme.underline)(&heading_text))),
+                    1 => (self.theme.heading)(&(self.theme.bold)(&(self.theme.underline)(
+                        &heading_text,
+                    ))),
                     2 => (self.theme.heading)(&(self.theme.bold)(&heading_text)),
                     _ => {
                         let prefix = "#".repeat(heading.depth as usize);
-                        (self.theme.heading)(&(self.theme.bold)(&format!("{prefix} {heading_text}")))
+                        (self.theme.heading)(&(self.theme.bold)(&format!(
+                            "{prefix} {heading_text}"
+                        )))
                     }
                 };
                 let mut lines = vec![styled];
@@ -628,9 +662,16 @@ impl Markdown {
                 lines
             }
             mdast::Node::Code(code) => {
-                let indent = self.theme.code_block_indent.clone().unwrap_or_else(|| "  ".to_string());
+                let indent = self
+                    .theme
+                    .code_block_indent
+                    .clone()
+                    .unwrap_or_else(|| "  ".to_string());
                 let mut lines = Vec::new();
-                lines.push((self.theme.code_block_border)(&format!("```{}", code.lang.clone().unwrap_or_default())));
+                lines.push((self.theme.code_block_border)(&format!(
+                    "```{}",
+                    code.lang.clone().unwrap_or_default()
+                )));
                 if let Some(highlighter) = self.theme.highlight_code.as_ref() {
                     let highlighted = highlighter(&code.value, code.lang.as_deref());
                     for line in highlighted {
@@ -677,7 +718,9 @@ impl Markdown {
 impl Component for Markdown {
     fn render(&mut self, width: usize) -> Vec<String> {
         if let Some(cached) = self.cached_lines.as_ref() {
-            if self.cached_text.as_deref() == Some(self.text.as_str()) && self.cached_width == Some(width) {
+            if self.cached_text.as_deref() == Some(self.text.as_str())
+                && self.cached_width == Some(width)
+            {
                 return cached.clone();
             }
         }
@@ -713,12 +756,21 @@ impl Component for Markdown {
             let has_next = next_node.is_some();
 
             let space_after = match (node_position(node), next_node.and_then(node_position)) {
-                (Some((end, _)), Some((_, next_start))) => has_blank_line_between(&normalized_text, end, next_start),
+                (Some((end, _)), Some((_, next_start))) => {
+                    has_blank_line_between(&normalized_text, end, next_start)
+                }
                 _ => false,
             };
 
             let raw = raw_slice_between(node, &normalized_text);
-            let mut lines = self.render_node(node, content_width, next_is_list, has_next, space_after, raw.as_deref());
+            let mut lines = self.render_node(
+                node,
+                content_width,
+                next_is_list,
+                has_next,
+                space_after,
+                raw.as_deref(),
+            );
             rendered_lines.append(&mut lines);
 
             if space_after {
@@ -737,7 +789,10 @@ impl Component for Markdown {
 
         let left_margin = " ".repeat(self.padding_x);
         let right_margin = " ".repeat(self.padding_x);
-        let bg_fn = self.default_text_style.as_ref().and_then(|style| style.bg_color.as_ref());
+        let bg_fn = self
+            .default_text_style
+            .as_ref()
+            .and_then(|style| style.bg_color.as_ref());
 
         let mut content_lines = Vec::new();
         for line in wrapped_lines {
@@ -796,12 +851,16 @@ fn plain_text_from_nodes(nodes: &[mdast::Node]) -> String {
             mdast::Node::Text(text) => out.push_str(&text.value),
             mdast::Node::InlineCode(code) => out.push_str(&code.value),
             mdast::Node::Strong(strong) => out.push_str(&plain_text_from_nodes(&strong.children)),
-            mdast::Node::Emphasis(emphasis) => out.push_str(&plain_text_from_nodes(&emphasis.children)),
+            mdast::Node::Emphasis(emphasis) => {
+                out.push_str(&plain_text_from_nodes(&emphasis.children))
+            }
             mdast::Node::Delete(delete) => out.push_str(&plain_text_from_nodes(&delete.children)),
             mdast::Node::Link(link) => out.push_str(&plain_text_from_nodes(&link.children)),
             mdast::Node::Html(html) => out.push_str(&html.value),
             mdast::Node::Image(image) => out.push_str(&image.alt),
-            mdast::Node::Paragraph(paragraph) => out.push_str(&plain_text_from_nodes(&paragraph.children)),
+            mdast::Node::Paragraph(paragraph) => {
+                out.push_str(&plain_text_from_nodes(&paragraph.children))
+            }
             _ => {}
         }
     }

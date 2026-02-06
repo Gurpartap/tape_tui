@@ -93,56 +93,80 @@ impl EditorKeybindingsConfig {
     }
 }
 
-pub static DEFAULT_EDITOR_KEYBINDINGS: LazyLock<HashMap<EditorAction, Vec<KeyId>>> = LazyLock::new(|| {
-    use EditorAction::*;
+pub static DEFAULT_EDITOR_KEYBINDINGS: LazyLock<HashMap<EditorAction, Vec<KeyId>>> =
+    LazyLock::new(|| {
+        use EditorAction::*;
 
-    let mut map = HashMap::new();
-    map.insert(CursorUp, vec!["up".to_string()]);
-    map.insert(CursorDown, vec!["down".to_string()]);
-    map.insert(CursorLeft, vec!["left".to_string(), "ctrl+b".to_string()]);
-    map.insert(CursorRight, vec!["right".to_string(), "ctrl+f".to_string()]);
-    map.insert(
-        CursorWordLeft,
-        vec!["alt+left".to_string(), "ctrl+left".to_string(), "alt+b".to_string()],
-    );
-    map.insert(
-        CursorWordRight,
-        vec!["alt+right".to_string(), "ctrl+right".to_string(), "alt+f".to_string()],
-    );
-    map.insert(CursorLineStart, vec!["home".to_string(), "ctrl+a".to_string()]);
-    map.insert(CursorLineEnd, vec!["end".to_string(), "ctrl+e".to_string()]);
-    map.insert(JumpForward, vec!["ctrl+]".to_string()]);
-    map.insert(JumpBackward, vec!["ctrl+alt+]".to_string()]);
-    map.insert(PageUp, vec!["pageUp".to_string()]);
-    map.insert(PageDown, vec!["pageDown".to_string()]);
-    map.insert(DeleteCharBackward, vec!["backspace".to_string()]);
-    map.insert(DeleteCharForward, vec!["delete".to_string(), "ctrl+d".to_string()]);
-    map.insert(DeleteWordBackward, vec!["ctrl+w".to_string(), "alt+backspace".to_string()]);
-    map.insert(DeleteWordForward, vec!["alt+d".to_string(), "alt+delete".to_string()]);
-    map.insert(DeleteToLineStart, vec!["ctrl+u".to_string()]);
-    map.insert(DeleteToLineEnd, vec!["ctrl+k".to_string()]);
-    map.insert(NewLine, vec!["shift+enter".to_string()]);
-    map.insert(Submit, vec!["enter".to_string()]);
-    map.insert(Tab, vec!["tab".to_string()]);
-    map.insert(SelectUp, vec!["up".to_string()]);
-    map.insert(SelectDown, vec!["down".to_string()]);
-    map.insert(SelectPageUp, vec!["pageUp".to_string()]);
-    map.insert(SelectPageDown, vec!["pageDown".to_string()]);
-    map.insert(SelectConfirm, vec!["enter".to_string()]);
-    map.insert(SelectCancel, vec!["escape".to_string(), "ctrl+c".to_string()]);
-    map.insert(Copy, vec!["ctrl+c".to_string()]);
-    map.insert(Yank, vec!["ctrl+y".to_string()]);
-    map.insert(YankPop, vec!["alt+y".to_string()]);
-    map.insert(Undo, vec!["ctrl+-".to_string()]);
-    map.insert(ExpandTools, vec!["ctrl+o".to_string()]);
-    map.insert(ToggleSessionPath, vec!["ctrl+p".to_string()]);
-    map.insert(ToggleSessionSort, vec!["ctrl+s".to_string()]);
-    map.insert(RenameSession, vec!["ctrl+r".to_string()]);
-    map.insert(DeleteSession, vec!["ctrl+d".to_string()]);
-    map.insert(DeleteSessionNoninvasive, vec!["ctrl+backspace".to_string()]);
+        let mut map = HashMap::new();
+        map.insert(CursorUp, vec!["up".to_string()]);
+        map.insert(CursorDown, vec!["down".to_string()]);
+        map.insert(CursorLeft, vec!["left".to_string(), "ctrl+b".to_string()]);
+        map.insert(CursorRight, vec!["right".to_string(), "ctrl+f".to_string()]);
+        map.insert(
+            CursorWordLeft,
+            vec![
+                "alt+left".to_string(),
+                "ctrl+left".to_string(),
+                "alt+b".to_string(),
+            ],
+        );
+        map.insert(
+            CursorWordRight,
+            vec![
+                "alt+right".to_string(),
+                "ctrl+right".to_string(),
+                "alt+f".to_string(),
+            ],
+        );
+        map.insert(
+            CursorLineStart,
+            vec!["home".to_string(), "ctrl+a".to_string()],
+        );
+        map.insert(CursorLineEnd, vec!["end".to_string(), "ctrl+e".to_string()]);
+        map.insert(JumpForward, vec!["ctrl+]".to_string()]);
+        map.insert(JumpBackward, vec!["ctrl+alt+]".to_string()]);
+        map.insert(PageUp, vec!["pageUp".to_string()]);
+        map.insert(PageDown, vec!["pageDown".to_string()]);
+        map.insert(DeleteCharBackward, vec!["backspace".to_string()]);
+        map.insert(
+            DeleteCharForward,
+            vec!["delete".to_string(), "ctrl+d".to_string()],
+        );
+        map.insert(
+            DeleteWordBackward,
+            vec!["ctrl+w".to_string(), "alt+backspace".to_string()],
+        );
+        map.insert(
+            DeleteWordForward,
+            vec!["alt+d".to_string(), "alt+delete".to_string()],
+        );
+        map.insert(DeleteToLineStart, vec!["ctrl+u".to_string()]);
+        map.insert(DeleteToLineEnd, vec!["ctrl+k".to_string()]);
+        map.insert(NewLine, vec!["shift+enter".to_string()]);
+        map.insert(Submit, vec!["enter".to_string()]);
+        map.insert(Tab, vec!["tab".to_string()]);
+        map.insert(SelectUp, vec!["up".to_string()]);
+        map.insert(SelectDown, vec!["down".to_string()]);
+        map.insert(SelectPageUp, vec!["pageUp".to_string()]);
+        map.insert(SelectPageDown, vec!["pageDown".to_string()]);
+        map.insert(SelectConfirm, vec!["enter".to_string()]);
+        map.insert(
+            SelectCancel,
+            vec!["escape".to_string(), "ctrl+c".to_string()],
+        );
+        map.insert(Copy, vec!["ctrl+c".to_string()]);
+        map.insert(Yank, vec!["ctrl+y".to_string()]);
+        map.insert(YankPop, vec!["alt+y".to_string()]);
+        map.insert(Undo, vec!["ctrl+-".to_string()]);
+        map.insert(ExpandTools, vec!["ctrl+o".to_string()]);
+        map.insert(ToggleSessionPath, vec!["ctrl+p".to_string()]);
+        map.insert(ToggleSessionSort, vec!["ctrl+s".to_string()]);
+        map.insert(RenameSession, vec!["ctrl+r".to_string()]);
+        map.insert(DeleteSession, vec!["ctrl+d".to_string()]);
+        map.insert(DeleteSessionNoninvasive, vec!["ctrl+backspace".to_string()]);
 
-    map
-});
+        map
+    });
 
 #[derive(Debug)]
 pub struct EditorKeybindingsManager {
@@ -189,7 +213,10 @@ impl EditorKeybindingsManager {
     }
 
     pub fn get_keys(&self, action: EditorAction) -> Vec<KeyId> {
-        self.action_to_keys.get(&action).cloned().unwrap_or_default()
+        self.action_to_keys
+            .get(&action)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn set_config(&mut self, config: EditorKeybindingsConfig) {
@@ -269,7 +296,10 @@ mod tests {
     #[test]
     fn overrides_replace_defaults() {
         let mut config = EditorKeybindingsConfig::default();
-        config.set(EditorAction::Submit, KeyBinding::Single("ctrl+x".to_string()));
+        config.set(
+            EditorAction::Submit,
+            KeyBinding::Single("ctrl+x".to_string()),
+        );
         let manager = EditorKeybindingsManager::new(config);
         assert!(manager.matches(Some("ctrl+x"), EditorAction::Submit));
         assert!(!manager.matches(Some("enter"), EditorAction::Submit));
@@ -283,7 +313,10 @@ mod tests {
         {
             let mut guard = a.lock().expect("keybindings lock poisoned");
             let mut config = EditorKeybindingsConfig::default();
-            config.set(EditorAction::Submit, KeyBinding::Single("ctrl+x".to_string()));
+            config.set(
+                EditorAction::Submit,
+                KeyBinding::Single("ctrl+x".to_string()),
+            );
             guard.set_config(config);
         }
 

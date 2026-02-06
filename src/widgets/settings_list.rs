@@ -27,7 +27,11 @@ pub struct SettingItem {
 }
 
 impl SettingItem {
-    pub fn new(id: impl Into<String>, label: impl Into<String>, current_value: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        current_value: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             label: label.into(),
@@ -195,7 +199,11 @@ impl SettingsList {
             };
             let item = &self.items[item_index];
             let is_selected = display_index == self.selected_index;
-            let prefix = if is_selected { self.theme.cursor.as_str() } else { "  " };
+            let prefix = if is_selected {
+                self.theme.cursor.as_str()
+            } else {
+                "  "
+            };
             let prefix_width = visible_width(prefix);
 
             let label_padding = max_label_width.saturating_sub(visible_width(&item.label));
@@ -205,7 +213,8 @@ impl SettingsList {
             let separator = "  ";
             let used_width = prefix_width + max_label_width + visible_width(separator);
             let value_max_width = width.saturating_sub(used_width + 2);
-            let truncated_value = truncate_to_width(&item.current_value, value_max_width, "", false);
+            let truncated_value =
+                truncate_to_width(&item.current_value, value_max_width, "", false);
             let value_text = (self.theme.value)(&truncated_value, is_selected);
 
             let combined = format!("{prefix}{label_text}{separator}{value_text}");
@@ -527,13 +536,19 @@ mod tests {
         let mut list = SettingsList::new(items, 2, theme(), on_change, on_cancel, None);
 
         send(&mut list, "\r");
-        assert_eq!(changes.borrow().as_slice(), &[("mode".to_string(), "on".to_string())]);
+        assert_eq!(
+            changes.borrow().as_slice(),
+            &[("mode".to_string(), "on".to_string())]
+        );
 
         send(&mut list, "\x1b[B");
         send(&mut list, "\r");
         send(&mut list, "x");
 
         assert_eq!(changes.borrow().len(), 2);
-        assert_eq!(changes.borrow()[1], ("submenu".to_string(), "updated".to_string()));
+        assert_eq!(
+            changes.borrow()[1],
+            ("submenu".to_string(), "updated".to_string())
+        );
     }
 }

@@ -7,10 +7,10 @@ use pi_tui::core::component::{Component, Focusable};
 use pi_tui::core::text::slice::slice_by_column;
 use pi_tui::{
     default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
-    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions, EditorPasteMode,
-    EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme, OverlayAnchor, OverlayMargin,
-    OverlayHandle, OverlayOptions, ProcessTerminal, SelectItem, SelectList, SelectListTheme, SizeValue,
-    TUI,
+    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions,
+    EditorPasteMode, EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme, OverlayAnchor,
+    OverlayHandle, OverlayMargin, OverlayOptions, ProcessTerminal, SelectItem, SelectList,
+    SelectListTheme, SizeValue, TUI,
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
@@ -480,10 +480,12 @@ fn main() {
             ..EditorOptions::default()
         },
     )));
-    editor.borrow_mut().set_on_change(Some(Box::new(move |text| {
-        *draft_for_change.borrow_mut() = text;
-        render_for_change.request_render();
-    })));
+    editor
+        .borrow_mut()
+        .set_on_change(Some(Box::new(move |text| {
+            *draft_for_change.borrow_mut() = text;
+            render_for_change.request_render();
+        })));
     editor.borrow_mut().set_text(SAMPLE_MARKDOWN);
 
     let app = PlaygroundApp::new(Rc::clone(&editor), Rc::clone(&draft));
@@ -492,9 +494,12 @@ fn main() {
     let exit_flag = Rc::new(RefCell::new(false));
     let palette_state = Rc::new(RefCell::new(PaletteState::default()));
 
-    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
-        EditorWrapper::new(Rc::clone(&editor), Rc::clone(&palette_state), Rc::clone(&exit_flag)),
-    )));
+    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> =
+        Rc::new(RefCell::new(Box::new(EditorWrapper::new(
+            Rc::clone(&editor),
+            Rc::clone(&palette_state),
+            Rc::clone(&exit_flag),
+        ))));
     tui.set_focus(Rc::clone(&editor_wrapper));
 
     let mut palette_handle: Option<OverlayHandle> = None;
@@ -522,13 +527,12 @@ fn main() {
                 handle.hide();
                 tui.request_render();
             } else {
-                let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
-                    PaletteOverlay::new(
+                let overlay: Rc<RefCell<Box<dyn Component>>> =
+                    Rc::new(RefCell::new(Box::new(PaletteOverlay::new(
                         Rc::clone(&palette_state),
                         Rc::clone(&exit_flag),
                         keybindings.clone(),
-                    ),
-                )));
+                    ))));
                 let handle = tui.show_overlay(Rc::clone(&overlay), Some(overlay_options()));
                 palette_handle = Some(handle);
             }

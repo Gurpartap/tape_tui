@@ -8,8 +8,9 @@ use pi_tui::core::component::{Component, Focusable};
 use pi_tui::core::text::slice::slice_by_column;
 use pi_tui::{
     default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
-    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions, EditorPasteMode,
-    EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme, ProcessTerminal, Terminal, TUI,
+    EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions,
+    EditorPasteMode, EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme,
+    ProcessTerminal, Terminal, TUI,
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
@@ -200,8 +201,19 @@ impl ForensicsApp {
         let last = state.tick_history.back();
         let total_bytes = last.map(|t| t.total_bytes).unwrap_or(0);
 
-        let (bytes_written, sync_open, sync_close, clear_2j, clear_3j, home, crlf, esc_k, cursor_moves, sample) =
-            last.map(|t| {
+        let (
+            bytes_written,
+            sync_open,
+            sync_close,
+            clear_2j,
+            clear_3j,
+            home,
+            crlf,
+            esc_k,
+            cursor_moves,
+            sample,
+        ) = last
+            .map(|t| {
                 (
                     t.bytes_written,
                     t.sync_open,
@@ -263,13 +275,23 @@ impl ForensicsApp {
         let spark = ascii_sparkline(state.tick_history.iter().map(|t| t.bytes_written));
         let line4 = format!("{} {}", dim("bytes trend:"), dim(&spark));
 
-        let auto = if state.auto_tick { green("ON") } else { dim("OFF") };
+        let auto = if state.auto_tick {
+            green("ON")
+        } else {
+            dim("OFF")
+        };
         let clock = if state.clock_text.is_empty() {
             dim("n/a")
         } else {
             cyan(&state.clock_text)
         };
-        let line5 = format!("{} {}  {} {}", dim("auto tick:"), auto, dim("clock:"), clock);
+        let line5 = format!(
+            "{} {}  {} {}",
+            dim("auto tick:"),
+            auto,
+            dim("clock:"),
+            clock
+        );
 
         let sample_line = format!("{} {}", dim("output sample:"), dim(sample));
 
@@ -734,7 +756,8 @@ fn main() {
     let collector = Arc::new(Mutex::new(Collector::new(64 * 1024)));
     let terminal = ForensicsTerminal::new(ProcessTerminal::new(), Arc::clone(&collector));
 
-    let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(pi_tui::widgets::Spacer::new())));
+    let root: Rc<RefCell<Box<dyn Component>>> =
+        Rc::new(RefCell::new(Box::new(pi_tui::widgets::Spacer::new())));
     let mut tui = TUI::new(terminal, Rc::clone(&root));
     let render_handle = tui.render_handle();
 
@@ -755,10 +778,12 @@ fn main() {
         },
     )));
 
-    editor.borrow_mut().set_on_change(Some(Box::new(move |text| {
-        *draft_for_change.borrow_mut() = text;
-        render_for_change.request_render();
-    })));
+    editor
+        .borrow_mut()
+        .set_on_change(Some(Box::new(move |text| {
+            *draft_for_change.borrow_mut() = text;
+            render_for_change.request_render();
+        })));
 
     editor.borrow_mut().set_text(SAMPLE_MARKDOWN);
     *draft.borrow_mut() = SAMPLE_MARKDOWN.to_string();

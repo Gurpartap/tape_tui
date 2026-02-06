@@ -7,7 +7,9 @@ use std::thread::JoinHandle;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::core::autocomplete::{AbortSignal, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions};
+use crate::core::autocomplete::{
+    AbortSignal, AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
+};
 use crate::core::component::{Component, Focusable};
 use crate::core::editor_component::EditorComponent;
 use crate::core::input_event::InputEvent;
@@ -466,7 +468,13 @@ impl Editor {
         let items = suggestions
             .items
             .iter()
-            .map(|item| SelectItem::new(item.value.clone(), item.label.clone(), item.description.clone()))
+            .map(|item| {
+                SelectItem::new(
+                    item.value.clone(),
+                    item.label.clone(),
+                    item.description.clone(),
+                )
+            })
             .collect::<Vec<_>>();
         let mut list = SelectList::new_with_keybindings_handle(
             items,
@@ -552,11 +560,21 @@ impl Editor {
             return;
         };
 
-        if explicit_tab && !provider.should_trigger_file_completion(&self.state.lines, self.state.cursor_line, self.state.cursor_col) {
+        if explicit_tab
+            && !provider.should_trigger_file_completion(
+                &self.state.lines,
+                self.state.cursor_line,
+                self.state.cursor_col,
+            )
+        {
             return;
         }
 
-        let suggestions = provider.get_suggestions(&self.state.lines, self.state.cursor_line, self.state.cursor_col);
+        let suggestions = provider.get_suggestions(
+            &self.state.lines,
+            self.state.cursor_line,
+            self.state.cursor_col,
+        );
         if let Some(suggestions) = suggestions {
             if !suggestions.items.is_empty() {
                 self.abort_autocomplete_request();
@@ -579,9 +597,13 @@ impl Editor {
             .get(self.state.cursor_line)
             .map(String::as_str)
             .unwrap_or("");
-        let before_cursor = current_line.get(..self.state.cursor_col).unwrap_or(current_line);
+        let before_cursor = current_line
+            .get(..self.state.cursor_col)
+            .unwrap_or(current_line);
 
-        if self.is_in_slash_command_context(before_cursor) && !before_cursor.trim_start().contains(' ') {
+        if self.is_in_slash_command_context(before_cursor)
+            && !before_cursor.trim_start().contains(' ')
+        {
             self.handle_slash_command_completion();
         } else {
             self.force_file_autocomplete(true);
@@ -593,16 +615,13 @@ impl Editor {
     }
 
     fn force_file_autocomplete(&mut self, explicit_tab: bool) {
-        let suggestions = self
-            .autocomplete_provider
-            .as_ref()
-            .and_then(|provider| {
-                provider.get_force_file_suggestions(
-                    &self.state.lines,
-                    self.state.cursor_line,
-                    self.state.cursor_col,
-                )
-            });
+        let suggestions = self.autocomplete_provider.as_ref().and_then(|provider| {
+            provider.get_force_file_suggestions(
+                &self.state.lines,
+                self.state.cursor_line,
+                self.state.cursor_col,
+            )
+        });
         let Some(suggestions) = suggestions else {
             self.try_trigger_autocomplete(true);
             return;
@@ -641,7 +660,13 @@ impl Editor {
         let items = suggestions
             .items
             .iter()
-            .map(|item| SelectItem::new(item.value.clone(), item.label.clone(), item.description.clone()))
+            .map(|item| {
+                SelectItem::new(
+                    item.value.clone(),
+                    item.label.clone(),
+                    item.description.clone(),
+                )
+            })
             .collect::<Vec<_>>();
         let list = SelectList::new_with_keybindings_handle(
             items,
@@ -683,7 +708,11 @@ impl Editor {
             None => return,
         };
 
-        let suggestions = provider.get_suggestions(&self.state.lines, self.state.cursor_line, self.state.cursor_col);
+        let suggestions = provider.get_suggestions(
+            &self.state.lines,
+            self.state.cursor_line,
+            self.state.cursor_col,
+        );
         if let Some(suggestions) = suggestions {
             if !suggestions.items.is_empty() {
                 self.abort_autocomplete_request();
@@ -822,7 +851,10 @@ impl Editor {
             next_lines.extend_from_slice(&self.state.lines[self.state.cursor_line + 1..]);
 
             self.state.lines = next_lines;
-            self.state.cursor_line = self.state.cursor_line.saturating_add(inserted_lines.len() - 1);
+            self.state.cursor_line = self
+                .state
+                .cursor_line
+                .saturating_add(inserted_lines.len() - 1);
             self.set_cursor_col(last_inserted.len());
         }
 
@@ -856,7 +888,8 @@ impl Editor {
         self.history_index = -1;
 
         if !skip_undo_coalescing {
-            if ch.chars().any(is_whitespace_char) || self.last_action != Some(LastAction::TypeWord) {
+            if ch.chars().any(is_whitespace_char) || self.last_action != Some(LastAction::TypeWord)
+            {
                 self.push_undo_snapshot();
             }
             self.last_action = Some(LastAction::TypeWord);
@@ -885,7 +918,9 @@ impl Editor {
                     .get(self.state.cursor_line)
                     .map(String::as_str)
                     .unwrap_or("");
-                let text_before_cursor = current_line.get(..self.state.cursor_col).unwrap_or(current_line);
+                let text_before_cursor = current_line
+                    .get(..self.state.cursor_col)
+                    .unwrap_or(current_line);
                 let mut chars = text_before_cursor.chars().rev();
                 let before_at = chars.nth(1);
                 if text_before_cursor.chars().count() == 1
@@ -893,14 +928,19 @@ impl Editor {
                 {
                     self.try_trigger_autocomplete(false);
                 }
-            } else if ch.chars().any(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+            } else if ch
+                .chars()
+                .any(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+            {
                 let current_line = self
                     .state
                     .lines
                     .get(self.state.cursor_line)
                     .map(String::as_str)
                     .unwrap_or("");
-                let text_before_cursor = current_line.get(..self.state.cursor_col).unwrap_or(current_line);
+                let text_before_cursor = current_line
+                    .get(..self.state.cursor_col)
+                    .unwrap_or(current_line);
                 if self.is_in_slash_command_context(text_before_cursor) {
                     self.try_trigger_autocomplete(false);
                 } else if self.is_in_at_file_context(text_before_cursor) {
@@ -932,9 +972,7 @@ impl Editor {
                 .map(String::as_str)
                 .unwrap_or("");
             let char_before = if self.state.cursor_col > 0 {
-                current_line[..self.state.cursor_col]
-                    .chars()
-                    .last()
+                current_line[..self.state.cursor_col].chars().last()
             } else {
                 None
             };
@@ -993,9 +1031,7 @@ impl Editor {
         let after = current_line[self.state.cursor_col..].to_string();
 
         self.state.lines[self.state.cursor_line] = before;
-        self.state
-            .lines
-            .insert(self.state.cursor_line + 1, after);
+        self.state.lines.insert(self.state.cursor_line + 1, after);
         self.state.cursor_line += 1;
         self.set_cursor_col(0);
 
@@ -1042,8 +1078,7 @@ impl Editor {
             let grapheme_len = graphemes.pop().map(|seg| seg.len()).unwrap_or(1);
             let start = self.state.cursor_col.saturating_sub(grapheme_len);
             let after = &line[self.state.cursor_col..];
-            self.state.lines[self.state.cursor_line] =
-                format!("{}{}", &line[..start], after);
+            self.state.lines[self.state.cursor_line] = format!("{}{}", &line[..start], after);
             self.set_cursor_col(start);
         } else if self.state.cursor_line > 0 {
             self.push_undo_snapshot();
@@ -1106,8 +1141,11 @@ impl Editor {
             let mut graphemes = grapheme_segments(after_cursor);
             let first = graphemes.next().unwrap_or("");
             let end = self.state.cursor_col.saturating_add(first.len());
-            self.state.lines[self.state.cursor_line] =
-                format!("{}{}", &current_line[..self.state.cursor_col], &current_line[end..]);
+            self.state.lines[self.state.cursor_line] = format!(
+                "{}{}",
+                &current_line[..self.state.cursor_col],
+                &current_line[end..]
+            );
         } else if self.state.cursor_line + 1 < self.state.lines.len() {
             self.push_undo_snapshot();
             let next_line = self
@@ -1116,8 +1154,7 @@ impl Editor {
                 .get(self.state.cursor_line + 1)
                 .cloned()
                 .unwrap_or_default();
-            self.state.lines[self.state.cursor_line] =
-                format!("{current_line}{next_line}");
+            self.state.lines[self.state.cursor_line] = format!("{current_line}{next_line}");
             self.state.lines.remove(self.state.cursor_line + 1);
         }
 
@@ -1192,8 +1229,7 @@ impl Editor {
                 .get(self.state.cursor_line + 1)
                 .cloned()
                 .unwrap_or_default();
-            self.state.lines[self.state.cursor_line] =
-                format!("{current_line}{next_line}");
+            self.state.lines[self.state.cursor_line] = format!("{current_line}{next_line}");
             self.state.lines.remove(self.state.cursor_line + 1);
         }
 
@@ -1243,8 +1279,11 @@ impl Editor {
             let deleted = current_line[delete_from..old_col].to_string();
             self.add_to_kill_ring(&deleted, true);
             self.last_action = Some(LastAction::Kill);
-            self.state.lines[self.state.cursor_line] =
-                format!("{}{}", &current_line[..delete_from], &current_line[old_col..]);
+            self.state.lines[self.state.cursor_line] = format!(
+                "{}{}",
+                &current_line[..delete_from],
+                &current_line[old_col..]
+            );
             self.set_cursor_col(delete_from);
         }
 
@@ -1273,8 +1312,7 @@ impl Editor {
                     .get(self.state.cursor_line + 1)
                     .cloned()
                     .unwrap_or_default();
-                self.state.lines[self.state.cursor_line] =
-                    format!("{current_line}{next_line}");
+                self.state.lines[self.state.cursor_line] = format!("{current_line}{next_line}");
                 self.state.lines.remove(self.state.cursor_line + 1);
             }
         } else {
@@ -1399,9 +1437,7 @@ impl Editor {
                 .get(start_line)
                 .cloned()
                 .unwrap_or_default();
-            let start_col = line_at_start
-                .len()
-                .saturating_sub(yank_lines[0].len());
+            let start_col = line_at_start.len().saturating_sub(yank_lines[0].len());
             let after_cursor = self
                 .state
                 .lines
@@ -1410,9 +1446,10 @@ impl Editor {
                 .unwrap_or_default();
             let before_yank = line_at_start[..start_col].to_string();
 
-            self.state
-                .lines
-                .splice(start_line..=self.state.cursor_line, [format!("{before_yank}{after_cursor}")]);
+            self.state.lines.splice(
+                start_line..=self.state.cursor_line,
+                [format!("{before_yank}{after_cursor}")],
+            );
             self.state.cursor_line = start_line;
             self.set_cursor_col(start_col);
         }
@@ -1475,7 +1512,9 @@ impl Editor {
                 while cursor < bytes.len() {
                     let ch = bytes[cursor];
                     if ch.is_ascii_digit() {
-                        paste_id = paste_id.saturating_mul(10).saturating_add((ch - b'0') as u32);
+                        paste_id = paste_id
+                            .saturating_mul(10)
+                            .saturating_add((ch - b'0') as u32);
                         has_id = true;
                         cursor += 1;
                     } else {
@@ -1580,12 +1619,14 @@ impl Editor {
                     if is_current {
                         if is_last_chunk {
                             has_cursor = self.state.cursor_col >= chunk.start_index;
-                            adjusted_cursor = self.state.cursor_col.saturating_sub(chunk.start_index);
+                            adjusted_cursor =
+                                self.state.cursor_col.saturating_sub(chunk.start_index);
                         } else if self.state.cursor_col >= chunk.start_index
                             && self.state.cursor_col < chunk.end_index
                         {
                             has_cursor = true;
-                            adjusted_cursor = self.state.cursor_col.saturating_sub(chunk.start_index);
+                            adjusted_cursor =
+                                self.state.cursor_col.saturating_sub(chunk.start_index);
                             if adjusted_cursor > chunk.text.len() {
                                 adjusted_cursor = chunk.text.len();
                             }
@@ -1650,7 +1691,9 @@ impl Editor {
                 let col_in_segment = self.state.cursor_col.saturating_sub(line.start_col);
                 let is_last_segment = idx + 1 == visual_lines.len()
                     || visual_lines[idx + 1].logical_line != line.logical_line;
-                if col_in_segment < line.length || (is_last_segment && col_in_segment <= line.length) {
+                if col_in_segment < line.length
+                    || (is_last_segment && col_in_segment <= line.length)
+                {
                     return idx;
                 }
             }
@@ -1672,7 +1715,10 @@ impl Editor {
             let target_visual = if delta_line.is_negative() {
                 current_visual_line.saturating_sub(delta)
             } else {
-                min(visual_lines.len().saturating_sub(1), current_visual_line.saturating_add(delta))
+                min(
+                    visual_lines.len().saturating_sub(1),
+                    current_visual_line.saturating_add(delta),
+                )
             };
             if target_visual < visual_lines.len() {
                 self.move_to_visual_line(&visual_lines, current_visual_line, target_visual);
@@ -1700,7 +1746,8 @@ impl Editor {
                     self.state.cursor_line += 1;
                     self.set_cursor_col(0);
                 } else if let Some(current_vl) = visual_lines.get(current_visual_line) {
-                    self.preferred_visual_col = Some(self.state.cursor_col.saturating_sub(current_vl.start_col));
+                    self.preferred_visual_col =
+                        Some(self.state.cursor_col.saturating_sub(current_vl.start_col));
                 }
             } else if self.state.cursor_col > 0 {
                 let before_cursor = &current_line[..self.state.cursor_col];
@@ -1749,7 +1796,8 @@ impl Editor {
             target_vl.length.saturating_sub(1)
         };
 
-        let move_col = self.compute_vertical_move_column(current_visual_col, source_max, target_max);
+        let move_col =
+            self.compute_vertical_move_column(current_visual_col, source_max, target_max);
         self.state.cursor_line = target_vl.logical_line;
         let target_col = target_vl.start_col.saturating_add(move_col);
         let line_len = self
@@ -1986,7 +2034,10 @@ impl Editor {
 
     fn set_text_internal(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let mut lines: Vec<String> = normalized.split('\n').map(|part| part.to_string()).collect();
+        let mut lines: Vec<String> = normalized
+            .split('\n')
+            .map(|part| part.to_string())
+            .collect();
         if lines.is_empty() {
             lines.push(String::new());
         }
@@ -2027,7 +2078,9 @@ impl Editor {
                     0
                 };
                 if start_index <= line.len() {
-                    line[start_index..].find(target).map(|offset| start_index + offset)
+                    line[start_index..]
+                        .find(target)
+                        .map(|offset| start_index + offset)
                 } else {
                     None
                 }
@@ -2061,7 +2114,10 @@ impl Component for Editor {
         let max_padding = width.saturating_sub(1) / 2;
         let padding_x = min(self.padding_x, max_padding);
         let content_width = max(1, width.saturating_sub(padding_x * 2));
-        let layout_width = max(1, content_width.saturating_sub(if padding_x > 0 { 0 } else { 1 }));
+        let layout_width = max(
+            1,
+            content_width.saturating_sub(if padding_x > 0 { 0 } else { 1 }),
+        );
         self.last_width = layout_width;
 
         let horizontal = (self.border_color)("─");
@@ -2136,7 +2192,11 @@ impl Component for Editor {
                 if let Some(cursor_pos) = layout_line.cursor_pos {
                     let cursor_pos = min(cursor_pos, display_text.len());
                     let (before, after) = display_text.split_at(cursor_pos);
-                    let marker = if emit_cursor_marker { CURSOR_MARKER } else { "" };
+                    let marker = if emit_cursor_marker {
+                        CURSOR_MARKER
+                    } else {
+                        ""
+                    };
 
                     if !after.is_empty() {
                         let mut graphemes = grapheme_segments(after);
@@ -2186,9 +2246,7 @@ impl Component for Editor {
                 for line in autocomplete_result {
                     let line_width = visible_width(&line);
                     let padding = " ".repeat(content_width.saturating_sub(line_width));
-                    result.push(format!(
-                        "{left_padding}{line}{padding}{right_padding}"
-                    ));
+                    result.push(format!("{left_padding}{line}{padding}{right_padding}"));
                 }
             }
         }
@@ -2213,16 +2271,21 @@ impl Component for Editor {
                     .keybindings
                     .lock()
                     .expect("editor keybindings lock poisoned");
-                kb.matches(key_id, EditorAction::JumpForward) || kb.matches(key_id, EditorAction::JumpBackward)
+                kb.matches(key_id, EditorAction::JumpForward)
+                    || kb.matches(key_id, EditorAction::JumpBackward)
             };
             if is_jump_key {
                 return;
             }
 
             let target = decode_kitty_printable(&data).or_else(|| {
-                data.chars()
-                    .next()
-                    .and_then(|ch| if (ch as u32) >= 32 { Some(ch.to_string()) } else { None })
+                data.chars().next().and_then(|ch| {
+                    if (ch as u32) >= 32 {
+                        Some(ch.to_string())
+                    } else {
+                        None
+                    }
+                })
             });
             if let Some(target) = target {
                 self.jump_to_char(&target, jump_mode);
@@ -2258,22 +2321,29 @@ impl Component for Editor {
             return;
         }
 
-        let (is_copy, is_undo, is_select_cancel, is_select_up, is_select_down, is_tab, is_select_confirm) =
-            {
-                let kb = self
-                    .keybindings
-                    .lock()
-                    .expect("editor keybindings lock poisoned");
-                (
-                    kb.matches(key_id, EditorAction::Copy),
-                    kb.matches(key_id, EditorAction::Undo),
-                    kb.matches(key_id, EditorAction::SelectCancel),
-                    kb.matches(key_id, EditorAction::SelectUp),
-                    kb.matches(key_id, EditorAction::SelectDown),
-                    kb.matches(key_id, EditorAction::Tab),
-                    kb.matches(key_id, EditorAction::SelectConfirm),
-                )
-            };
+        let (
+            is_copy,
+            is_undo,
+            is_select_cancel,
+            is_select_up,
+            is_select_down,
+            is_tab,
+            is_select_confirm,
+        ) = {
+            let kb = self
+                .keybindings
+                .lock()
+                .expect("editor keybindings lock poisoned");
+            (
+                kb.matches(key_id, EditorAction::Copy),
+                kb.matches(key_id, EditorAction::Undo),
+                kb.matches(key_id, EditorAction::SelectCancel),
+                kb.matches(key_id, EditorAction::SelectUp),
+                kb.matches(key_id, EditorAction::SelectDown),
+                kb.matches(key_id, EditorAction::Tab),
+                kb.matches(key_id, EditorAction::SelectConfirm),
+            )
+        };
 
         if is_copy {
             return;
@@ -2314,11 +2384,11 @@ impl Component for Editor {
                     };
                     if let Some(provider) = self.autocomplete_provider.as_ref() {
                         let result = provider.apply_completion(
-                        &self.state.lines,
-                        self.state.cursor_line,
-                        self.state.cursor_col,
-                        &item,
-                        &self.autocomplete_prefix,
+                            &self.state.lines,
+                            self.state.cursor_line,
+                            self.state.cursor_col,
+                            &item,
+                            &self.autocomplete_prefix,
                         );
                         self.push_undo_snapshot();
                         self.last_action = None;
@@ -2347,11 +2417,11 @@ impl Component for Editor {
                     };
                     if let Some(provider) = self.autocomplete_provider.as_ref() {
                         let result = provider.apply_completion(
-                        &self.state.lines,
-                        self.state.cursor_line,
-                        self.state.cursor_col,
-                        &item,
-                        &self.autocomplete_prefix,
+                            &self.state.lines,
+                            self.state.cursor_line,
+                            self.state.cursor_col,
+                            &item,
+                            &self.autocomplete_prefix,
                         );
                         self.push_undo_snapshot();
                         self.last_action = None;
@@ -2420,9 +2490,13 @@ impl Component for Editor {
                 Some(Action::DeleteWordBackward)
             } else if kb.matches(key_id, EditorAction::DeleteWordForward) {
                 Some(Action::DeleteWordForward)
-            } else if kb.matches(key_id, EditorAction::DeleteCharBackward) || key_id == Some("shift+backspace") {
+            } else if kb.matches(key_id, EditorAction::DeleteCharBackward)
+                || key_id == Some("shift+backspace")
+            {
                 Some(Action::Backspace)
-            } else if kb.matches(key_id, EditorAction::DeleteCharForward) || key_id == Some("shift+delete") {
+            } else if kb.matches(key_id, EditorAction::DeleteCharForward)
+                || key_id == Some("shift+delete")
+            {
                 Some(Action::ForwardDelete)
             } else if kb.matches(key_id, EditorAction::Yank) {
                 Some(Action::Yank)
@@ -2525,7 +2599,9 @@ impl Component for Editor {
                     .get(self.state.cursor_line)
                     .map(String::as_str)
                     .unwrap_or("");
-                if self.state.cursor_col > 0 && current_line[..self.state.cursor_col].ends_with('\\') {
+                if self.state.cursor_col > 0
+                    && current_line[..self.state.cursor_col].ends_with('\\')
+                {
                     self.handle_backspace();
                     self.add_new_line();
                     return;
@@ -2588,7 +2664,12 @@ impl Component for Editor {
             return;
         }
 
-        if data.chars().next().map(|ch| (ch as u32) >= 32).unwrap_or(false) {
+        if data
+            .chars()
+            .next()
+            .map(|ch| (ch as u32) >= 32)
+            .unwrap_or(false)
+        {
             self.insert_character(&data, false);
         }
     }
@@ -2640,7 +2721,12 @@ impl EditorComponent for Editor {
         if trimmed.is_empty() {
             return;
         }
-        if self.history.first().map(|item| item == trimmed).unwrap_or(false) {
+        if self
+            .history
+            .first()
+            .map(|item| item == trimmed)
+            .unwrap_or(false)
+        {
             return;
         }
         self.history.insert(0, trimmed.to_string());
@@ -2700,10 +2786,16 @@ fn decode_kitty_printable(data: &str) -> Option<String> {
     };
 
     let mut left_parts = left.split(':');
-    let codepoint = left_parts.next().and_then(|value| value.parse::<u32>().ok())?;
-    let shifted = left_parts
+    let codepoint = left_parts
         .next()
-        .and_then(|value| if value.is_empty() { None } else { value.parse::<u32>().ok() });
+        .and_then(|value| value.parse::<u32>().ok())?;
+    let shifted = left_parts.next().and_then(|value| {
+        if value.is_empty() {
+            None
+        } else {
+            value.parse::<u32>().ok()
+        }
+    });
 
     let mod_value = if right.is_empty() {
         1u32
@@ -2738,10 +2830,12 @@ fn decode_kitty_printable(data: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{word_wrap_line, Editor, EditorHeightMode, EditorOptions, EditorPasteMode, EditorTheme};
+    use super::{
+        word_wrap_line, Editor, EditorHeightMode, EditorOptions, EditorPasteMode, EditorTheme,
+    };
     use crate::core::autocomplete::{
-        AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
-        CommandEntry, CompletionResult, SlashCommand,
+        AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions,
+        CombinedAutocompleteProvider, CommandEntry, CompletionResult, SlashCommand,
     };
     use crate::core::component::Component;
     use crate::core::input::{parse_key, KeyEventType};
@@ -2843,7 +2937,10 @@ mod tests {
 
     #[test]
     fn editor_fill_available_renders_more_lines_than_default() {
-        let text = (0..50).map(|idx| format!("line {idx}")).collect::<Vec<_>>().join("\n");
+        let text = (0..50)
+            .map(|idx| format!("line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let mut default_editor = Editor::new(theme(), EditorOptions::default());
         default_editor.set_terminal_rows(20);

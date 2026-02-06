@@ -26,7 +26,12 @@ impl TestTerminal {
 }
 
 impl Terminal for TestTerminal {
-    fn start(&mut self, _on_input: Box<dyn FnMut(String) + Send>, _on_resize: Box<dyn FnMut() + Send>) {}
+    fn start(
+        &mut self,
+        _on_input: Box<dyn FnMut(String) + Send>,
+        _on_resize: Box<dyn FnMut() + Send>,
+    ) {
+    }
     fn stop(&mut self) {}
     fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
     fn write(&mut self, data: &str) {
@@ -59,7 +64,13 @@ fn golden_first_render() {
     let expected = fixture::read_unescaped("renderer_first_render.txt");
     let mut renderer = DiffRenderer::new();
     let mut term = TestTerminal::new(10, 5);
-    renderer.render(&mut term, vec!["hello".to_string()], not_image, false, false);
+    renderer.render(
+        &mut term,
+        vec!["hello".to_string()],
+        not_image,
+        false,
+        false,
+    );
     let output = term.take_output();
     assert_eq!(output, expected);
 }
@@ -69,11 +80,23 @@ fn golden_width_change_full_clear() {
     let expected = fixture::read_unescaped("renderer_width_change_clear.txt");
     let mut renderer = DiffRenderer::new();
     let mut term = TestTerminal::new(10, 5);
-    renderer.render(&mut term, vec!["hello".to_string()], not_image, false, false);
+    renderer.render(
+        &mut term,
+        vec!["hello".to_string()],
+        not_image,
+        false,
+        false,
+    );
     term.take_output();
 
     term.columns = 12;
-    renderer.render(&mut term, vec!["hello".to_string()], not_image, false, false);
+    renderer.render(
+        &mut term,
+        vec!["hello".to_string()],
+        not_image,
+        false,
+        false,
+    );
     let output = term.take_output();
     assert_eq!(output, expected);
 }
@@ -127,7 +150,13 @@ fn golden_image_line_bypass() {
     let expected = fixture::read_unescaped("renderer_image_line.txt");
     let mut renderer = DiffRenderer::new();
     let mut term = TestTerminal::new(5, 5);
-    renderer.render(&mut term, vec!["short".to_string()], is_image_line, false, false);
+    renderer.render(
+        &mut term,
+        vec!["short".to_string()],
+        is_image_line,
+        false,
+        false,
+    );
     term.take_output();
 
     renderer.render(

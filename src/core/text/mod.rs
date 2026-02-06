@@ -7,4 +7,3 @@ pub mod ansi;
 pub mod slice;
 pub mod utils;
 pub mod width;
-

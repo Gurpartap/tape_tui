@@ -6,7 +6,9 @@ use pi_tui::render::overlay::{
     composite_overlays, resolve_overlay_layout, OverlayAnchor, OverlayOptions, RenderedOverlay,
     SizeValue,
 };
-use pi_tui::runtime::ime::{extract_cursor_position, position_hardware_cursor, CursorPos, CURSOR_MARKER};
+use pi_tui::runtime::ime::{
+    extract_cursor_position, position_hardware_cursor, CursorPos, CURSOR_MARKER,
+};
 
 #[derive(Default)]
 struct TestTerminal {
@@ -14,7 +16,12 @@ struct TestTerminal {
 }
 
 impl Terminal for TestTerminal {
-    fn start(&mut self, _on_input: Box<dyn FnMut(String) + Send>, _on_resize: Box<dyn FnMut() + Send>) {}
+    fn start(
+        &mut self,
+        _on_input: Box<dyn FnMut(String) + Send>,
+        _on_resize: Box<dyn FnMut() + Send>,
+    ) {
+    }
     fn stop(&mut self) {}
     fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
     fn write(&mut self, data: &str) {

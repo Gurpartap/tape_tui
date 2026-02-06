@@ -15,7 +15,12 @@ const FD_MAX_BUFFER: usize = 10 * 1024 * 1024;
 
 fn path_delimiters() -> &'static HashSet<char> {
     static DELIMITERS: std::sync::OnceLock<HashSet<char>> = std::sync::OnceLock::new();
-    DELIMITERS.get_or_init(|| [" ", "\t", "\"", "'", "="].iter().map(|s| s.chars().next().unwrap()).collect())
+    DELIMITERS.get_or_init(|| {
+        [" ", "\t", "\"", "'", "="]
+            .iter()
+            .map(|s| s.chars().next().unwrap())
+            .collect()
+    })
 }
 
 fn find_last_delimiter(text: &str) -> Option<usize> {
@@ -301,11 +306,7 @@ pub struct CombinedAutocompleteProvider {
 }
 
 impl CombinedAutocompleteProvider {
-    pub fn new(
-        commands: Vec<CommandEntry>,
-        base_path: PathBuf,
-        fd_path: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(commands: Vec<CommandEntry>, base_path: PathBuf, fd_path: Option<PathBuf>) -> Self {
         Self {
             commands,
             base_path,
@@ -389,7 +390,10 @@ impl CombinedAutocompleteProvider {
             return Some(path_prefix);
         }
 
-        if path_prefix.contains('/') || path_prefix.starts_with('.') || path_prefix.starts_with("~/") {
+        if path_prefix.contains('/')
+            || path_prefix.starts_with('.')
+            || path_prefix.starts_with("~/")
+        {
             return Some(path_prefix);
         }
 
@@ -403,7 +407,10 @@ impl CombinedAutocompleteProvider {
     fn expand_home_path(&self, path: &str) -> String {
         let home = std::env::var("HOME").unwrap_or_default();
         if path.starts_with("~/") {
-            let mut expanded = Path::new(&home).join(&path[2..]).to_string_lossy().to_string();
+            let mut expanded = Path::new(&home)
+                .join(&path[2..])
+                .to_string_lossy()
+                .to_string();
             if path.ends_with('/') && !expanded.ends_with('/') {
                 expanded.push('/');
             }
@@ -435,24 +442,31 @@ impl CombinedAutocompleteProvider {
             let dir = if parsed.raw_prefix.starts_with('~') || expanded_prefix.starts_with('/') {
                 expanded_prefix.clone()
             } else {
-                self.base_path.join(&expanded_prefix).to_string_lossy().to_string()
+                self.base_path
+                    .join(&expanded_prefix)
+                    .to_string_lossy()
+                    .to_string()
             };
             (dir, String::new())
         } else if parsed.raw_prefix.ends_with('/') {
             let dir = if parsed.raw_prefix.starts_with('~') || expanded_prefix.starts_with('/') {
                 expanded_prefix.clone()
             } else {
-                self.base_path.join(&expanded_prefix).to_string_lossy().to_string()
+                self.base_path
+                    .join(&expanded_prefix)
+                    .to_string_lossy()
+                    .to_string()
             };
             (dir, String::new())
         } else {
             let dir = dirname(&expanded_prefix).to_string();
             let file = basename(&expanded_prefix).to_string();
-            let search_dir = if parsed.raw_prefix.starts_with('~') || expanded_prefix.starts_with('/') {
-                dir
-            } else {
-                self.base_path.join(dir).to_string_lossy().to_string()
-            };
+            let search_dir =
+                if parsed.raw_prefix.starts_with('~') || expanded_prefix.starts_with('/') {
+                    dir
+                } else {
+                    self.base_path.join(dir).to_string_lossy().to_string()
+                };
             (search_dir, file)
         };
 
@@ -603,7 +617,11 @@ impl CombinedAutocompleteProvider {
 
             suggestions.push(AutocompleteItem {
                 value,
-                label: format!("{}{}", entry_name, if entry.is_directory { "/" } else { "" }),
+                label: format!(
+                    "{}{}",
+                    entry_name,
+                    if entry.is_directory { "/" } else { "" }
+                ),
                 description: Some(path_without_slash.to_string()),
             });
         }
@@ -645,7 +663,8 @@ impl CombinedAutocompleteProvider {
                 score,
             });
             if let Some(callback) = &on_update {
-                let suggestions = self.build_fuzzy_suggestions(scored_entries.clone(), is_quoted_prefix);
+                let suggestions =
+                    self.build_fuzzy_suggestions(scored_entries.clone(), is_quoted_prefix);
                 if !suggestions.is_empty() {
                     callback(suggestions);
                 }
@@ -699,7 +718,8 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                     .iter()
                     .find(|entry| entry.name() == command_name)
                 {
-                    if let Some(argument_suggestions) = command.argument_completions(argument_text) {
+                    if let Some(argument_suggestions) = command.argument_completions(argument_text)
+                    {
                         if argument_suggestions.is_empty() {
                             return None;
                         }
@@ -764,7 +784,12 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         cursor_line: usize,
         cursor_col: usize,
     ) -> Option<AutocompleteSuggestions> {
-        CombinedAutocompleteProvider::get_force_file_suggestions(self, lines, cursor_line, cursor_col)
+        CombinedAutocompleteProvider::get_force_file_suggestions(
+            self,
+            lines,
+            cursor_line,
+            cursor_col,
+        )
     }
 
     fn should_trigger_file_completion(
@@ -773,7 +798,12 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         cursor_line: usize,
         cursor_col: usize,
     ) -> bool {
-        CombinedAutocompleteProvider::should_trigger_file_completion(self, lines, cursor_line, cursor_col)
+        CombinedAutocompleteProvider::should_trigger_file_completion(
+            self,
+            lines,
+            cursor_line,
+            cursor_col,
+        )
     }
 
     fn get_suggestions_async(
@@ -785,7 +815,10 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         on_update: Option<SuggestionUpdate>,
     ) -> Option<JoinHandle<Option<AutocompleteSuggestions>>> {
         let current_line = lines.get(cursor_line).map(String::as_str).unwrap_or("");
-        let text_before_cursor = current_line.get(..cursor_col).unwrap_or(current_line).to_string();
+        let text_before_cursor = current_line
+            .get(..cursor_col)
+            .unwrap_or(current_line)
+            .to_string();
         let at_prefix = self.extract_at_prefix(&text_before_cursor)?;
 
         let ParsedPathPrefix {
@@ -796,7 +829,8 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
 
         let base_path = self.base_path.clone();
         let fd_path = self.fd_path.clone()?;
-        let update: Option<Arc<dyn Fn(AutocompleteSuggestions) + Send + Sync>> = on_update.map(Arc::from);
+        let update: Option<Arc<dyn Fn(AutocompleteSuggestions) + Send + Sync>> =
+            on_update.map(Arc::from);
         let signal_clone = signal.clone();
 
         Some(thread::spawn(move || {
@@ -851,15 +885,16 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         let has_leading_quote_after_cursor = after_cursor.starts_with('"');
         let has_trailing_quote_in_item = item.value.ends_with('"');
 
-        let adjusted_after_cursor = if is_quoted_prefix && has_trailing_quote_in_item && has_leading_quote_after_cursor
-        {
-            after_cursor.get(1..).unwrap_or("")
-        } else {
-            after_cursor
-        };
+        let adjusted_after_cursor =
+            if is_quoted_prefix && has_trailing_quote_in_item && has_leading_quote_after_cursor {
+                after_cursor.get(1..).unwrap_or("")
+            } else {
+                after_cursor
+            };
 
-        let is_slash_command =
-            prefix.starts_with('/') && before_prefix.trim().is_empty() && !prefix[1..].contains('/');
+        let is_slash_command = prefix.starts_with('/')
+            && before_prefix.trim().is_empty()
+            && !prefix[1..].contains('/');
         if is_slash_command {
             let new_line = format!("{}/{} {}", before_prefix, item.value, adjusted_after_cursor);
             let mut new_lines = lines.to_vec();
@@ -874,7 +909,10 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         if prefix.starts_with('@') {
             let is_directory = item.label.ends_with('/');
             let suffix = if is_directory { "" } else { " " };
-            let new_line = format!("{}{}{}{}", before_prefix, item.value, suffix, adjusted_after_cursor);
+            let new_line = format!(
+                "{}{}{}{}",
+                before_prefix, item.value, suffix, adjusted_after_cursor
+            );
             let mut new_lines = lines.to_vec();
             new_lines[cursor_line] = new_line;
 
@@ -1192,7 +1230,9 @@ mod tests {
         let script_path = temp_dir.join("fd_mock.sh");
         let script = "#!/bin/sh\necho \"alpha/\"\nsleep 0.1\necho \"beta\"\n";
         std::fs::write(&script_path, script).expect("write fd mock");
-        let mut perms = std::fs::metadata(&script_path).expect("metadata").permissions();
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("metadata")
+            .permissions();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1200,7 +1240,8 @@ mod tests {
             std::fs::set_permissions(&script_path, perms).expect("chmod");
         }
 
-        let provider = CombinedAutocompleteProvider::new(Vec::new(), PathBuf::from("."), Some(script_path));
+        let provider =
+            CombinedAutocompleteProvider::new(Vec::new(), PathBuf::from("."), Some(script_path));
         let updates = Arc::new(AtomicUsize::new(0));
         let signal = AbortSignal::new();
         let update_signal = signal.clone();

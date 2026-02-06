@@ -429,4 +429,3 @@ mod tests {
         assert!(!wrapped[1].starts_with(' '));
     }
 }
-

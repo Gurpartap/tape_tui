@@ -319,13 +319,23 @@ impl Default for ProcessTerminal {
 
 #[cfg(unix)]
 impl Terminal for ProcessTerminal {
-    fn start(&mut self, on_input: Box<dyn FnMut(String) + Send>, on_resize: Box<dyn FnMut() + Send>) {
+    fn start(
+        &mut self,
+        on_input: Box<dyn FnMut(String) + Send>,
+        on_resize: Box<dyn FnMut() + Send>,
+    ) {
         {
-            let mut state = self.input_state.lock().expect("input handler lock poisoned");
+            let mut state = self
+                .input_state
+                .lock()
+                .expect("input handler lock poisoned");
             state.handler = Some(on_input);
         }
         {
-            let mut handler = self.resize_handler.lock().expect("resize handler lock poisoned");
+            let mut handler = self
+                .resize_handler
+                .lock()
+                .expect("resize handler lock poisoned");
             *handler = Some(on_resize);
         }
 
@@ -358,11 +368,17 @@ impl Terminal for ProcessTerminal {
         self.stop_resize_thread();
 
         {
-            let mut state = self.input_state.lock().expect("input handler lock poisoned");
+            let mut state = self
+                .input_state
+                .lock()
+                .expect("input handler lock poisoned");
             state.handler = None;
         }
         {
-            let mut handler = self.resize_handler.lock().expect("resize handler lock poisoned");
+            let mut handler = self
+                .resize_handler
+                .lock()
+                .expect("resize handler lock poisoned");
             *handler = None;
         }
 
@@ -578,7 +594,11 @@ impl ProcessTerminal {
 
 #[cfg(not(unix))]
 impl Terminal for ProcessTerminal {
-    fn start(&mut self, _on_input: Box<dyn FnMut(String) + Send>, _on_resize: Box<dyn FnMut() + Send>) {
+    fn start(
+        &mut self,
+        _on_input: Box<dyn FnMut(String) + Send>,
+        _on_resize: Box<dyn FnMut() + Send>,
+    ) {
         panic!("ProcessTerminal is only supported on Unix platforms");
     }
 
@@ -822,13 +842,7 @@ mod tests {
             .recv_timeout(Duration::from_millis(200))
             .expect("stop did not reach before_flush hook");
 
-        let _ = unsafe {
-            libc::write(
-                pty.master,
-                b"abc".as_ptr() as *const libc::c_void,
-                3,
-            )
-        };
+        let _ = unsafe { libc::write(pty.master, b"abc".as_ptr() as *const libc::c_void, 3) };
 
         stop_release
             .before_go
@@ -876,9 +890,12 @@ mod tests {
         terminal.stdin_fd = pty.slave;
         terminal.stdout_fd = pty.slave;
 
-        terminal.start(Box::new(move |data| {
-            let _ = tx.send(data);
-        }), Box::new(|| {}));
+        terminal.start(
+            Box::new(move |data| {
+                let _ = tx.send(data);
+            }),
+            Box::new(|| {}),
+        );
 
         let payload = b"\x1b[200~hello\x1b[201~";
         let _ = unsafe {

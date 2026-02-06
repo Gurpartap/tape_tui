@@ -1,7 +1,7 @@
 //! TUI runtime (Phase 5).
 
-use std::env;
 use std::cell::RefCell;
+use std::env;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,8 +10,12 @@ use crate::core::component::Component;
 use crate::core::input::{is_key_release, is_key_repeat, parse_key, KeyEventType};
 use crate::core::input_event::InputEvent;
 use crate::core::terminal::Terminal;
-use crate::core::terminal_image::{get_capabilities, is_image_line, set_cell_dimensions, CellDimensions};
-use crate::render::overlay::{composite_overlays, resolve_overlay_layout, OverlayOptions, RenderedOverlay};
+use crate::core::terminal_image::{
+    get_capabilities, is_image_line, set_cell_dimensions, CellDimensions,
+};
+use crate::render::overlay::{
+    composite_overlays, resolve_overlay_layout, OverlayOptions, RenderedOverlay,
+};
 use crate::render::renderer::DiffRenderer;
 use crate::runtime::focus::FocusState;
 use crate::runtime::ime::{extract_cursor_position, position_hardware_cursor};
@@ -192,7 +196,10 @@ impl<T: Terminal> TuiRuntime<T> {
 
     pub fn has_overlay(&self) -> bool {
         let state = self.overlays.borrow();
-        state.entries.iter().any(|entry| self.is_overlay_visible(entry))
+        state
+            .entries
+            .iter()
+            .any(|entry| self.is_overlay_visible(entry))
     }
 
     pub fn start(&mut self) {
@@ -288,7 +295,9 @@ impl<T: Terminal> TuiRuntime<T> {
             event_type,
         };
 
-        if event.event_type == KeyEventType::Press && event.key_id.as_deref() == Some("ctrl+shift+d") {
+        if event.event_type == KeyEventType::Press
+            && event.key_id.as_deref() == Some("ctrl+shift+d")
+        {
             if let Some(handler) = self.on_debug.as_mut() {
                 handler();
             }
@@ -341,8 +350,13 @@ impl<T: Terminal> TuiRuntime<T> {
         let total_lines = lines.len();
         let cursor_pos = extract_cursor_position(&mut lines, height);
         let has_overlays = self.has_overlay();
-        self.renderer
-            .render(&mut self.terminal, lines, is_image_line, self.clear_on_shrink, has_overlays);
+        self.renderer.render(
+            &mut self.terminal,
+            lines,
+            is_image_line,
+            self.clear_on_shrink,
+            has_overlays,
+        );
 
         let updated_row = position_hardware_cursor(
             &mut self.terminal,
@@ -382,7 +396,8 @@ impl<T: Terminal> TuiRuntime<T> {
     fn filter_cell_size_response(&mut self, data: &str) -> Option<String> {
         self.input_buffer.push_str(data);
 
-        if let Some((start, end, height_px, width_px)) = find_cell_size_response(&self.input_buffer) {
+        if let Some((start, end, height_px, width_px)) = find_cell_size_response(&self.input_buffer)
+        {
             if height_px > 0 && width_px > 0 {
                 set_cell_dimensions(CellDimensions {
                     width_px,
@@ -408,7 +423,12 @@ impl<T: Terminal> TuiRuntime<T> {
         Some(result)
     }
 
-    fn composite_overlay_lines(&mut self, lines: Vec<String>, width: usize, height: usize) -> Vec<String> {
+    fn composite_overlay_lines(
+        &mut self,
+        lines: Vec<String>,
+        width: usize,
+        height: usize,
+    ) -> Vec<String> {
         let overlays = {
             let state = self.overlays.borrow();
             let mut rendered = Vec::new();
@@ -425,8 +445,12 @@ impl<T: Terminal> TuiRuntime<T> {
                         overlay_lines.truncate(max_height);
                     }
                 }
-                let final_layout =
-                    resolve_overlay_layout(entry.options.as_ref(), overlay_lines.len(), width, height);
+                let final_layout = resolve_overlay_layout(
+                    entry.options.as_ref(),
+                    overlay_lines.len(),
+                    width,
+                    height,
+                );
                 rendered.push(RenderedOverlay {
                     lines: overlay_lines,
                     row: final_layout.row,
@@ -452,7 +476,10 @@ impl<T: Terminal> TuiRuntime<T> {
             return false;
         }
         match entry.options.as_ref().and_then(|opt| opt.visible.as_ref()) {
-            Some(visible) => visible(self.terminal.columns() as usize, self.terminal.rows() as usize),
+            Some(visible) => visible(
+                self.terminal.columns() as usize,
+                self.terminal.rows() as usize,
+            ),
             None => true,
         }
     }
@@ -504,7 +531,10 @@ impl<T: Terminal> TuiRuntime<T> {
             .map(|entry| entry.pre_focus.clone())
     }
 
-    fn is_overlay_visible_for_component(&self, component: &Rc<RefCell<Box<dyn Component>>>) -> bool {
+    fn is_overlay_visible_for_component(
+        &self,
+        component: &Rc<RefCell<Box<dyn Component>>>,
+    ) -> bool {
         let state = self.overlays.borrow();
         if let Some(entry) = state
             .entries
@@ -550,12 +580,15 @@ fn find_cell_size_response(buffer: &str) -> Option<(usize, usize, u32, u32)> {
     let bytes = buffer.as_bytes();
     let mut i = 0;
     while i + 4 < bytes.len() {
-        if bytes[i] == 0x1b && bytes[i + 1] == b'[' && bytes[i + 2] == b'6' && bytes[i + 3] == b';' {
+        if bytes[i] == 0x1b && bytes[i + 1] == b'[' && bytes[i + 2] == b'6' && bytes[i + 3] == b';'
+        {
             let mut j = i + 4;
             let mut height: u32 = 0;
             let mut has_height = false;
             while j < bytes.len() && bytes[j].is_ascii_digit() {
-                height = height.saturating_mul(10).saturating_add((bytes[j] - b'0') as u32);
+                height = height
+                    .saturating_mul(10)
+                    .saturating_add((bytes[j] - b'0') as u32);
                 has_height = true;
                 j += 1;
             }
@@ -567,7 +600,9 @@ fn find_cell_size_response(buffer: &str) -> Option<(usize, usize, u32, u32)> {
             let mut width: u32 = 0;
             let mut has_width = false;
             while j < bytes.len() && bytes[j].is_ascii_digit() {
-                width = width.saturating_mul(10).saturating_add((bytes[j] - b'0') as u32);
+                width = width
+                    .saturating_mul(10)
+                    .saturating_add((bytes[j] - b'0') as u32);
                 has_width = true;
                 j += 1;
             }
@@ -598,8 +633,8 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 mod tests {
     use super::{find_cell_size_response, OverlayOptions, TuiRuntime};
     use crate::core::component::Component;
-    use crate::core::terminal_image::{get_cell_dimensions, reset_capabilities_cache};
     use crate::core::terminal::Terminal;
+    use crate::core::terminal_image::{get_cell_dimensions, reset_capabilities_cache};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::Ordering;
@@ -624,17 +659,30 @@ mod tests {
     }
 
     impl Terminal for TestTerminal {
-        fn start(&mut self, _on_input: Box<dyn FnMut(String) + Send>, _on_resize: Box<dyn FnMut() + Send>) {}
+        fn start(
+            &mut self,
+            _on_input: Box<dyn FnMut(String) + Send>,
+            _on_resize: Box<dyn FnMut() + Send>,
+        ) {
+        }
         fn stop(&mut self) {}
         fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
         fn write(&mut self, data: &str) {
             self.output.push_str(data);
         }
         fn columns(&self) -> u16 {
-            if self.columns == 0 { 80 } else { self.columns }
+            if self.columns == 0 {
+                80
+            } else {
+                self.columns
+            }
         }
         fn rows(&self) -> u16 {
-            if self.rows == 0 { 24 } else { self.rows }
+            if self.rows == 0 {
+                24
+            } else {
+                self.rows
+            }
         }
         fn kitty_protocol_active(&self) -> bool {
             false
@@ -796,10 +844,12 @@ mod tests {
     fn overlay_focus_handoff_and_restore() {
         let terminal = TestTerminal::new(80, 24);
         let root_focus = Rc::new(RefCell::new(false));
-        let root_component =
-            TestComponent::new(false, Rc::new(RefCell::new(Vec::new())), Rc::clone(&root_focus));
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(root_component)));
+        let root_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&root_focus),
+        );
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
         let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
 
         runtime.start();
@@ -827,10 +877,12 @@ mod tests {
     fn overlay_visibility_callback_on_resize() {
         let terminal = TestTerminal::new(5, 10);
         let root_focus = Rc::new(RefCell::new(false));
-        let root_component =
-            TestComponent::new(false, Rc::new(RefCell::new(Vec::new())), Rc::clone(&root_focus));
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(root_component)));
+        let root_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&root_focus),
+        );
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
         let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
         runtime.start();
         runtime.set_focus(Rc::clone(&root));

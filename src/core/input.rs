@@ -431,7 +431,8 @@ pub fn matches_key(data: &str, key_id: &str, kitty_active: bool) -> bool {
                         }
                     }
 
-                    if parsed.alt && !parsed.ctrl && !parsed.shift && !kitty_active && is_letter(ch) {
+                    if parsed.alt && !parsed.ctrl && !parsed.shift && !kitty_active && is_letter(ch)
+                    {
                         if data == format!("\x1b{}", ch) {
                             return true;
                         }
@@ -770,9 +771,36 @@ fn is_letter(ch: char) -> bool {
 fn is_symbol_key(ch: char) -> bool {
     matches!(
         ch,
-        '`' | '-' | '=' | '[' | ']' | '\\' | ';' | '\'' | ',' | '.' | '/' | '!' | '@' | '#'
-            | '$' | '%' | '^' | '&' | '*' | '(' | ')' | '_' | '+' | '|' | '~' | '{' | '}'
-            | ':' | '<' | '>' | '?'
+        '`' | '-'
+            | '='
+            | '['
+            | ']'
+            | '\\'
+            | ';'
+            | '\''
+            | ','
+            | '.'
+            | '/'
+            | '!'
+            | '@'
+            | '#'
+            | '$'
+            | '%'
+            | '^'
+            | '&'
+            | '*'
+            | '('
+            | ')'
+            | '_'
+            | '+'
+            | '|'
+            | '~'
+            | '{'
+            | '}'
+            | ':'
+            | '<'
+            | '>'
+            | '?'
     )
 }
 
@@ -801,7 +829,13 @@ fn parse_kitty_sequence(data: &str) -> Option<ParsedKittySequence> {
             return None;
         }
 
-        let shifted_key = shifted.and_then(|value| if value.is_empty() { None } else { value.parse().ok() });
+        let shifted_key = shifted.and_then(|value| {
+            if value.is_empty() {
+                None
+            } else {
+                value.parse().ok()
+            }
+        });
         let base_layout_key = base.and_then(|value| value.parse().ok());
 
         let (modifier, event_type) = if let Some(mod_part) = mod_part {
@@ -1171,8 +1205,14 @@ mod tests {
 
     #[test]
     fn base_layout_fallback_for_non_latin_only() {
-        assert_eq!(parse_key("\x1b[1089::99;5u", true), Some("ctrl+c".to_string()));
-        assert_eq!(parse_key("\x1b[99::118;5u", true), Some("ctrl+c".to_string()));
+        assert_eq!(
+            parse_key("\x1b[1089::99;5u", true),
+            Some("ctrl+c".to_string())
+        );
+        assert_eq!(
+            parse_key("\x1b[99::118;5u", true),
+            Some("ctrl+c".to_string())
+        );
     }
 
     #[test]

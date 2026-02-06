@@ -3,7 +3,11 @@
 /// Minimal terminal interface for the TUI.
 pub trait Terminal {
     /// Start the terminal with input and resize handlers.
-    fn start(&mut self, on_input: Box<dyn FnMut(String) + Send>, on_resize: Box<dyn FnMut() + Send>);
+    fn start(
+        &mut self,
+        on_input: Box<dyn FnMut(String) + Send>,
+        on_resize: Box<dyn FnMut() + Send>,
+    );
 
     /// Stop the terminal and restore state.
     fn stop(&mut self);

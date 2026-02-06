@@ -18,13 +18,44 @@ pub fn is_whitespace_char(ch: char) -> bool {
 pub fn is_punctuation_char(ch: char) -> bool {
     matches!(
         ch,
-        '(' | ')' | '{' | '}' | '[' | ']' | '<' | '>' | '.' | ',' | ';' | ':' | '\'' | '"'
-            | '!' | '?' | '+' | '-' | '=' | '*' | '/' | '\\' | '|' | '&' | '%' | '^' | '$' | '#'
-            | '@' | '~' | '`'
+        '(' | ')'
+            | '{'
+            | '}'
+            | '['
+            | ']'
+            | '<'
+            | '>'
+            | '.'
+            | ','
+            | ';'
+            | ':'
+            | '\''
+            | '"'
+            | '!'
+            | '?'
+            | '+'
+            | '-'
+            | '='
+            | '*'
+            | '/'
+            | '\\'
+            | '|'
+            | '&'
+            | '%'
+            | '^'
+            | '$'
+            | '#'
+            | '@'
+            | '~'
+            | '`'
     )
 }
 
-pub fn apply_background_to_line(line: &str, width: usize, bg_fn: &dyn Fn(&str) -> String) -> String {
+pub fn apply_background_to_line(
+    line: &str,
+    width: usize,
+    bg_fn: &dyn Fn(&str) -> String,
+) -> String {
     let visible_len = visible_width(line);
     let padding_needed = width.saturating_sub(visible_len);
     let mut with_padding = String::with_capacity(line.len() + padding_needed);
@@ -119,7 +150,10 @@ fn next_ansi_or_end(input: &str, mut idx: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_background_to_line, grapheme_segments, is_punctuation_char, is_whitespace_char, truncate_to_width};
+    use super::{
+        apply_background_to_line, grapheme_segments, is_punctuation_char, is_whitespace_char,
+        truncate_to_width,
+    };
     use crate::core::text::width::visible_width;
 
     #[test]
@@ -183,4 +217,3 @@ mod tests {
         assert_eq!(clusters, vec!["a", "🇺🇸"]);
     }
 }
-

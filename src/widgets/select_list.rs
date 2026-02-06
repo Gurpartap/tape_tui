@@ -34,7 +34,11 @@ pub struct SelectItem {
 }
 
 impl SelectItem {
-    pub fn new(value: impl Into<String>, label: impl Into<String>, description: Option<String>) -> Self {
+    pub fn new(
+        value: impl Into<String>,
+        label: impl Into<String>,
+        description: Option<String>,
+    ) -> Self {
         Self {
             value: value.into(),
             label: label.into(),
@@ -66,7 +70,12 @@ pub struct SelectList {
 
 impl SelectList {
     pub fn new(items: Vec<SelectItem>, max_visible: usize, theme: SelectListTheme) -> Self {
-        Self::new_with_keybindings_handle(items, max_visible, theme, default_editor_keybindings_handle())
+        Self::new_with_keybindings_handle(
+            items,
+            max_visible,
+            theme,
+            default_editor_keybindings_handle(),
+        )
     }
 
     pub fn new_with_keybindings_handle(
@@ -132,9 +141,18 @@ impl SelectList {
         }
     }
 
-    fn render_selected(&self, width: usize, item: &SelectItem, description: Option<&str>) -> String {
+    fn render_selected(
+        &self,
+        width: usize,
+        item: &SelectItem,
+        description: Option<&str>,
+    ) -> String {
         let prefix_width = 2;
-        let display_value = if item.label.is_empty() { &item.value } else { &item.label };
+        let display_value = if item.label.is_empty() {
+            &item.value
+        } else {
+            &item.label
+        };
 
         if let Some(description) = description {
             if width > 40 {
@@ -146,7 +164,9 @@ impl SelectList {
                 let remaining_width = width.saturating_sub(description_start + 2);
                 if remaining_width > 10 {
                     let truncated_desc = truncate_to_width(description, remaining_width, "", false);
-                    return (self.theme.selected_text)(&format!("→ {truncated_value}{spacing}{truncated_desc}"));
+                    return (self.theme.selected_text)(&format!(
+                        "→ {truncated_value}{spacing}{truncated_desc}"
+                    ));
                 }
             }
         }
@@ -156,9 +176,18 @@ impl SelectList {
         (self.theme.selected_text)(&format!("→ {truncated_value}"))
     }
 
-    fn render_unselected(&self, width: usize, item: &SelectItem, description: Option<&str>) -> String {
+    fn render_unselected(
+        &self,
+        width: usize,
+        item: &SelectItem,
+        description: Option<&str>,
+    ) -> String {
         let prefix = "  ";
-        let display_value = if item.label.is_empty() { &item.value } else { &item.label };
+        let display_value = if item.label.is_empty() {
+            &item.value
+        } else {
+            &item.label
+        };
 
         if let Some(description) = description {
             if width > 40 {
@@ -225,7 +254,11 @@ impl Component for SelectList {
         }
 
         if start_index > 0 || end_index < self.filtered_items.len() {
-            let scroll_text = format!("  ({}/{})", self.selected_index + 1, self.filtered_items.len());
+            let scroll_text = format!(
+                "  ({}/{})",
+                self.selected_index + 1,
+                self.filtered_items.len()
+            );
             let truncated = truncate_to_width(&scroll_text, width.saturating_sub(2), "", false);
             lines.push((self.theme.scroll_info)(&truncated));
         }

@@ -72,12 +72,14 @@ mod tests {
     #[test]
     fn container_concatenates_children() {
         let mut container = Container::new();
-        let first: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(StaticComponent {
-            lines: vec!["one".to_string()],
-        })));
-        let second: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(StaticComponent {
-            lines: vec!["two".to_string(), "three".to_string()],
-        })));
+        let first: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(StaticComponent {
+                lines: vec!["one".to_string()],
+            })));
+        let second: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(StaticComponent {
+                lines: vec!["two".to_string(), "three".to_string()],
+            })));
         container.add_child(Rc::clone(&first));
         container.add_child(Rc::clone(&second));
 
@@ -88,12 +90,14 @@ mod tests {
     #[test]
     fn remove_child_by_reference() {
         let mut container = Container::new();
-        let first: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(StaticComponent {
-            lines: vec!["one".to_string()],
-        })));
-        let second: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(StaticComponent {
-            lines: vec!["two".to_string()],
-        })));
+        let first: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(StaticComponent {
+                lines: vec!["one".to_string()],
+            })));
+        let second: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(StaticComponent {
+                lines: vec!["two".to_string()],
+            })));
         container.add_child(Rc::clone(&first));
         container.add_child(Rc::clone(&second));
 

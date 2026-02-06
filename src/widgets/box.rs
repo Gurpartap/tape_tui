@@ -24,7 +24,11 @@ pub struct Box {
 }
 
 impl Box {
-    pub fn new(padding_x: usize, padding_y: usize, bg_fn: Option<StdBox<dyn Fn(&str) -> String>>) -> Self {
+    pub fn new(
+        padding_x: usize,
+        padding_y: usize,
+        bg_fn: Option<StdBox<dyn Fn(&str) -> String>>,
+    ) -> Self {
         Self {
             children: Vec::new(),
             padding_x,
@@ -66,7 +70,12 @@ impl Box {
         self.cache = None;
     }
 
-    fn match_cache(&self, width: usize, child_lines: &[String], bg_sample: &Option<String>) -> bool {
+    fn match_cache(
+        &self,
+        width: usize,
+        child_lines: &[String],
+        bg_sample: &Option<String>,
+    ) -> bool {
         let Some(cache) = &self.cache else {
             return false;
         };
@@ -180,9 +189,10 @@ mod tests {
     #[test]
     fn box_pads_children_to_width() {
         let mut boxed = BoxWidget::new(1, 1, None);
-        let child: Rc<RefCell<StdBox<dyn Component>>> = Rc::new(RefCell::new(StdBox::new(StaticComponent {
-            lines: vec!["hi".to_string()],
-        })));
+        let child: Rc<RefCell<StdBox<dyn Component>>> =
+            Rc::new(RefCell::new(StdBox::new(StaticComponent {
+                lines: vec!["hi".to_string()],
+            })));
         boxed.add_child(child);
 
         let lines = boxed.render(6);

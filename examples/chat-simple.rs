@@ -283,56 +283,58 @@ fn main() {
     let chat_state = Rc::new(RefCell::new(ChatState::new()));
     let state_for_submit = Rc::clone(&chat_state);
     let render_for_submit = render_handle.clone();
-    editor.borrow_mut().set_on_submit(Some(Box::new(move |value| {
-        let trimmed = value.trim();
-        let mut state = state_for_submit.borrow_mut();
+    editor
+        .borrow_mut()
+        .set_on_submit(Some(Box::new(move |value| {
+            let trimmed = value.trim();
+            let mut state = state_for_submit.borrow_mut();
 
-        if state.responding {
-            return;
-        }
-
-        if trimmed == "/delete" {
-            if state.messages.len() > 1 {
-                state.messages.pop();
+            if state.responding {
+                return;
             }
-            render_for_submit.request_render();
-            return;
-        }
 
-        if trimmed == "/clear" {
-            if state.messages.len() > 1 {
-                state.messages.truncate(1);
+            if trimmed == "/delete" {
+                if state.messages.len() > 1 {
+                    state.messages.pop();
+                }
+                render_for_submit.request_render();
+                return;
             }
+
+            if trimmed == "/clear" {
+                if state.messages.len() > 1 {
+                    state.messages.truncate(1);
+                }
+                render_for_submit.request_render();
+                return;
+            }
+
+            if trimmed.is_empty() {
+                return;
+            }
+
+            state.responding = true;
+            drop(state);
+
+            let mut state = state_for_submit.borrow_mut();
+            let user_message = Markdown::new(value, 1, 1, markdown_theme(), None);
+            state.messages.push(user_message);
+
+            let loader = Loader::new(
+                render_for_submit.clone(),
+                Box::new(|text| cyan(text)),
+                Box::new(|text| dim(text)),
+                Some("Thinking...".to_string()),
+            );
+            state.loader = Some(loader);
+
+            let response = pick_response();
+            state.pending = Some(PendingResponse {
+                due: Instant::now() + Duration::from_millis(1000),
+                message: response,
+            });
             render_for_submit.request_render();
-            return;
-        }
-
-        if trimmed.is_empty() {
-            return;
-        }
-
-        state.responding = true;
-        drop(state);
-
-        let mut state = state_for_submit.borrow_mut();
-        let user_message = Markdown::new(value, 1, 1, markdown_theme(), None);
-        state.messages.push(user_message);
-
-        let loader = Loader::new(
-            render_for_submit.clone(),
-            Box::new(|text| cyan(text)),
-            Box::new(|text| dim(text)),
-            Some("Thinking...".to_string()),
-        );
-        state.loader = Some(loader);
-
-        let response = pick_response();
-        state.pending = Some(PendingResponse {
-            due: Instant::now() + Duration::from_millis(1000),
-            message: response,
-        });
-        render_for_submit.request_render();
-    })));
+        })));
 
     let welcome = Text::new(WELCOME_TEXT);
     let chat_app = ChatApp {
@@ -343,9 +345,12 @@ fn main() {
     *root.borrow_mut() = Box::new(chat_app);
 
     let exit_flag = Rc::new(RefCell::new(false));
-    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
-        EditorWrapper::new(Rc::clone(&editor), Rc::clone(&exit_flag), Rc::clone(&chat_state)),
-    )));
+    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> =
+        Rc::new(RefCell::new(Box::new(EditorWrapper::new(
+            Rc::clone(&editor),
+            Rc::clone(&exit_flag),
+            Rc::clone(&chat_state),
+        ))));
     tui.set_focus(Rc::clone(&editor_wrapper));
 
     tui.start();
@@ -372,10 +377,13 @@ fn main() {
 
         if let Some(message) = response_to_add {
             editor.borrow_mut().set_disable_submit(false);
-            chat_state
-                .borrow_mut()
-                .messages
-                .push(Markdown::new(message, 1, 1, markdown_theme(), None));
+            chat_state.borrow_mut().messages.push(Markdown::new(
+                message,
+                1,
+                1,
+                markdown_theme(),
+                None,
+            ));
             render_handle.request_render();
         }
 

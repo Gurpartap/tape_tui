@@ -12,4 +12,3 @@ pub struct InputEvent {
     pub key_id: Option<String>,
     pub event_type: KeyEventType,
 }
-

@@ -30,11 +30,15 @@ pub struct RenderDebugInfo<'a> {
 }
 
 pub fn debug_redraw_enabled() -> bool {
-    env::var(DEBUG_REDRAW_ENV).map(|value| value == "1").unwrap_or(false)
+    env::var(DEBUG_REDRAW_ENV)
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 pub fn tui_debug_enabled() -> bool {
-    env::var(TUI_DEBUG_ENV).map(|value| value == "1").unwrap_or(false)
+    env::var(TUI_DEBUG_ENV)
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 pub fn log_debug_redraw(reason: &str, previous_len: usize, new_len: usize, height: usize) {
@@ -76,11 +80,22 @@ fn tui_debug_log_path() -> Option<PathBuf> {
         .unwrap_or_default()
         .as_millis();
     let counter = DEBUG_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let filename = format!("render-{}-{}-{}.log", timestamp, std::process::id(), counter);
+    let filename = format!(
+        "render-{}-{}-{}.log",
+        timestamp,
+        std::process::id(),
+        counter
+    );
     Some(dir.join(filename))
 }
 
-fn write_debug_redraw(path: &Path, reason: &str, previous_len: usize, new_len: usize, height: usize) {
+fn write_debug_redraw(
+    path: &Path,
+    reason: &str,
+    previous_len: usize,
+    new_len: usize,
+    height: usize,
+) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -114,7 +129,10 @@ fn write_tui_debug(path: &Path, info: &RenderDebugInfo<'_>) {
     data.push_str(&format!("cursor_row: {}\n", info.cursor_row));
     data.push_str(&format!("height: {}\n", info.height));
     data.push_str(&format!("line_diff: {}\n", info.line_diff));
-    data.push_str(&format!("hardware_cursor_row: {}\n", info.hardware_cursor_row));
+    data.push_str(&format!(
+        "hardware_cursor_row: {}\n",
+        info.hardware_cursor_row
+    ));
     data.push_str(&format!("render_end: {}\n", info.render_end));
     data.push_str(&format!("final_cursor_row: {}\n", info.final_cursor_row));
     data.push_str(&format!("new_lines_len: {}\n", info.new_lines.len()));

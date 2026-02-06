@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = fs::read_dir(dir).unwrap_or_else(|err| panic!("read_dir({}): {err}", dir.display()));
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|err| panic!("read_dir({}): {err}", dir.display()));
     for entry in entries {
         let entry = entry.unwrap_or_else(|err| panic!("read_dir entry ({}): {err}", dir.display()));
         let path = entry.path();
@@ -25,7 +26,8 @@ fn widgets_do_not_depend_on_render_layer() {
 
     let mut offenders = Vec::new();
     for file in files {
-        let contents = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read_to_string({}): {err}", file.display()));
+        let contents = fs::read_to_string(&file)
+            .unwrap_or_else(|err| panic!("read_to_string({}): {err}", file.display()));
         if contents.contains("crate::render::")
             || contents.contains("use crate::render")
             || contents.contains("pi_tui::render::")
@@ -50,4 +52,3 @@ fn widgets_do_not_depend_on_render_layer() {
             .join("\n")
     );
 }
-

@@ -84,7 +84,12 @@ mod tests {
     }
 
     impl Terminal for TestTerminal {
-        fn start(&mut self, _on_input: Box<dyn FnMut(String) + Send>, _on_resize: Box<dyn FnMut() + Send>) {}
+        fn start(
+            &mut self,
+            _on_input: Box<dyn FnMut(String) + Send>,
+            _on_resize: Box<dyn FnMut() + Send>,
+        ) {
+        }
         fn stop(&mut self) {}
         fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
         fn write(&mut self, data: &str) {

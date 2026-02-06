@@ -131,7 +131,9 @@ pub fn resolve_overlay_layout(
     let margin_left = margin.left.unwrap_or(0);
 
     let avail_width = term_width.saturating_sub(margin_left + margin_right).max(1);
-    let avail_height = term_height.saturating_sub(margin_top + margin_bottom).max(1);
+    let avail_height = term_height
+        .saturating_sub(margin_top + margin_bottom)
+        .max(1);
 
     let mut width = parse_size_value(opt.width, term_width).unwrap_or_else(|| 80.min(avail_width));
     if let Some(min_width) = opt.min_width {
@@ -267,7 +269,13 @@ pub fn composite_line_at(
     }
 
     let after_start = start_col.saturating_add(overlay_width);
-    let base = extract_segments(base_line, start_col, after_start, total_width.saturating_sub(after_start), true);
+    let base = extract_segments(
+        base_line,
+        start_col,
+        after_start,
+        total_width.saturating_sub(after_start),
+        true,
+    );
     let overlay = slice_with_width(overlay_line, 0, overlay_width, true);
 
     let before_pad = start_col.saturating_sub(base.before_width);
@@ -294,7 +302,12 @@ pub fn composite_line_at(
     slice_by_column(&result, 0, total_width, true)
 }
 
-fn resolve_anchor_row(anchor: OverlayAnchor, height: usize, avail_height: usize, margin_top: usize) -> usize {
+fn resolve_anchor_row(
+    anchor: OverlayAnchor,
+    height: usize,
+    avail_height: usize,
+    margin_top: usize,
+) -> usize {
     match anchor {
         OverlayAnchor::TopLeft | OverlayAnchor::TopCenter | OverlayAnchor::TopRight => margin_top,
         OverlayAnchor::BottomLeft | OverlayAnchor::BottomCenter | OverlayAnchor::BottomRight => {
@@ -306,9 +319,16 @@ fn resolve_anchor_row(anchor: OverlayAnchor, height: usize, avail_height: usize,
     }
 }
 
-fn resolve_anchor_col(anchor: OverlayAnchor, width: usize, avail_width: usize, margin_left: usize) -> usize {
+fn resolve_anchor_col(
+    anchor: OverlayAnchor,
+    width: usize,
+    avail_width: usize,
+    margin_left: usize,
+) -> usize {
     match anchor {
-        OverlayAnchor::TopLeft | OverlayAnchor::LeftCenter | OverlayAnchor::BottomLeft => margin_left,
+        OverlayAnchor::TopLeft | OverlayAnchor::LeftCenter | OverlayAnchor::BottomLeft => {
+            margin_left
+        }
         OverlayAnchor::TopRight | OverlayAnchor::RightCenter | OverlayAnchor::BottomRight => {
             margin_left + avail_width.saturating_sub(width)
         }

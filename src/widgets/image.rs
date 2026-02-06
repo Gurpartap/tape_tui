@@ -110,11 +110,19 @@ impl Component for Image {
                     lines.push(format!("{move_up}{}", result.sequence));
                 }
             } else {
-                let fallback = image_fallback(&self.mime_type, Some(self.dimensions), self.options.filename.as_deref());
+                let fallback = image_fallback(
+                    &self.mime_type,
+                    Some(self.dimensions),
+                    self.options.filename.as_deref(),
+                );
                 lines.push((self.theme.fallback_color)(&fallback));
             }
         } else {
-            let fallback = image_fallback(&self.mime_type, Some(self.dimensions), self.options.filename.as_deref());
+            let fallback = image_fallback(
+                &self.mime_type,
+                Some(self.dimensions),
+                self.options.filename.as_deref(),
+            );
             lines.push((self.theme.fallback_color)(&fallback));
         }
 
@@ -165,7 +173,7 @@ mod tests {
 
     fn theme() -> ImageTheme {
         ImageTheme {
-            fallback_color: Box::new(|text| format!("<{text}>") ),
+            fallback_color: Box::new(|text| format!("<{text}>")),
         }
     }
 

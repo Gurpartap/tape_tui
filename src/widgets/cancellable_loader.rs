@@ -98,7 +98,12 @@ impl CancellableLoader {
         message: Option<String>,
     ) -> Self {
         let keybindings = default_editor_keybindings_handle();
-        let loader = super::loader::Loader::with_requester(render_requester, spinner_color_fn, message_color_fn, message);
+        let loader = super::loader::Loader::with_requester(
+            render_requester,
+            spinner_color_fn,
+            message_color_fn,
+            message,
+        );
         let aborted = Arc::new(AtomicBool::new(false));
         Self {
             loader,

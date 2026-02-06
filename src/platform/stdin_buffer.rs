@@ -114,10 +114,7 @@ impl StdinBuffer {
 
     pub fn flush_events(&mut self) -> Vec<StdinEvent> {
         let sequences = self.flush();
-        sequences
-            .into_iter()
-            .map(StdinEvent::Data)
-            .collect()
+        sequences.into_iter().map(StdinEvent::Data).collect()
     }
 
     pub fn flush(&mut self) -> Vec<String> {
@@ -151,7 +148,8 @@ impl StdinBuffer {
 
             if let Some(end_index) = self.paste_buffer.find(BRACKETED_PASTE_END) {
                 let pasted = self.paste_buffer[..end_index].to_string();
-                let remaining = self.paste_buffer[end_index + BRACKETED_PASTE_END.len()..].to_string();
+                let remaining =
+                    self.paste_buffer[end_index + BRACKETED_PASTE_END.len()..].to_string();
 
                 self.paste_mode = false;
                 self.paste_buffer.clear();
@@ -182,7 +180,8 @@ impl StdinBuffer {
 
             if let Some(end_index) = self.paste_buffer.find(BRACKETED_PASTE_END) {
                 let pasted = self.paste_buffer[..end_index].to_string();
-                let remaining = self.paste_buffer[end_index + BRACKETED_PASTE_END.len()..].to_string();
+                let remaining =
+                    self.paste_buffer[end_index + BRACKETED_PASTE_END.len()..].to_string();
 
                 self.paste_mode = false;
                 self.paste_buffer.clear();
@@ -331,7 +330,10 @@ fn is_complete_csi_sequence(data: &str) -> SequenceStatus {
             if last_char == 'M' || last_char == 'm' {
                 let inner = &payload[1..payload.len() - 1];
                 let parts: Vec<&str> = inner.split(';').collect();
-                if parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+                if parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
                 {
                     return SequenceStatus::Complete;
                 }

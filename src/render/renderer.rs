@@ -1,10 +1,10 @@
 //! Diff renderer (Phase 4).
 
 use crate::core::terminal::Terminal;
+use crate::core::text::width::visible_width;
 use crate::logging::{
     debug_redraw_enabled, log_debug_redraw, log_tui_debug, tui_debug_enabled, RenderDebugInfo,
 };
-use crate::core::text::width::visible_width;
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
 const SYNC_START: &str = "\x1b[?2026h";
@@ -106,7 +106,12 @@ impl DiffRenderer {
 
         if self.previous_lines.is_empty() && !width_changed {
             if debug_redraw_enabled() {
-                log_debug_redraw("first render", self.previous_lines.len(), lines.len(), height);
+                log_debug_redraw(
+                    "first render",
+                    self.previous_lines.len(),
+                    lines.len(),
+                    height,
+                );
             }
             self.full_render(term, &lines, width, height, false);
             return;
@@ -123,7 +128,10 @@ impl DiffRenderer {
 
         if clear_on_shrink && lines.len() < self.max_lines_rendered && !has_overlays {
             if debug_redraw_enabled() {
-                let reason = format!("clearOnShrink (maxLinesRendered={})", self.max_lines_rendered);
+                let reason = format!(
+                    "clearOnShrink (maxLinesRendered={})",
+                    self.max_lines_rendered
+                );
                 log_debug_redraw(&reason, self.previous_lines.len(), lines.len(), height);
             }
             self.full_render(term, &lines, width, height, true);
@@ -158,7 +166,8 @@ impl DiffRenderer {
         };
         let last_changed = last_changed.unwrap_or(first_changed);
 
-        let append_start = appended_lines && first_changed == self.previous_lines.len() && first_changed > 0;
+        let append_start =
+            appended_lines && first_changed == self.previous_lines.len() && first_changed > 0;
 
         if first_changed >= lines.len() {
             if self.previous_lines.len() > lines.len() {
@@ -231,8 +240,9 @@ impl DiffRenderer {
         };
 
         if move_target_row > prev_viewport_bottom {
-            let current_screen_row =
-                hardware_cursor_row.saturating_sub(prev_viewport_top).min(height.saturating_sub(1));
+            let current_screen_row = hardware_cursor_row
+                .saturating_sub(prev_viewport_top)
+                .min(height.saturating_sub(1));
             let move_to_bottom = height.saturating_sub(1).saturating_sub(current_screen_row);
             if move_to_bottom > 0 {
                 buffer.push_str(&format!("\x1b[{}B", move_to_bottom));
@@ -362,7 +372,12 @@ mod tests {
     }
 
     impl Terminal for TestTerminal {
-        fn start(&mut self, _on_input: Box<dyn FnMut(String) + Send>, _on_resize: Box<dyn FnMut() + Send>) {}
+        fn start(
+            &mut self,
+            _on_input: Box<dyn FnMut(String) + Send>,
+            _on_resize: Box<dyn FnMut() + Send>,
+        ) {
+        }
         fn stop(&mut self) {}
         fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
         fn write(&mut self, data: &str) {
@@ -432,11 +447,23 @@ mod tests {
     fn overflow_panics_only_on_diff_path() {
         let mut renderer = DiffRenderer::new();
         let mut term = TestTerminal::new(5, 5);
-        renderer.render(&mut term, vec!["123456".to_string()], not_image, false, false);
+        renderer.render(
+            &mut term,
+            vec!["123456".to_string()],
+            not_image,
+            false,
+            false,
+        );
         term.take_output();
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            renderer.render(&mut term, vec!["abcdef".to_string()], not_image, false, false);
+            renderer.render(
+                &mut term,
+                vec!["abcdef".to_string()],
+                not_image,
+                false,
+                false,
+            );
         }));
         assert!(result.is_err());
     }
@@ -457,7 +484,13 @@ mod tests {
     fn segment_reset_appended_to_non_image_lines() {
         let mut renderer = DiffRenderer::new();
         let mut term = TestTerminal::new(20, 5);
-        renderer.render(&mut term, vec!["hello".to_string()], not_image, false, false);
+        renderer.render(
+            &mut term,
+            vec!["hello".to_string()],
+            not_image,
+            false,
+            false,
+        );
         let output = term.take_output();
         assert!(output.contains("hello\x1b[0m\x1b]8;;\x07"));
     }

@@ -275,13 +275,17 @@ impl Component for Input {
                 let cursor = self.cursor.min(text.len());
                 (text, cursor)
             } else if self.cursor > self.value.len().saturating_sub(half_width) {
-                let start = find_valid_start(&self.value, self.value.len().saturating_sub(scroll_width));
+                let start =
+                    find_valid_start(&self.value, self.value.len().saturating_sub(scroll_width));
                 let text = self.value[start..].to_string();
                 let cursor = self.cursor.saturating_sub(start);
                 (text, cursor)
             } else {
                 let start = find_valid_start(&self.value, self.cursor.saturating_sub(half_width));
-                let end = find_valid_end(&self.value, start.saturating_add(scroll_width).min(self.value.len()));
+                let end = find_valid_end(
+                    &self.value,
+                    start.saturating_add(scroll_width).min(self.value.len()),
+                );
                 let text = self.value[start..end].to_string();
                 let mut cursor = self.cursor.saturating_sub(start);
                 if !text.is_char_boundary(cursor) {
@@ -309,7 +313,8 @@ impl Component for Input {
 
         let marker = if self.focused { CURSOR_MARKER } else { "" };
         let cursor_char = format!("\x1b[7m{at_cursor}\x1b[27m");
-        let mut text_with_cursor = String::with_capacity(visible_text.len() + marker.len() + cursor_char.len());
+        let mut text_with_cursor =
+            String::with_capacity(visible_text.len() + marker.len() + cursor_char.len());
         text_with_cursor.push_str(before_cursor);
         text_with_cursor.push_str(marker);
         text_with_cursor.push_str(&cursor_char);

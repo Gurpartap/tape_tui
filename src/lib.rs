@@ -6,21 +6,23 @@ pub mod config;
 pub mod logging;
 
 pub mod core;
+pub mod platform;
 pub mod render;
 pub mod runtime;
-pub mod platform;
 pub mod widgets;
 
 // Autocomplete support
 pub use crate::core::autocomplete::{
-    AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider, SlashCommand,
+    AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions, CombinedAutocompleteProvider,
+    SlashCommand,
 };
 
 // Components
 pub use crate::widgets::{
-    Box, CancellableLoader, Container, DefaultTextStyle, Editor, EditorHeightMode, EditorOptions, EditorPasteMode,
-    EditorTheme, Image, ImageOptions, ImageTheme, Input, Loader, Markdown, MarkdownTheme, SelectItem, SelectList,
-    SelectListTheme, SettingItem, SettingsList, SettingsListTheme, Spacer, Text, TruncatedText,
+    Box, CancellableLoader, Container, DefaultTextStyle, Editor, EditorHeightMode, EditorOptions,
+    EditorPasteMode, EditorTheme, Image, ImageOptions, ImageTheme, Input, Loader, Markdown,
+    MarkdownTheme, SelectItem, SelectList, SelectListTheme, SettingItem, SettingsList,
+    SettingsListTheme, Spacer, Text, TruncatedText,
 };
 
 // Editor component interface
@@ -31,8 +33,8 @@ pub use crate::core::fuzzy::{fuzzy_filter, fuzzy_match, FuzzyMatch};
 
 // Keybindings
 pub use crate::core::keybindings::{
-    default_editor_keybindings_handle, EditorAction, EditorKeybindingsConfig, EditorKeybindingsHandle,
-    EditorKeybindingsManager, KeyId, DEFAULT_EDITOR_KEYBINDINGS,
+    default_editor_keybindings_handle, EditorAction, EditorKeybindingsConfig,
+    EditorKeybindingsHandle, EditorKeybindingsManager, KeyId, DEFAULT_EDITOR_KEYBINDINGS,
 };
 
 // Keyboard input handling
