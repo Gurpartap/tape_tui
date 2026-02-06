@@ -320,10 +320,11 @@ pub struct TuiRuntime<T: Terminal> {
 - `stdin.pause()` before leaving raw mode.
 - `drainInput()` to prevent key‑release leakage.
 - Restore raw mode and cursor visibility.
-- TUI `stop()` moves cursor to end of content, prints newline, then restores.
+- TUI `stop()` moves cursor to end of content, prints newline, drains input, then restores.
 
 **Rust plan:**
 - `TerminalGuard` (Drop) calls `drain_input()` then `stop()`.
+- `TuiRuntime` runs the same teardown on `Drop` (and `stop()` drains input before stopping the terminal).
 - `panic::set_hook` + `signal-hook` (SIGINT/SIGTERM) to ensure cleanup.
 
 ---

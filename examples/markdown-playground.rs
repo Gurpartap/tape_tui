@@ -540,8 +540,6 @@ fn main() {
 
         thread::sleep(Duration::from_millis(16));
     }
-
-    tui.stop();
 }
 
 #[derive(Default)]

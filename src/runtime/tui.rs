@@ -15,6 +15,9 @@ use crate::render::renderer::DiffRenderer;
 use crate::runtime::focus::FocusState;
 use crate::runtime::ime::{extract_cursor_position, position_hardware_cursor};
 
+const STOP_DRAIN_MAX_MS: u64 = 1000;
+const STOP_DRAIN_IDLE_MS: u64 = 50;
+
 pub struct TuiRuntime<T: Terminal> {
     terminal: T,
     root: Rc<RefCell<Box<dyn Component>>>,
@@ -214,10 +217,12 @@ impl<T: Terminal> TuiRuntime<T> {
         if self.stopped {
             return;
         }
-        self.stopped = true;
         self.place_cursor_at_end();
         self.terminal.show_cursor();
+        self.terminal
+            .drain_input(STOP_DRAIN_MAX_MS, STOP_DRAIN_IDLE_MS);
         self.terminal.stop();
+        self.stopped = true;
     }
 
     pub fn run_once(&mut self) {
@@ -508,6 +513,19 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 }
 
+impl<T: Terminal> Drop for TuiRuntime<T> {
+    fn drop(&mut self) {
+        if self.stopped {
+            return;
+        }
+
+        // Best-effort cleanup: never panic in Drop (especially during unwind).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.stop();
+        }));
+    }
+}
+
 fn env_flag(name: &str) -> bool {
     env::var(name).map(|value| value == "1").unwrap_or(false)
 }
@@ -569,7 +587,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::atomic::Ordering;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
 
     #[derive(Default)]
@@ -849,5 +867,136 @@ mod tests {
     fn env_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[derive(Default, Debug)]
+    struct TrackingState {
+        show_cursor_calls: usize,
+        drain_input_calls: usize,
+        stop_calls: usize,
+        drain_max_ms: Option<u64>,
+        drain_idle_ms: Option<u64>,
+    }
+
+    #[derive(Clone)]
+    struct TrackingTerminal {
+        state: Arc<Mutex<TrackingState>>,
+    }
+
+    impl TrackingTerminal {
+        fn new(state: Arc<Mutex<TrackingState>>) -> Self {
+            Self { state }
+        }
+
+        fn with_state<F: FnOnce(&TrackingState)>(state: &Arc<Mutex<TrackingState>>, f: F) {
+            let state = state.lock().expect("tracking state lock poisoned");
+            f(&state);
+        }
+    }
+
+    impl Terminal for TrackingTerminal {
+        fn start(
+            &mut self,
+            _on_input: Box<dyn FnMut(String) + Send>,
+            _on_resize: Box<dyn FnMut() + Send>,
+        ) {
+        }
+
+        fn stop(&mut self) {
+            let mut state = self.state.lock().expect("tracking state lock poisoned");
+            state.stop_calls += 1;
+        }
+
+        fn drain_input(&mut self, max_ms: u64, idle_ms: u64) {
+            let mut state = self.state.lock().expect("tracking state lock poisoned");
+            state.drain_input_calls += 1;
+            state.drain_max_ms = Some(max_ms);
+            state.drain_idle_ms = Some(idle_ms);
+        }
+
+        fn write(&mut self, _data: &str) {}
+
+        fn columns(&self) -> u16 {
+            80
+        }
+
+        fn rows(&self) -> u16 {
+            24
+        }
+
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+
+        fn move_by(&mut self, _lines: i32) {}
+
+        fn hide_cursor(&mut self) {}
+
+        fn show_cursor(&mut self) {
+            let mut state = self.state.lock().expect("tracking state lock poisoned");
+            state.show_cursor_calls += 1;
+        }
+
+        fn clear_line(&mut self) {}
+        fn clear_from_cursor(&mut self) {}
+        fn clear_screen(&mut self) {}
+        fn set_title(&mut self, _title: &str) {}
+    }
+
+    #[test]
+    fn drop_stops_terminal_when_started() {
+        let state = Arc::new(Mutex::new(TrackingState::default()));
+        let terminal = TrackingTerminal::new(Arc::clone(&state));
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.start();
+        drop(runtime);
+
+        TrackingTerminal::with_state(&state, |state| {
+            assert_eq!(state.show_cursor_calls, 1);
+            assert_eq!(state.drain_input_calls, 1);
+            assert_eq!(state.stop_calls, 1);
+            assert_eq!(state.drain_max_ms, Some(super::STOP_DRAIN_MAX_MS));
+            assert_eq!(state.drain_idle_ms, Some(super::STOP_DRAIN_IDLE_MS));
+        });
+    }
+
+    #[test]
+    fn stop_then_drop_does_not_double_teardown() {
+        let state = Arc::new(Mutex::new(TrackingState::default()));
+        let terminal = TrackingTerminal::new(Arc::clone(&state));
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.start();
+        runtime.stop();
+        drop(runtime);
+
+        TrackingTerminal::with_state(&state, |state| {
+            assert_eq!(state.show_cursor_calls, 1);
+            assert_eq!(state.drain_input_calls, 1);
+            assert_eq!(state.stop_calls, 1);
+            assert_eq!(state.drain_max_ms, Some(super::STOP_DRAIN_MAX_MS));
+            assert_eq!(state.drain_idle_ms, Some(super::STOP_DRAIN_IDLE_MS));
+        });
+    }
+
+    #[test]
+    fn drop_does_nothing_when_never_started() {
+        let state = Arc::new(Mutex::new(TrackingState::default()));
+        let terminal = TrackingTerminal::new(Arc::clone(&state));
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+
+        drop(TuiRuntime::new(terminal, root));
+
+        TrackingTerminal::with_state(&state, |state| {
+            assert_eq!(state.show_cursor_calls, 0);
+            assert_eq!(state.drain_input_calls, 0);
+            assert_eq!(state.stop_calls, 0);
+        });
     }
 }
