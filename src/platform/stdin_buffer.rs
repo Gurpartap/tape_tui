@@ -408,8 +408,7 @@ mod tests {
         let events = buffer.process(b"\x1b[");
         assert!(events.is_empty());
 
-        std::thread::sleep(Duration::from_millis(15));
-        let events = buffer.flush_due(Instant::now());
+        let events = buffer.flush_due(Instant::now() + Duration::from_millis(15));
         assert_eq!(events, vec![StdinEvent::Data("\x1b[".to_string())]);
     }
 
