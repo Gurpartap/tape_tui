@@ -103,6 +103,18 @@ impl Component for ChatApp {
 
         {
             let mut state = self.state.borrow_mut();
+            if let Some(pending) = state.pending.as_ref() {
+                if Instant::now() >= pending.due {
+                    let message = pending.message.clone();
+                    state.pending = None;
+                    state.responding = false;
+                    state.loader = None;
+                    state
+                        .messages
+                        .push(Markdown::new(message, 1, 1, markdown_theme(), None));
+                    self.editor.borrow_mut().set_disable_submit(false);
+                }
+            }
             for message in state.messages.iter_mut() {
                 lines.extend(message.render(width));
             }
@@ -332,10 +344,21 @@ fn main() -> std::io::Result<()> {
             state.loader = Some(loader);
 
             let response = pick_response();
+            let due = Instant::now() + Duration::from_millis(1000);
             state.pending = Some(PendingResponse {
-                due: Instant::now() + Duration::from_millis(1000),
+                due,
                 message: response,
             });
+            {
+                let render_for_timer = render_for_submit.clone();
+                thread::spawn(move || {
+                    let now = Instant::now();
+                    if due > now {
+                        thread::sleep(due - now);
+                    }
+                    render_for_timer.request_render();
+                });
+            }
             render_for_submit.request_render();
         })));
 
@@ -359,38 +382,11 @@ fn main() -> std::io::Result<()> {
     tui.start()?;
 
     loop {
-        tui.run_once();
+        tui.run();
 
         if *exit_flag.borrow() {
             break;
         }
-
-        let mut response_to_add: Option<String> = None;
-        {
-            let mut state = chat_state.borrow_mut();
-            if let Some(pending) = state.pending.as_ref() {
-                if Instant::now() >= pending.due {
-                    response_to_add = Some(pending.message.clone());
-                    state.pending = None;
-                    state.responding = false;
-                    state.loader = None;
-                }
-            }
-        }
-
-        if let Some(message) = response_to_add {
-            editor.borrow_mut().set_disable_submit(false);
-            chat_state.borrow_mut().messages.push(Markdown::new(
-                message,
-                1,
-                1,
-                markdown_theme(),
-                None,
-            ));
-            render_handle.request_render();
-        }
-
-        thread::sleep(Duration::from_millis(16));
     }
 
     tui.stop()?;

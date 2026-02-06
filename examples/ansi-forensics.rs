@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use pi_tui::core::component::{Component, Focusable};
@@ -148,7 +150,6 @@ struct ForensicsState {
     tick_history: VecDeque<TickStats>,
     terminal_rows: usize,
     auto_tick: bool,
-    clock_text: String,
 }
 
 impl ForensicsState {
@@ -171,6 +172,7 @@ struct ForensicsApp {
     draft: Rc<RefCell<String>>,
     last_applied_draft: String,
     state: Rc<RefCell<ForensicsState>>,
+    start: Instant,
 }
 
 impl ForensicsApp {
@@ -178,6 +180,7 @@ impl ForensicsApp {
         editor: Rc<RefCell<Editor>>,
         draft: Rc<RefCell<String>>,
         state: Rc<RefCell<ForensicsState>>,
+        start: Instant,
     ) -> Self {
         Self {
             editor,
@@ -185,6 +188,7 @@ impl ForensicsApp {
             draft,
             last_applied_draft: String::new(),
             state,
+            start,
         }
     }
 
@@ -280,10 +284,15 @@ impl ForensicsApp {
         } else {
             dim("OFF")
         };
-        let clock = if state.clock_text.is_empty() {
-            dim("n/a")
+        let clock = if state.auto_tick {
+            let elapsed = self.start.elapsed();
+            cyan(&format!(
+                "{}.{:03}s",
+                elapsed.as_secs(),
+                elapsed.subsec_millis()
+            ))
         } else {
-            cyan(&state.clock_text)
+            dim("n/a")
         };
         let line5 = format!(
             "{} {}  {} {}",
@@ -398,6 +407,7 @@ struct EditorWrapper {
     editor: Rc<RefCell<Editor>>,
     state: Rc<RefCell<ForensicsState>>,
     exit_flag: Rc<RefCell<bool>>,
+    auto_tick: Arc<AtomicBool>,
 }
 
 impl EditorWrapper {
@@ -405,11 +415,13 @@ impl EditorWrapper {
         editor: Rc<RefCell<Editor>>,
         state: Rc<RefCell<ForensicsState>>,
         exit_flag: Rc<RefCell<bool>>,
+        auto_tick: Arc<AtomicBool>,
     ) -> Self {
         Self {
             editor,
             state,
             exit_flag,
+            auto_tick,
         }
     }
 }
@@ -441,6 +453,7 @@ impl Component for EditorWrapper {
         ) {
             let mut state = self.state.borrow_mut();
             state.auto_tick = !state.auto_tick;
+            self.auto_tick.store(state.auto_tick, Ordering::SeqCst);
             return;
         }
         if matches!(
@@ -749,6 +762,7 @@ fn main() -> std::io::Result<()> {
     let render_handle = tui.render_handle();
 
     let state = Rc::new(RefCell::new(ForensicsState::default()));
+    let auto_tick = Arc::new(AtomicBool::new(false));
 
     let draft = Rc::new(RefCell::new(String::new()));
     let draft_for_change = Rc::clone(&draft);
@@ -775,20 +789,38 @@ fn main() -> std::io::Result<()> {
     editor.borrow_mut().set_text(SAMPLE_MARKDOWN);
     *draft.borrow_mut() = SAMPLE_MARKDOWN.to_string();
 
-    let app = ForensicsApp::new(Rc::clone(&editor), Rc::clone(&draft), Rc::clone(&state));
+    let start = Instant::now();
+    let app = ForensicsApp::new(
+        Rc::clone(&editor),
+        Rc::clone(&draft),
+        Rc::clone(&state),
+        start,
+    );
     *root.borrow_mut() = Box::new(app);
 
     let exit_flag = Rc::new(RefCell::new(false));
-    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
-        EditorWrapper::new(Rc::clone(&editor), Rc::clone(&state), Rc::clone(&exit_flag)),
-    )));
+    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> =
+        Rc::new(RefCell::new(Box::new(EditorWrapper::new(
+            Rc::clone(&editor),
+            Rc::clone(&state),
+            Rc::clone(&exit_flag),
+            Arc::clone(&auto_tick),
+        ))));
     tui.set_focus(Rc::clone(&editor_wrapper));
-
-    let start = Instant::now();
-    let mut last_clock_update = Instant::now();
 
     tui.start()?;
     render_handle.request_render();
+
+    {
+        let auto_tick = Arc::clone(&auto_tick);
+        let render_handle = render_handle.clone();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(250));
+            if auto_tick.load(Ordering::SeqCst) {
+                render_handle.request_render();
+            }
+        });
+    }
 
     loop {
         {
@@ -796,7 +828,7 @@ fn main() -> std::io::Result<()> {
             c.begin_tick();
         }
 
-        tui.run_once();
+        tui.run();
 
         if *exit_flag.borrow() {
             break;
@@ -811,17 +843,6 @@ fn main() -> std::io::Result<()> {
             let tick = derive_stats(capture);
             state.borrow_mut().push_tick(tick);
         }
-
-        let auto_tick = state.borrow().auto_tick;
-        if auto_tick && last_clock_update.elapsed() >= Duration::from_millis(250) {
-            last_clock_update = Instant::now();
-            let elapsed = start.elapsed();
-            let clock = format!("{}.{:03}s", elapsed.as_secs(), elapsed.subsec_millis());
-            state.borrow_mut().clock_text = clock;
-            render_handle.request_render();
-        }
-
-        std::thread::sleep(Duration::from_millis(16));
     }
 
     tui.stop()?;

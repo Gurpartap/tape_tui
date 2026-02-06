@@ -5,7 +5,7 @@ use std::env;
 use std::io;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::core::component::Component;
 use crate::core::input::{is_kitty_query_response, KeyEventType};
@@ -66,10 +66,8 @@ pub struct TuiRuntime<T: Terminal> {
     on_debug: Option<Box<dyn FnMut()>>,
     clear_on_shrink: bool,
     show_hardware_cursor: bool,
-    render_requested: Arc<AtomicBool>,
     stopped: bool,
-    pending_inputs: Arc<Mutex<Vec<String>>>,
-    pending_resize: Arc<AtomicBool>,
+    wake: Arc<RuntimeWake>,
     input_buffer: String,
     cell_size_query_pending: bool,
     kitty_keyboard_enabled: bool,
@@ -99,16 +97,161 @@ struct OverlayEntry {
 pub struct OverlayHandle {
     id: u64,
     state: std::rc::Weak<RefCell<OverlayState>>,
+    wake: Arc<RuntimeWake>,
+}
+
+#[derive(Default)]
+struct RuntimeWakeState {
+    pending_inputs: Vec<String>,
+    pending_resize: bool,
+    render_requested: bool,
+    stop_requested: bool,
+}
+
+#[derive(Default)]
+struct RuntimeWake {
+    state: Mutex<RuntimeWakeState>,
+    cvar: Condvar,
+}
+
+impl RuntimeWake {
+    fn wait_for_event(&self) -> bool {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        while !state.stop_requested
+            && state.pending_inputs.is_empty()
+            && !state.pending_resize
+            && !state.render_requested
+        {
+            state = self
+                .cvar
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+
+        !state.stop_requested
+    }
+
+    fn enqueue_input(&self, data: String) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_inputs.push(data);
+        self.cvar.notify_one();
+    }
+
+    fn signal_resize(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_resize = true;
+        self.cvar.notify_one();
+    }
+
+    fn request_render(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.render_requested = true;
+        self.cvar.notify_one();
+    }
+
+    fn take_pending_resize(&self) -> bool {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let pending = state.pending_resize;
+        state.pending_resize = false;
+        pending
+    }
+
+    fn drain_inputs(&self) -> Vec<String> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut state.pending_inputs)
+    }
+
+    fn take_render_requested(&self) -> bool {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let requested = state.render_requested;
+        state.render_requested = false;
+        requested
+    }
+
+    fn clear_render_requested(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.render_requested = false;
+    }
+
+    fn reset_for_start(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.stop_requested = false;
+        state.pending_resize = false;
+        state.pending_inputs.clear();
+        state.render_requested = false;
+    }
+
+    fn request_stop(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.stop_requested = true;
+        self.cvar.notify_all();
+    }
+
+    #[cfg(test)]
+    fn wait_for_event_with_before_wait<F: FnOnce()>(&self, before_wait: F) -> bool {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        let mut before_wait = Some(before_wait);
+        while !state.stop_requested
+            && state.pending_inputs.is_empty()
+            && !state.pending_resize
+            && !state.render_requested
+        {
+            if let Some(before_wait) = before_wait.take() {
+                before_wait();
+            }
+            state = self
+                .cvar
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+
+        !state.stop_requested
+    }
 }
 
 #[derive(Clone)]
 pub struct RenderHandle {
-    requested: Arc<AtomicBool>,
+    wake: Arc<RuntimeWake>,
 }
 
 impl RenderHandle {
     pub fn request_render(&self) {
-        self.requested.store(true, Ordering::SeqCst);
+        self.wake.request_render();
     }
 }
 
@@ -122,6 +265,7 @@ impl OverlayHandle {
                     state.pending_pre_focus = Some(pre_focus);
                 }
                 state.dirty = true;
+                self.wake.request_render();
             }
         }
     }
@@ -133,6 +277,7 @@ impl OverlayHandle {
                 if entry.hidden != hidden {
                     entry.hidden = hidden;
                     state.dirty = true;
+                    self.wake.request_render();
                 }
             }
         }
@@ -164,10 +309,8 @@ impl<T: Terminal> TuiRuntime<T> {
             on_debug: None,
             clear_on_shrink,
             show_hardware_cursor,
-            render_requested: Arc::new(AtomicBool::new(false)),
             stopped: true,
-            pending_inputs: Arc::new(Mutex::new(Vec::new())),
-            pending_resize: Arc::new(AtomicBool::new(false)),
+            wake: Arc::new(RuntimeWake::default()),
             input_buffer: String::new(),
             cell_size_query_pending: false,
             kitty_keyboard_enabled: false,
@@ -185,7 +328,7 @@ impl<T: Terminal> TuiRuntime<T> {
 
     pub fn render_handle(&self) -> RenderHandle {
         RenderHandle {
-            requested: Arc::clone(&self.render_requested),
+            wake: Arc::clone(&self.wake),
         }
     }
 
@@ -230,6 +373,7 @@ impl<T: Terminal> TuiRuntime<T> {
         OverlayHandle {
             id,
             state: Rc::downgrade(&self.overlays),
+            wake: Arc::clone(&self.wake),
         }
     }
 
@@ -258,6 +402,7 @@ impl<T: Terminal> TuiRuntime<T> {
         self.output.clear();
         self.kitty_keyboard_enabled = false;
         self.kitty_enable_pending = false;
+        self.wake.reset_for_start();
 
         // Mark running early so Drop can attempt cleanup if `Terminal::start()` panics.
         self.stopped = false;
@@ -265,16 +410,14 @@ impl<T: Terminal> TuiRuntime<T> {
         #[cfg(all(unix, not(test)))]
         self.install_cleanup_hooks();
 
-        let input_queue = Arc::clone(&self.pending_inputs);
-        let resize_flag = Arc::clone(&self.pending_resize);
+        let wake_input = Arc::clone(&self.wake);
+        let wake_resize = Arc::clone(&self.wake);
         if let Err(err) = self.terminal.start(
             Box::new(move |data| {
-                if let Ok(mut queue) = input_queue.lock() {
-                    queue.push(data);
-                }
+                wake_input.enqueue_input(data);
             }),
             Box::new(move || {
-                resize_flag.store(true, Ordering::SeqCst);
+                wake_resize.signal_resize();
             }),
         ) {
             self.stopped = true;
@@ -297,6 +440,7 @@ impl<T: Terminal> TuiRuntime<T> {
         if self.stopped {
             return Ok(());
         }
+        self.wake.request_stop();
         self.place_cursor_at_end();
         self.output.push(TerminalCmd::ShowCursor);
         self.output.push(TerminalCmd::BracketedPasteDisable);
@@ -334,6 +478,31 @@ impl<T: Terminal> TuiRuntime<T> {
         self.panic_hook_guard = None;
     }
 
+    pub fn run(&mut self) {
+        if self.stopped {
+            return;
+        }
+
+        if !self.wake.wait_for_event() {
+            return;
+        }
+
+        self.run_once();
+    }
+
+    #[cfg(test)]
+    fn run_with_before_wait<F: FnOnce()>(&mut self, before_wait: F) {
+        if self.stopped {
+            return;
+        }
+
+        if !self.wake.wait_for_event_with_before_wait(before_wait) {
+            return;
+        }
+
+        self.run_once();
+    }
+
     pub fn run_once(&mut self) {
         if self.stopped {
             return;
@@ -344,7 +513,7 @@ impl<T: Terminal> TuiRuntime<T> {
             self.request_render();
         }
 
-        if self.pending_resize.swap(false, Ordering::SeqCst) {
+        if self.wake.take_pending_resize() {
             self.reconcile_focus();
             if let Some(component) = self.focus.focused() {
                 let event = InputEvent::Resize {
@@ -356,13 +525,7 @@ impl<T: Terminal> TuiRuntime<T> {
             self.request_render();
         }
 
-        let inputs = {
-            let mut queue = match self.pending_inputs.lock() {
-                Ok(queue) => queue,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            queue.drain(..).collect::<Vec<_>>()
-        };
+        let inputs = self.wake.drain_inputs();
 
         for data in inputs {
             self.handle_input(&data);
@@ -435,18 +598,18 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn request_render(&mut self) {
-        self.render_requested.store(true, Ordering::SeqCst);
+        self.wake.request_render();
     }
 
     pub fn render_if_needed(&mut self) {
-        if !self.render_requested.swap(false, Ordering::SeqCst) {
+        if !self.wake.take_render_requested() {
             return;
         }
         self.do_render();
     }
 
     pub fn render_now(&mut self) {
-        self.render_requested.store(false, Ordering::SeqCst);
+        self.wake.clear_render_requested();
         self.do_render();
     }
 
@@ -774,7 +937,6 @@ mod tests {
     use crate::core::terminal_image::get_cell_dimensions;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
 
@@ -1110,7 +1272,7 @@ mod tests {
         assert!(!*overlay_focus.borrow());
 
         runtime.terminal.columns = 20;
-        runtime.pending_resize.store(true, Ordering::SeqCst);
+        runtime.wake.signal_resize();
         runtime.run_once();
         assert!(*overlay_focus.borrow());
     }
@@ -1136,6 +1298,35 @@ mod tests {
         join.join().expect("join render thread");
 
         runtime.run_once();
+        assert_eq!(state.borrow().renders, baseline + 1);
+    }
+
+    #[test]
+    fn render_handle_wakes_blocking_run() {
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+        let baseline = state.borrow().renders;
+
+        let handle = runtime.render_handle();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let join = thread::spawn(move || {
+            ready_rx.recv().expect("wait for runtime to block");
+            handle.request_render();
+        });
+
+        runtime.run_with_before_wait(|| {
+            let _ = ready_tx.send(());
+        });
+
+        join.join().expect("join render thread");
         assert_eq!(state.borrow().renders, baseline + 1);
     }
 

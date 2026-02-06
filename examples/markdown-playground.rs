@@ -1,7 +1,5 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::thread;
-use std::time::Duration;
 
 use pi_tui::core::component::{Component, Focusable};
 use pi_tui::core::text::slice::slice_by_column;
@@ -530,7 +528,7 @@ fn main() -> std::io::Result<()> {
     tui.start()?;
 
     loop {
-        tui.run_once();
+        tui.run();
 
         if *exit_flag.borrow() {
             break;
@@ -582,8 +580,6 @@ fn main() -> std::io::Result<()> {
 
             tui.request_render();
         }
-
-        thread::sleep(Duration::from_millis(16));
     }
 
     tui.stop()?;
