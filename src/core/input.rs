@@ -170,6 +170,16 @@ pub fn is_key_repeat(data: &str) -> bool {
     parse_key_event_type(data) == KeyEventType::Repeat
 }
 
+pub fn is_kitty_query_response(sequence: &str) -> bool {
+    let Some(inner) = sequence.strip_prefix("\x1b[?") else {
+        return false;
+    };
+    let Some(digits) = inner.strip_suffix('u') else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 pub fn matches_key(data: &str, key_id: &str, kitty_active: bool) -> bool {
     let parsed = parse_key_id(key_id);
     let Some(parsed) = parsed else {
@@ -1220,7 +1230,9 @@ const LEGACY_CTRL_END: [&str; 1] = ["\x1b[8^"];
 
 #[cfg(test)]
 mod tests {
-    use super::{is_key_release, is_key_repeat, matches_key, parse_key, Key};
+    use super::{
+        is_key_release, is_key_repeat, is_kitty_query_response, matches_key, parse_key, Key,
+    };
 
     #[test]
     fn kitty_shift_enter_vs_alt_enter() {
@@ -1265,5 +1277,17 @@ mod tests {
         assert_eq!(Key::ctrl("c"), "ctrl+c");
         assert_eq!(Key::shift_ctrl("p"), "shift+ctrl+p");
         assert_eq!(Key::ctrl_shift_alt("x"), "ctrl+shift+alt+x");
+    }
+
+    #[test]
+    fn kitty_query_response_detection_is_strict() {
+        assert!(is_kitty_query_response("\x1b[?1u"));
+        assert!(is_kitty_query_response("\x1b[?0u"));
+
+        assert!(!is_kitty_query_response("\x1b[?u"));
+        assert!(!is_kitty_query_response("\x1b[?1;2u"));
+        assert!(!is_kitty_query_response("\x1b[1;2u"));
+        assert!(!is_kitty_query_response("X\x1b[?1u"));
+        assert!(!is_kitty_query_response("\x1b[?1uX"));
     }
 }

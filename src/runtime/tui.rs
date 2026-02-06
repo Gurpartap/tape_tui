@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::core::component::Component;
-use crate::core::input::KeyEventType;
+use crate::core::input::{is_kitty_query_response, KeyEventType};
 use crate::core::input_event::{parse_input_events, InputEvent};
 use crate::core::output::{OutputGate, TerminalCmd};
 use crate::core::terminal::Terminal;
@@ -707,14 +707,6 @@ impl<T: Terminal> Drop for TuiRuntime<T> {
             let _ = self.stop();
         }));
     }
-}
-
-fn is_kitty_query_response(sequence: &str) -> bool {
-    if !sequence.starts_with("\x1b[?") || !sequence.ends_with('u') {
-        return false;
-    }
-    let inner = &sequence[3..sequence.len() - 1];
-    !inner.is_empty() && inner.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn env_flag(name: &str) -> bool {
