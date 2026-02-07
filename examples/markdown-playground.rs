@@ -90,37 +90,37 @@ fn green(text: &str) -> String {
 
 fn select_list_theme() -> SelectListTheme {
     SelectListTheme {
-        selected_prefix: std::sync::Arc::new(|text| blue(text)),
-        selected_text: std::sync::Arc::new(|text| bold(text)),
-        description: std::sync::Arc::new(|text| dim(text)),
-        scroll_info: std::sync::Arc::new(|text| dim(text)),
-        no_match: std::sync::Arc::new(|text| dim(text)),
+        selected_prefix: std::sync::Arc::new(blue),
+        selected_text: std::sync::Arc::new(bold),
+        description: std::sync::Arc::new(dim),
+        scroll_info: std::sync::Arc::new(dim),
+        no_match: std::sync::Arc::new(dim),
     }
 }
 
 fn editor_theme() -> EditorTheme {
     EditorTheme {
-        border_color: Box::new(|text| dim(text)),
+        border_color: Box::new(dim),
         select_list: select_list_theme(),
     }
 }
 
 fn markdown_theme() -> MarkdownTheme {
     MarkdownTheme {
-        heading: Box::new(|text| cyan(text)),
-        link: Box::new(|text| blue(text)),
-        link_url: Box::new(|text| dim(text)),
-        code: Box::new(|text| yellow(text)),
-        code_block: Box::new(|text| green(text)),
-        code_block_border: Box::new(|text| dim(text)),
-        quote: Box::new(|text| italic(text)),
-        quote_border: Box::new(|text| dim(text)),
-        hr: Box::new(|text| dim(text)),
-        list_bullet: Box::new(|text| cyan(text)),
-        bold: Box::new(|text| bold(text)),
-        italic: Box::new(|text| italic(text)),
-        strikethrough: Box::new(|text| strikethrough(text)),
-        underline: Box::new(|text| underline(text)),
+        heading: Box::new(cyan),
+        link: Box::new(blue),
+        link_url: Box::new(dim),
+        code: Box::new(yellow),
+        code_block: Box::new(green),
+        code_block_border: Box::new(dim),
+        quote: Box::new(italic),
+        quote_border: Box::new(dim),
+        hr: Box::new(dim),
+        list_bullet: Box::new(cyan),
+        bold: Box::new(bold),
+        italic: Box::new(italic),
+        strikethrough: Box::new(strikethrough),
+        underline: Box::new(underline),
         highlight_code: None,
         code_block_indent: None,
     }
