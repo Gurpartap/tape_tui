@@ -808,6 +808,10 @@ impl<T: Terminal> TuiRuntime<T> {
                 if cursor_pos.row >= overlay.lines.len() || cursor_pos.col >= overlay.width {
                     continue;
                 }
+                // Never place the hardware cursor onto an image line.
+                if is_image_line(&overlay.lines[cursor_pos.row]) {
+                    continue;
+                }
                 let abs_row = viewport_start
                     .saturating_add(overlay.row)
                     .saturating_add(cursor_pos.row);
@@ -1341,6 +1345,62 @@ mod tests {
         assert!(output.contains("hello"), "expected hello in output: {output:?}");
         assert!(
             output.ends_with("\x1b[1G\x1b[?25l"),
+            "unexpected output suffix: {output:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_cursor_is_ignored_when_overlay_line_is_image() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        struct BaseCursorComponent;
+
+        impl Component for BaseCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["one".to_string(), "two".to_string(), "three".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 0 })
+            }
+        }
+
+        struct OverlayImageCursorComponent;
+
+        impl Component for OverlayImageCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["\x1b_Gf=100;data".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 4 })
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 3);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(BaseCursorComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        let overlay: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(OverlayImageCursorComponent)));
+        let mut options = OverlayOptions::default();
+        options.width = Some(SizeValue::absolute(10));
+        options.row = Some(SizeValue::absolute(1));
+        options.col = Some(SizeValue::absolute(2));
+        runtime.show_overlay(overlay, Some(options));
+
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            output.ends_with("\x1b[2A\x1b[1G\x1b[?25l"),
             "unexpected output suffix: {output:?}"
         );
     }
