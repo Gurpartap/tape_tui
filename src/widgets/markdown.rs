@@ -353,7 +353,7 @@ impl Markdown {
                     lines.extend(text.split('\n').map(|line| line.to_string()));
                 }
                 _ => {
-                    let text = self.render_inline_nodes(&[node.clone()], &context);
+                    let text = self.render_inline_nodes(std::slice::from_ref(node), &context);
                     if !text.is_empty() {
                         lines.extend(text.split('\n').map(|line| line.to_string()));
                     }
@@ -875,7 +875,7 @@ fn render_cell_text(widget: &mut Markdown, cell: &mdast::Node) -> String {
         }
         _ => {
             let context = widget.default_inline_context();
-            widget.render_inline_nodes(&[cell.clone()], &context)
+            widget.render_inline_nodes(std::slice::from_ref(cell), &context)
         }
     }
 }
