@@ -522,7 +522,6 @@ mod tests {
             keybindings,
             Some(SettingsListOptions {
                 enable_search: true,
-                ..SettingsListOptions::default()
             }),
         );
 
