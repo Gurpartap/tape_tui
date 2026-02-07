@@ -1177,8 +1177,7 @@ mod tests {
     #[test]
     fn key_release_filtered_unless_requested() {
         let terminal = TestTerminal::default();
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
         let mut runtime = TuiRuntime::new(terminal, root);
 
         let inputs = Rc::new(RefCell::new(Vec::new()));
@@ -1259,7 +1258,7 @@ mod tests {
 
         let terminal = TestTerminal::new(80, 24);
         let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(CursorPosComponent::default())));
+            Rc::new(RefCell::new(Box::new(CursorPosComponent)));
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.show_hardware_cursor = false;
 
@@ -1295,7 +1294,7 @@ mod tests {
 
         let terminal = TestTerminal::new(10, 24);
         let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(WideCursorComponent::default())));
+            Rc::new(RefCell::new(Box::new(WideCursorComponent)));
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.show_hardware_cursor = false;
 
@@ -1337,7 +1336,7 @@ mod tests {
 
         let terminal = TestTerminal::new(80, 24);
         let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(CursorMarkerComponent::default())));
+            Rc::new(RefCell::new(Box::new(CursorMarkerComponent)));
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.show_hardware_cursor = false;
 
@@ -1386,9 +1385,8 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(80, 24);
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
-            CursorMarkerWithMetadataComponent::default(),
-        )));
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(CursorMarkerWithMetadataComponent)));
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.show_hardware_cursor = false;
 
@@ -1454,10 +1452,12 @@ mod tests {
 
         let overlay: Rc<RefCell<Box<dyn Component>>> =
             Rc::new(RefCell::new(Box::new(OverlayImageCursorComponent)));
-        let mut options = OverlayOptions::default();
-        options.width = Some(SizeValue::absolute(10));
-        options.row = Some(SizeValue::absolute(1));
-        options.col = Some(SizeValue::absolute(2));
+        let options = OverlayOptions {
+            width: Some(SizeValue::absolute(10)),
+            row: Some(SizeValue::absolute(1)),
+            col: Some(SizeValue::absolute(2)),
+            ..Default::default()
+        };
         runtime.show_overlay(overlay, Some(options));
 
         runtime.render_now();
@@ -1510,10 +1510,12 @@ mod tests {
 
         let overlay: Rc<RefCell<Box<dyn Component>>> =
             Rc::new(RefCell::new(Box::new(OverlayCursorComponent)));
-        let mut options = OverlayOptions::default();
-        options.width = Some(SizeValue::absolute(10));
-        options.row = Some(SizeValue::absolute(1));
-        options.col = Some(SizeValue::absolute(2));
+        let options = OverlayOptions {
+            width: Some(SizeValue::absolute(10)),
+            row: Some(SizeValue::absolute(1)),
+            col: Some(SizeValue::absolute(2)),
+            ..Default::default()
+        };
         runtime.show_overlay(overlay, Some(options));
 
         runtime.render_now();
@@ -1531,9 +1533,9 @@ mod tests {
         let terminal_b = TestTerminal::default();
 
         let root_a: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+            Rc::new(RefCell::new(Box::new(DummyComponent)));
         let root_b: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+            Rc::new(RefCell::new(Box::new(DummyComponent)));
 
         let mut runtime_a = TuiRuntime::new(terminal_a, root_a);
         let mut runtime_b = TuiRuntime::new(terminal_b, root_b);
@@ -1609,8 +1611,10 @@ mod tests {
         );
         let overlay: Rc<RefCell<Box<dyn Component>>> =
             Rc::new(RefCell::new(Box::new(overlay_component)));
-        let mut options = OverlayOptions::default();
-        options.visible = Some(Box::new(|w, _| w >= 10));
+        let options = OverlayOptions {
+            visible: Some(Box::new(|w, _| w >= 10)),
+            ..Default::default()
+        };
 
         runtime.show_overlay(Rc::clone(&overlay), Some(options));
         runtime.run_once();
@@ -1745,8 +1749,7 @@ mod tests {
     fn drop_stops_terminal_when_started() {
         let state = Arc::new(Mutex::new(TrackingState::default()));
         let terminal = TrackingTerminal::new(Arc::clone(&state));
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
 
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.start().expect("runtime start");
@@ -1769,8 +1772,7 @@ mod tests {
     fn stop_then_drop_does_not_double_teardown() {
         let state = Arc::new(Mutex::new(TrackingState::default()));
         let terminal = TrackingTerminal::new(Arc::clone(&state));
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
 
         let mut runtime = TuiRuntime::new(terminal, root);
         runtime.start().expect("runtime start");
@@ -1794,8 +1796,7 @@ mod tests {
     fn drop_does_nothing_when_never_started() {
         let state = Arc::new(Mutex::new(TrackingState::default()));
         let terminal = TrackingTerminal::new(Arc::clone(&state));
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent::default())));
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
 
         drop(TuiRuntime::new(terminal, root));
 
