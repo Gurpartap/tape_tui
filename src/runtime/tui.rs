@@ -1358,6 +1358,59 @@ mod tests {
     }
 
     #[test]
+    fn cursor_marker_stripping_removes_all_occurrences_across_multiple_lines() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        #[derive(Default)]
+        struct MultiLineCursorMarkerComponent;
+
+        impl Component for MultiLineCursorMarkerComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec![
+                    format!("top{}X", crate::core::cursor::CURSOR_MARKER),
+                    format!(
+                        "bottom{}Y{}Z",
+                        crate::core::cursor::CURSOR_MARKER,
+                        crate::core::cursor::CURSOR_MARKER
+                    ),
+                ]
+            }
+        }
+
+        let terminal = TestTerminal::new(80, 24);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(MultiLineCursorMarkerComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        runtime.handle_input("\x1b[?1u");
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            !output.contains(crate::core::cursor::CURSOR_MARKER),
+            "cursor marker leaked into output: {output:?}"
+        );
+        assert!(
+            output.contains("topX"),
+            "expected top line content in output: {output:?}"
+        );
+        assert!(
+            output.contains("bottomYZ"),
+            "expected bottom line content in output: {output:?}"
+        );
+        assert!(
+            output.ends_with("\x1b[7G\x1b[?25l"),
+            "unexpected output suffix: {output:?}"
+        );
+    }
+
+    #[test]
     fn cursor_marker_is_stripped_but_cursor_metadata_wins() {
         let _guard = env_test_lock().lock().expect("test lock poisoned");
         std::env::remove_var("TERM_PROGRAM");
