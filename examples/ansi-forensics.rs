@@ -78,33 +78,33 @@ fn green(text: &str) -> String {
 
 fn editor_theme() -> EditorTheme {
     EditorTheme {
-        border_color: Box::new(|text| dim(text)),
+        border_color: Box::new(dim),
         select_list: pi_tui::SelectListTheme {
-            selected_prefix: Arc::new(|text| blue(text)),
-            selected_text: Arc::new(|text| bold(text)),
-            description: Arc::new(|text| dim(text)),
-            scroll_info: Arc::new(|text| dim(text)),
-            no_match: Arc::new(|text| dim(text)),
+            selected_prefix: Arc::new(blue),
+            selected_text: Arc::new(bold),
+            description: Arc::new(dim),
+            scroll_info: Arc::new(dim),
+            no_match: Arc::new(dim),
         },
     }
 }
 
 fn markdown_theme() -> MarkdownTheme {
     MarkdownTheme {
-        heading: Box::new(|text| cyan(text)),
-        link: Box::new(|text| blue(text)),
-        link_url: Box::new(|text| dim(text)),
-        code: Box::new(|text| yellow(text)),
-        code_block: Box::new(|text| green(text)),
-        code_block_border: Box::new(|text| dim(text)),
-        quote: Box::new(|text| italic(text)),
-        quote_border: Box::new(|text| dim(text)),
-        hr: Box::new(|text| dim(text)),
-        list_bullet: Box::new(|text| cyan(text)),
-        bold: Box::new(|text| bold(text)),
-        italic: Box::new(|text| italic(text)),
-        strikethrough: Box::new(|text| strikethrough(text)),
-        underline: Box::new(|text| underline(text)),
+        heading: Box::new(cyan),
+        link: Box::new(blue),
+        link_url: Box::new(dim),
+        code: Box::new(yellow),
+        code_block: Box::new(green),
+        code_block_border: Box::new(dim),
+        quote: Box::new(italic),
+        quote_border: Box::new(dim),
+        hr: Box::new(dim),
+        list_bullet: Box::new(cyan),
+        bold: Box::new(bold),
+        italic: Box::new(italic),
+        strikethrough: Box::new(strikethrough),
+        underline: Box::new(underline),
         highlight_code: None,
         code_block_indent: None,
     }
@@ -233,8 +233,8 @@ impl ForensicsApp {
             })
             .unwrap_or((0, false, false, false, false, false, 0, 0, 0, ""));
 
-        let bytes_label = format!("{}", cyan(&bytes_written.to_string()));
-        let total_label = format!("{}", dim(&total_bytes.to_string()));
+        let bytes_label = cyan(&bytes_written.to_string()).to_string();
+        let total_label = dim(&total_bytes.to_string()).to_string();
 
         let sync_label = if sync_open && sync_close {
             green("yes")
