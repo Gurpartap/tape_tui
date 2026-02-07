@@ -144,3 +144,15 @@ Files: `src/runtime/tui.rs`, `examples/*`
 - Examples use the explicit API:
   - `examples/ansi-forensics.rs`, `examples/chat-simple.rs`, `examples/markdown-playground.rs` call `run_blocking_once()`.
 
+### 9) Frame flattening + `Line::into_string()` fast path
+
+Files: `src/render/renderer.rs`, `src/render/frame.rs`
+
+- The diff renderer currently flattens typed frames into `Vec<String>` at the renderer boundary:
+  - `src/render/renderer.rs`: `DiffRenderer::render` iterates `for line in frame.into_lines()` and calls `line.into_string()`.
+- `Line::into_string()` is intentionally optimized because the common case is a single span:
+  - `src/render/frame.rs`: `Line::into_string(self)` moves out the inner `String` when `spans.len() == 1` (no alloc/copy).
+  - Multi-span lines preallocate total byte capacity before concatenation.
+- Unit test:
+  - `src/render/frame.rs`: `line_into_string_moves_out_single_span_without_copy` asserts pointer/capacity preservation for the single-span move-out path.
+
