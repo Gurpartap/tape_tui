@@ -111,11 +111,11 @@ impl Component for CancellableLoader {
             .keybindings
             .lock()
             .expect("editor keybindings lock poisoned");
-        if kb.matches(key_id, EditorAction::SelectCancel) {
-            if !self.abort_signal.aborted.swap(true, Ordering::SeqCst) {
-                if let Some(handler) = self.on_abort.as_mut() {
-                    handler();
-                }
+        if kb.matches(key_id, EditorAction::SelectCancel)
+            && !self.abort_signal.aborted.swap(true, Ordering::SeqCst)
+        {
+            if let Some(handler) = self.on_abort.as_mut() {
+                handler();
             }
         }
     }

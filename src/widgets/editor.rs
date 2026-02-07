@@ -221,7 +221,7 @@ impl Editor {
     ) -> Self {
         let padding_x = options.padding_x.unwrap_or(0);
         let max_visible = options.autocomplete_max_visible.unwrap_or(5);
-        let autocomplete_max_visible = max(3, min(20, max_visible));
+        let autocomplete_max_visible = max_visible.clamp(3, 20);
         let height_mode = options.height_mode.unwrap_or(EditorHeightMode::Default);
         let paste_mode = options.paste_mode.unwrap_or(EditorPasteMode::Default);
         let render_handle = options.render_handle;
@@ -324,7 +324,7 @@ impl Editor {
     }
 
     pub fn set_autocomplete_max_visible(&mut self, max_visible: usize) {
-        let new_value = max(3, min(20, max_visible));
+        let new_value = max_visible.clamp(3, 20);
         if self.autocomplete_max_visible != new_value {
             self.autocomplete_max_visible = new_value;
             self.request_render();

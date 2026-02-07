@@ -77,10 +77,7 @@ impl Input {
     }
 
     fn handle_paste(&mut self, pasted_text: &str) {
-        let cleaned = pasted_text
-            .replace("\r\n", "")
-            .replace('\r', "")
-            .replace('\n', "");
+        let cleaned = pasted_text.replace(['\r', '\n'], "");
         self.insert_text(&cleaned);
     }
 
@@ -356,7 +353,7 @@ impl Component for Input {
         if is_delete_backward {
             if self.cursor > 0 {
                 let before_cursor = &self.value[..self.cursor];
-                let last = grapheme_segments(before_cursor).last();
+                let last = grapheme_segments(before_cursor).next_back();
                 let grapheme_len = last.map(|segment| segment.len()).unwrap_or(1);
                 let start = self.cursor.saturating_sub(grapheme_len);
                 self.value.replace_range(start..self.cursor, "");
@@ -395,7 +392,7 @@ impl Component for Input {
         if is_left {
             if self.cursor > 0 {
                 let before_cursor = &self.value[..self.cursor];
-                let last = grapheme_segments(before_cursor).last();
+                let last = grapheme_segments(before_cursor).next_back();
                 let grapheme_len = last.map(|segment| segment.len()).unwrap_or(1);
                 self.cursor = self.cursor.saturating_sub(grapheme_len);
             }
@@ -429,7 +426,6 @@ impl Component for Input {
 
         if is_word_right {
             self.move_word_forwards();
-            return;
         }
     }
 
