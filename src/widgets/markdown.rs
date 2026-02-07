@@ -8,9 +8,13 @@ use crate::core::text::width::visible_width;
 
 use markdown::{mdast, to_mdast, ParseOptions};
 
+pub type MarkdownStyleFn = Box<dyn Fn(&str) -> String>;
+
+pub type MarkdownCodeHighlighterFn = Box<dyn Fn(&str, Option<&str>) -> Vec<String>>;
+
 pub struct DefaultTextStyle {
-    pub color: Option<Box<dyn Fn(&str) -> String>>,
-    pub bg_color: Option<Box<dyn Fn(&str) -> String>>,
+    pub color: Option<MarkdownStyleFn>,
+    pub bg_color: Option<MarkdownStyleFn>,
     pub bold: bool,
     pub italic: bool,
     pub strikethrough: bool,
@@ -18,21 +22,21 @@ pub struct DefaultTextStyle {
 }
 
 pub struct MarkdownTheme {
-    pub heading: Box<dyn Fn(&str) -> String>,
-    pub link: Box<dyn Fn(&str) -> String>,
-    pub link_url: Box<dyn Fn(&str) -> String>,
-    pub code: Box<dyn Fn(&str) -> String>,
-    pub code_block: Box<dyn Fn(&str) -> String>,
-    pub code_block_border: Box<dyn Fn(&str) -> String>,
-    pub quote: Box<dyn Fn(&str) -> String>,
-    pub quote_border: Box<dyn Fn(&str) -> String>,
-    pub hr: Box<dyn Fn(&str) -> String>,
-    pub list_bullet: Box<dyn Fn(&str) -> String>,
-    pub bold: Box<dyn Fn(&str) -> String>,
-    pub italic: Box<dyn Fn(&str) -> String>,
-    pub strikethrough: Box<dyn Fn(&str) -> String>,
-    pub underline: Box<dyn Fn(&str) -> String>,
-    pub highlight_code: Option<Box<dyn Fn(&str, Option<&str>) -> Vec<String>>>,
+    pub heading: MarkdownStyleFn,
+    pub link: MarkdownStyleFn,
+    pub link_url: MarkdownStyleFn,
+    pub code: MarkdownStyleFn,
+    pub code_block: MarkdownStyleFn,
+    pub code_block_border: MarkdownStyleFn,
+    pub quote: MarkdownStyleFn,
+    pub quote_border: MarkdownStyleFn,
+    pub hr: MarkdownStyleFn,
+    pub list_bullet: MarkdownStyleFn,
+    pub bold: MarkdownStyleFn,
+    pub italic: MarkdownStyleFn,
+    pub strikethrough: MarkdownStyleFn,
+    pub underline: MarkdownStyleFn,
+    pub highlight_code: Option<MarkdownCodeHighlighterFn>,
     pub code_block_indent: Option<String>,
 }
 
