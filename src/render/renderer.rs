@@ -109,6 +109,9 @@ impl DiffRenderer {
 
         apply_line_resets(&mut lines, &is_image);
 
+        // Snapshot strict-width mode once per render call (avoids repeated env reads).
+        let strict_width = strict_width_enabled();
+
         let width_changed = self.previous_width != 0 && self.previous_width != width;
 
         if self.previous_lines.is_empty() && !width_changed {
@@ -300,7 +303,7 @@ impl DiffRenderer {
 
             let line_width = visible_width(line);
             if line_width > width {
-                if strict_width_enabled() {
+                if strict_width {
                     panic!(
                         "Rendered line {} exceeds terminal width ({} > {}). PI_STRICT_WIDTH is set.",
                         i, line_width, width
@@ -374,7 +377,11 @@ fn strict_width_enabled() -> bool {
 }
 
 fn clamp_non_image_line_to_width(line: &str, width: usize) -> String {
-    let mut clamped = slice_by_column(line, 0, width, true);
+    // `apply_line_resets(..)` appends SEGMENT_RESET to all non-image lines prior to
+    // diff rendering. Avoid duplicating those bytes when clamping.
+    let line_without_reset = line.strip_suffix(SEGMENT_RESET).unwrap_or(line);
+
+    let mut clamped = slice_by_column(line_without_reset, 0, width, true);
     clamped.push_str(SEGMENT_RESET);
     clamped
 }
