@@ -1,378 +1,146 @@
-# Rust port of pi TUI — architecture notes (parity with `pi-mono/packages/tui`)
+# pi-tui (Rust) architecture as implemented
 
-This is a parity‑focused extraction of pi‑tui’s core behaviors and a Rust architecture that mirrors them exactly while honoring your design principles (correctness, deterministic output, inline‑first, layered, RAII teardown).
+This document describes the CURRENT Rust implementation in this repo (not strict TypeScript parity). It focuses on the invariants and behavior that exist in code today, with concrete file pointers.
 
-All details below are aligned with:
-- `packages/tui/src/tui.ts`
-- `packages/tui/src/terminal.ts`
-- `packages/tui/src/stdin-buffer.ts`
-- `packages/tui/src/keys.ts`
-- `packages/tui/src/utils.ts`
+## Current architecture
 
----
+### Layers and responsibilities
 
-## Minimum viable core (parity‑critical behaviors)
+- `src/core/*`: Pure-ish core types and helpers.
+  - Terminal I/O boundary: `src/core/terminal.rs` (`trait Terminal`, `TerminalGuard<T>`)
+  - Single output gate: `src/core/output.rs` (`TerminalCmd`, `OutputGate`, `OutputGate::flush`)
+  - Cursor marker + extraction: `src/core/cursor.rs` (`CURSOR_MARKER`, `extract_cursor_marker`)
+  - Text width/slicing helpers: `src/core/text/*` (e.g. `visible_width` in `src/core/text/width.rs`)
+- `src/platform/*`: OS/process terminal integration.
+  - Unix terminal implementation: `src/platform/process_terminal.rs` (`ProcessTerminal`)
+  - Input buffering and bracketed paste detection: `src/platform/stdin_buffer.rs` (`StdinBuffer`, `StdinEvent`)
+  - Crash/panic/signal cleanup plumbing (Unix): `src/platform/process_terminal.rs` (`install_signal_handlers`, `install_panic_hook`, `HookTerminal`)
+- `src/render/*`: Renderer and typed frame model.
+  - Typed model: `src/render/frame.rs` (`Span`, `Line`, `Frame`)
+  - Diff renderer: `src/render/renderer.rs` (`DiffRenderer::render`)
+  - Overlay compositing helpers: `src/render/overlay.rs` (`composite_overlays`, layout helpers)
+- `src/runtime/*`: Runtime event loop, render scheduling, focus, overlays, IME cursor.
+  - Runtime: `src/runtime/tui.rs` (`TuiRuntime`)
+  - Hardware cursor moves: `src/runtime/ime.rs` (`position_hardware_cursor`)
+  - Focus state: `src/runtime/focus.rs` (`FocusState`)
 
-### 1) Terminal abstraction + raw mode lifecycle
-**Terminal API must include (I/O only):**
-- `start(onInput, onResize)`
-- `stop()`
-- `drainInput(maxMs, idleMs)`
-- `write(data)`
-- `columns`, `rows`
+### Invariants (as enforced by structure)
 
-**Output API must include (single output gate):**
-- `TerminalCmd` typed ops (cursor/protocol toggles/queries) + raw bytes.
-- `OutputGate` buffers `TerminalCmd` and flushes them in a deterministic order.
-- `OutputGate::flush(..)` is the only place that calls `Terminal::write(..)`.
+- Single write gate to the terminal:
+  - `src/core/output.rs` documents and enforces the invariant: only `OutputGate::flush(..)` calls `Terminal::write(..)`.
+  - `src/lib.rs` repeats this as a crate-level invariant.
+- Components/widgets do not write to the terminal:
+  - Components return `Vec<String>` from `Component::render(..)` (`src/core/component.rs`) and optional typed cursor metadata via `Component::cursor_pos()`.
+  - The runtime and renderer own all terminal output (`src/runtime/tui.rs` + `src/render/renderer.rs`) and route it through `OutputGate`.
+- Deterministic output staging:
+  - Runtime collects protocol toggles + frame commands + hardware cursor commands and flushes them through one gate (`src/runtime/tui.rs`: `do_render`, `flush_output`).
 
-**Process terminal behavior (parity):**
-- On `start()`:
-  - Store prior raw state; enable raw mode.
-  - `stdin.setEncoding("utf8")`, `stdin.resume()`.
-  - Attach resize handler; trigger `SIGWINCH` to refresh stale dimensions on Unix.
-  - Start input thread and route sequences to the runtime input queue.
-- On Kitty response (`CSI ?<flags>u`), delivered via the input queue:
-  - Runtime enables kitty keyboard protocol with `CSI >7u` via `OutputGate` (no background-thread writes).
-- `write()` optionally logs to `PI_TUI_WRITE_LOG`.
-- On `stop()`:
-  - Runtime disables bracketed paste: `CSI ?2004 l`.
-  - Runtime disables Kitty protocol if active: `CSI <u`.
-  - Remove input/resize handlers.
-  - `stdin.pause()` **before** leaving raw mode to avoid Ctrl‑D leakage.
-  - Restore original raw mode.
-- `drainInput()`:
-  - Runtime disables Kitty protocol first (via `OutputGate`) to avoid new release events.
-  - Temporarily detach input handler and wait for idle window to prevent key‑release leakage (slow SSH).
+## Behavioral notes (with file pointers)
 
-### 2) Component interface (input filtering parity)
-- `render(width) -> Vec<String>` (pure, deterministic).
-- `handleInput(data)`.
-- `invalidate()`.
-- `wantsKeyRelease: bool` (default false). If false, key‑release events are filtered out before dispatch.
+### 1) OutputGate flush: small vs large strategy (streaming thresholds)
 
-### 3) Input pipeline (exact behavior)
-- **StdinBuffer** splits partial escape sequences and emits complete sequences; recognizes CSI/OSC/DCS/APC/SS3 and old‑style mouse (`ESC[M` + 3 bytes).
-- Incomplete sequences are flushed after a timeout (default 10ms).
-- Converts single high‑bit bytes to `ESC + (byte-128)` for legacy compatibility.
-- Bracketed paste is **rewrapped** to `\x1b[200~ ... \x1b[201~`.
-- Kitty protocol:
-  - Query with `\x1b[?u`.
-  - Enable with `\x1b[>7u`.
-  - Disable with `\x1b[<u`.
-- `matchesKey()` and `parseKey()`:
-  - Respect Kitty protocol when active.
-  - Fall back to legacy sequences when inactive.
-  - Use xterm modifyOtherKeys fallback (`CSI 27;...~`) when Kitty isn’t active.
-  - Kitty base layout key fallback only when the codepoint is **not** a Latin letter or known symbol (prevents Dvorak/Colemak mismatches).
-  - Handle special cases like `shift+enter` vs `alt+enter` depending on protocol state.
-- TUI input handling:
-  - Buffer input if cell‑size query is pending; parse response and only forward remaining data.
-  - `shift+ctrl+d` triggers `onDebug` before forwarding to focused component.
-  - Filter `isKeyRelease()` unless `wantsKeyRelease` is true.
-  - Always `requestRender()` after handling input.
+File: `src/core/output.rs`
 
-### 4) Renderer core (deterministic diff + synchronized output)
-- Use synchronized output: `CSI ?2026 h/l`.
-- **First render** preserves scrollback (no clear).
-- **Width change** triggers full clear (`CSI 3J`, `CSI 2J`, `CSI H`) + full render.
-- `clearOnShrink` **only** when no overlays.
-- Track: `previous_lines`, `previous_width`, `max_lines_rendered`, `cursor_row` (logical end of content), `hardware_cursor_row` (actual terminal cursor), `previous_viewport_top`.
-- Append `SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07"` to every **non‑image** line.
-- Skip width checks and reset appends for `isImageLine()`.
-- Hard error if any non‑image line exceeds terminal width **during diff render of changed lines** (crash log + teardown); full render does not validate widths (parity).
-- `PI_TUI_DEBUG` and `PI_DEBUG_REDRAW` write debug logs for render decisions.
+- Threshold constants:
+  - `OUTPUT_GATE_STREAM_THRESHOLD_BYTES` (64 KiB)
+  - `OUTPUT_GATE_STREAM_CHUNK_BYTES` (16 KiB)
+- Flush behavior:
+  - `OutputGate::flush(..)` computes a conservative encoded length via `encoded_len(..)` over buffered `TerminalCmd`s.
+  - If `total_len > OUTPUT_GATE_STREAM_THRESHOLD_BYTES`, it uses the streaming path: `OutputGate::flush_streaming(..)`.
+  - Otherwise it coalesces everything into a single `String` and does a single `Terminal::write(..)`.
+- Streaming behavior details (`flush_streaming`):
+  - `TerminalCmd::Bytes(String)` is written directly (never copied into the coalescing buffer).
+  - `TerminalCmd::BytesStatic(&'static str)` that is `>= OUTPUT_GATE_STREAM_CHUNK_BYTES` is written directly.
+  - Other commands are encoded into an internal buffer which is flushed when it reaches `OUTPUT_GATE_STREAM_CHUNK_BYTES`.
+- Unit test:
+  - `flush_streams_large_payloads_without_coalescing` asserts the streaming path is taken for payloads larger than `OUTPUT_GATE_STREAM_THRESHOLD_BYTES`.
 
-### 5) IME cursor marker (APC) + hardware cursor
-- `CURSOR_MARKER = "\x1b_pi:c\x07"`.
-- Extract marker **before** line resets; compute column via `visibleWidth()`.
-- Position hardware cursor (absolute column via `CSI n G`, relative row via `CSI n A/B`).
-- Hardware cursor visibility toggled by `PI_HARDWARE_CURSOR`.
+### 2) PanicHookGuard composability (identity tracking + conditional drop)
 
-### 6) Cell size query for images
-- If images supported (`getCapabilities().images`): send `CSI 16 t`.
-- Parse response: `CSI 6 ; height ; width t`.
-- `setCellDimensions({widthPx,heightPx})`, invalidate components, request render.
-- Handle partial responses (buffer until complete).
+File: `src/platform/process_terminal.rs`
 
-### 7) Teardown (zero‑surprise, crash‑safe)
-- Disable bracketed paste (`CSI ?2004 l`).
-- Disable Kitty protocol (`CSI <u`) if active.
-- `stdin.pause()` before leaving raw mode.
-- `drainInput()` used on exit to prevent key‑release leaks.
-- Restore raw mode and cursor visibility.
-- Provide RAII guard + panic/signal cleanup.
+- Identity tracking:
+  - `PanicHookId { data, vtable }` + `panic_hook_id(..)` compute a stable identity for a hook by comparing the fat pointer components.
+- Guard drop logic avoids clobbering newer hooks:
+  - `PanicHookGuard::drop` calls `std::panic::take_hook()` and compares `panic_hook_id(current)` vs `self.installed`.
+  - If the current hook is not the one this guard installed, it re-installs the current hook and returns (no clobber).
+  - If it matches, it restores the previous hook captured by `install_panic_hook(..)` (using `Arc::try_unwrap` when possible).
+- Installation API:
+  - `install_panic_hook(..) -> PanicHookGuard`
+- Unix-only unit test:
+  - `panic_hook_guard_drop_does_not_clobber_later_hooks` (under `#[cfg(all(test, unix))]`) validates that dropping an older guard does not override a later-installed hook.
 
-### 8) Env toggles (parity)
-- `PI_HARDWARE_CURSOR`
-- `PI_CLEAR_ON_SHRINK`
-- `PI_TUI_WRITE_LOG`
-- `PI_TUI_DEBUG`
-- `PI_DEBUG_REDRAW`
+### 3) HookTerminal crash-safety and CrashCleanup usage
 
----
+Files: `src/platform/process_terminal.rs`, `src/runtime/tui.rs`
 
-## Rust module layout (core → render → runtime → widgets)
+- Crash-safe terminal handle:
+  - `HookTerminal::new` opens `/dev/tty` with `O_WRONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`.
+  - There is no stdout/stderr fallback. If opening `/dev/tty` fails, it sets `fd = -1` (output disabled).
+- Best-effort write behavior:
+  - `HookTerminal::write_best_effort` never panics and never waits for writability.
+  - It writes until completion, but returns early (dropping remaining bytes) on `WouldBlock`/EAGAIN or any other non-EINTR error.
+- Unix-only unit test:
+  - `hook_terminal_write_best_effort_returns_on_would_block` fills a non-blocking pipe until it would block and verifies `write_best_effort(..)` returns.
+- Runtime usage (crash cleanup):
+  - `src/runtime/tui.rs`: `CrashCleanup::run_best_effort` constructs a `HookTerminal` and calls `CrashCleanup::run(..)` inside `catch_unwind`.
+  - `CrashCleanup::run(..)` emits `ShowCursor`, `BracketedPasteDisable`, `KittyDisable` through an `OutputGate` and flushes them to the provided terminal.
+  - `TuiRuntime::install_cleanup_hooks` installs both `install_signal_handlers(..)` and `install_panic_hook(..)` with closures that call `CrashCleanup::run_best_effort`.
 
-```
-src/
-  lib.rs
-  core/
-    mod.rs
-    output.rs           // TerminalCmd + OutputGate (single output gate)
-    terminal.rs         // Terminal trait (I/O only) + lifecycle helpers
-    component.rs        // Component + Focusable traits (wantsKeyRelease)
-    input.rs            // KeyId, KeyEvent, matchesKey/parseKey
-    terminal_image.rs   // capabilities, isImageLine, cell dimensions
-    text/
-      mod.rs
-      ansi.rs           // ANSI scanner + style tracker
-      width.rs          // grapheme width + visibleWidth
-      slice.rs          // slice_by_column, extract_segments
-      utils.rs          // truncate_to_width, background padding, grapheme helpers
-  render/
-    mod.rs
-    renderer.rs         // DiffRenderer (synchronized output + diff)
-    frame.rs            // Frame = Vec<Line>
-    overlay.rs          // compositing helpers (staged)
-  runtime/
-    mod.rs
-    tui.rs              // TuiRuntime: input loop + render scheduling
-    focus.rs            // focus management + overlays
-    ime.rs              // cursor marker extraction + hardware cursor
-  platform/
-    mod.rs
-    process_terminal.rs // raw mode + tty I/O (no protocol writes from background threads)
-    stdin_buffer.rs     // escape-sequence buffering + paste logic
-  widgets/              // optional components
-```
+### 4) Runtime cursor marker compatibility (strip + fallback semantics)
 
-Layering:
-- `core` has no dependencies on `render`/`runtime`.
-- `render` depends on `core` only.
-- `runtime` depends on `core` + `render`.
-- `widgets` depends on `core` only.
+Files: `src/runtime/tui.rs`, `src/core/cursor.rs`
 
----
+- Marker constant:
+  - `src/core/cursor.rs`: `CURSOR_MARKER`
+- Extraction and stripping:
+  - `src/runtime/tui.rs`: `TuiRuntime::do_render` calls `crate::core::cursor::extract_cursor_marker(&mut lines, height)` to extract a cursor position from rendered lines.
+  - It then strips any remaining `CURSOR_MARKER` occurrences from all lines (ensures no marker leaks to the renderer/terminal output).
+- Fallback semantics:
+  - `TuiRuntime::do_render` uses the extracted marker position only when typed cursor metadata is `None`:
+    - `if cursor_pos.is_none() { cursor_pos = extracted_marker_pos; }`
+- Runtime tests:
+  - `cursor_marker_is_stripped_from_output_and_used_as_fallback_cursor_pos`
+  - `cursor_marker_is_stripped_but_cursor_metadata_wins`
 
-## Key traits/types (Rust sketches)
+### 5) Overlay cursor: skip overlay image lines
 
-```rust
-// core/terminal.rs
-pub trait Terminal {
-    fn start(
-        &mut self,
-        on_input: Box<dyn FnMut(String) + Send>,
-        on_resize: Box<dyn FnMut() + Send>,
-    );
-    fn stop(&mut self);
-    fn drain_input(&mut self, max_ms: u64, idle_ms: u64);
+File: `src/runtime/tui.rs`
 
-    fn write(&mut self, data: &str);
+- Cursor selection rejects overlay image lines:
+  - `TuiRuntime::composite_overlay_lines` checks `is_image_line(&overlay.lines[cursor_pos.row])` and skips the overlay cursor when that line is an image line.
+- Runtime test:
+  - `overlay_cursor_is_ignored_when_overlay_line_is_image`
 
-    fn columns(&self) -> u16;
-    fn rows(&self) -> u16;
-}
+### 6) Clamp cursor column to terminal width
 
-// core/output.rs
-pub enum TerminalCmd {
-    Bytes(String),
-    BytesStatic(&'static str),
-    HideCursor,
-    ShowCursor,
-    BracketedPasteEnable,
-    BracketedPasteDisable,
-    KittyQuery,
-    KittyEnable,
-    KittyDisable,
-    QueryCellSize,
-}
+File: `src/runtime/tui.rs`
 
-pub struct OutputGate {
-    // buffers TerminalCmd in deterministic order
-}
+- Clamp behavior:
+  - `TuiRuntime::do_render` clamps `cursor_pos.col` to `width.saturating_sub(1)` before generating hardware cursor moves.
+  - This prevents emitting huge `CSI n G` sequences for out-of-range cursor columns.
+- Runtime test:
+  - `cursor_col_is_clamped_to_terminal_width`
 
-impl OutputGate {
-    pub fn flush<T: Terminal>(&mut self, term: &mut T);
-}
+### 7) DiffRenderer: strict-width snapshot + clamp reset behavior
 
-// core/component.rs
-pub trait Component {
-    fn render(&mut self, width: usize) -> Vec<String>;
-    fn handle_input(&mut self, _data: &str) {}
-    fn invalidate(&mut self) {}
-    fn wants_key_release(&self) -> bool { false }
-}
+File: `src/render/renderer.rs`
 
-pub trait Focusable {
-    fn set_focused(&mut self, focused: bool);
-    fn is_focused(&self) -> bool;
-}
+- Strict width is snapshotted once per render call:
+  - `DiffRenderer::render` reads `strict_width_enabled()` a single time into `strict_width` (avoids repeated env reads mid-render).
+- Clamp behavior avoids duplicating line resets:
+  - `SEGMENT_RESET` is appended for non-image lines in `apply_line_resets(..)` before diff rendering.
+  - When clamping an overflowing non-image line, `clamp_non_image_line_to_width(..)` strips a trailing `SEGMENT_RESET` before slicing:
+    - `line.strip_suffix(SEGMENT_RESET).unwrap_or(line)`
+  - It then `slice_by_column(.., strict=true)` and re-appends `SEGMENT_RESET` once.
 
-// render/renderer.rs
-pub struct DiffRenderer {
-    previous_lines: Vec<String>,
-    previous_width: usize,
-    max_lines_rendered: usize,
-    hardware_cursor_row: usize,
-    previous_viewport_top: usize,
-}
+### 8) Run semantics: explicit `run_blocking_once`, compatibility alias `run`
 
-impl DiffRenderer {
-    pub fn render(
-        &mut self,
-        lines: Vec<String>,
-        width: usize,
-        height: usize,
-        is_image_line: fn(&str) -> bool,
-        clear_on_shrink: bool,
-        has_overlays: bool,
-    ) -> Vec<TerminalCmd>;
-}
+Files: `src/runtime/tui.rs`, `examples/*`
 
-// runtime/tui.rs
-pub struct TuiRuntime<T: Terminal> {
-    terminal: T,
-    output: OutputGate, // single output gate for the entire process
-    root: Box<dyn Component>,
-    renderer: DiffRenderer,
-    focused: Option<usize>,
-    on_debug: Option<Box<dyn FnMut()>>,
-    clear_on_shrink: bool, // PI_CLEAR_ON_SHRINK
-    show_hardware_cursor: bool, // PI_HARDWARE_CURSOR
-}
-```
+- Runtime API:
+  - `src/runtime/tui.rs`: `TuiRuntime::run_blocking_once()` is the explicit "wait for an event, then process one iteration" API.
+  - `src/runtime/tui.rs`: `TuiRuntime::run()` is an alias for compatibility and delegates to `run_blocking_once()`.
+- Examples use the explicit API:
+  - `examples/ansi-forensics.rs`, `examples/chat-simple.rs`, `examples/markdown-playground.rs` call `run_blocking_once()`.
 
----
-
-## Render pipeline (step‑by‑step, mirrors pi‑tui)
-
-### A) First render (no clear, preserve scrollback)
-1. `lines = root.render(width)`
-2. Composite overlays (if any) **before** diffing
-3. Extract IME cursor marker from `lines` (before resets)
-4. Append `SEGMENT_RESET` to every **non‑image** line
-5. Full render (no clear):
-   - `CSI ?2026 h` (synchronized output)
-   - print all lines with `\r\n`
-   - `CSI ?2026 l`
-6. Update `previous_lines`, `previous_width`, `max_lines_rendered`, `previous_viewport_top`
-7. Position hardware cursor (IME)
-
-### B) Width change (full clear)
-- If `prev_width != width`, **full clear + full render**:
-  - `CSI 3J` (scrollback), `CSI 2J` (screen), `CSI H` (home)
-  - then print all lines
-
-### C) Diff render (steady state)
-1. Compute `first_changed`, `last_changed` over `max(prev_lines, new_lines)`
-2. If no changes: only update hardware cursor (IME)
-3. If change is above previous viewport: full render (inline‑first correctness)
-4. Otherwise:
-   - Move cursor using tracked `hardware_cursor_row` + `previous_viewport_top`
-   - Clear and write only changed lines
-   - Handle appended lines vs deletions without scrolling
-   - Wrap in synchronized output
-5. Update `hardware_cursor_row`, `max_lines_rendered`, `previous_viewport_top`
-
-**Notes:**
-- `cursor_row` (logical end of content) is tracked separately from `hardware_cursor_row` and drives viewport calculations (`previous_viewport_top`).
-- `clearOnShrink` only when no overlays.
-- `isImageLine()` lines skip width checks and reset appends.
-- Width overflow checks are only performed in the diff render path (changed lines), not during full render.
-- Crash hard if a non‑image line exceeds terminal width (after logging).
-
----
-
-## ANSI/Unicode width & slicing (exact behavior)
-
-### Crates
-- `unicode-segmentation` (grapheme clusters)
-- `unicode-width` (East Asian width)
-- `unicode-emoji` or `emoji-data` (RGI emoji detection)
-
-### Rules (pi‑tui compatible)
-- Width measured per **grapheme cluster**.
-- Zero‑width clusters: default‑ignorable/control/mark/surrogate.
-- RGI emoji cluster => width **2**.
-- Tabs normalized to fixed width (pi uses 3 spaces).
-- ANSI sequences (CSI/OSC/APC) are zero‑width.
-
-### Functions to implement
-- `visible_width(s: &str) -> usize`
-- `slice_by_column(s, start, len, strict)` (strict drops boundary‑overflow wide chars)
-- `slice_with_width()` (returns text + visible width)
-- `extract_segments()` (before/after segments with inherited styling)
-- `wrap_text_with_ansi()` (preserve styling across line breaks)
-
-**Edge cases:**
-- OSC‑8 hyperlinks must be ignored in width and reset with `SEGMENT_RESET`.
-- Underline bleed: apply `CSI 24 m` at line end when needed (avoid full reset).
-- Always enforce final width ≤ terminal width.
-
----
-
-## Overlays + IME cursor handling (staged additions)
-
-### Overlays
-- Overlay stack with `hidden` flag and `visible(width,height)` predicate.
-- Showing an overlay stores `preFocus` and focuses the overlay if it is visible; hiding/removing restores focus to the topmost visible overlay or `preFocus`.
-- `OverlayHandle.setHidden()` and `visible()` callbacks can shift focus when visibility changes (e.g., resize).
-- Positioning by anchor, margins, offsets, and percentage sizing.
-- Pad working area to `max(max_lines_rendered, overlay_bottom)` to keep viewport stable.
-- Composite lines using `extract_segments()` + `slice_with_width()`.
-- Final width verification after compositing.
-
-### IME cursor handling
-- Components emit `CURSOR_MARKER` in render output.
-- `extract_cursor_position()` scans visible viewport bottom‑up, removes marker.
-- `position_hardware_cursor()` uses row delta + absolute column to place IME.
-
----
-
-## Cleanup / teardown strategy (RAII + signals)
-
-**Correctness‑critical:**
-- Disable bracketed paste: `CSI ?2004 l`.
-- Disable Kitty protocol: `CSI <u`.
-- `stdin.pause()` before leaving raw mode.
-- `drainInput()` to prevent key‑release leakage.
-- Restore raw mode and cursor visibility.
-- TUI `stop()` moves cursor to end of content, prints newline, drains input, then restores.
-
-**Rust plan:**
-- `TerminalGuard` (Drop) calls `drain_input()` then `stop()`.
-- `TuiRuntime` runs the same teardown on `Drop` (and `stop()` drains input before stopping the terminal).
-- `panic::set_hook` + `signal-hook` (SIGINT/SIGTERM) to ensure cleanup.
-
----
-
-## What’s required vs staged
-
-**Required for correctness / determinism**
-- Terminal RAII + raw mode/protocol cleanup.
-- StdinBuffer with escape‑sequence splitting + paste rewrap.
-- Kitty protocol query/enable/disable flow.
-- Diff renderer with synchronized output + hard width enforcement.
-- SEGMENT_RESET for non‑image lines + isImageLine handling.
-- IME cursor marker extraction & positioning.
-- Cell size query + response parsing for images.
-- Env toggles: `PI_HARDWARE_CURSOR`, `PI_CLEAR_ON_SHRINK`, `PI_TUI_WRITE_LOG`, `PI_TUI_DEBUG`, `PI_DEBUG_REDRAW`.
-
-**Stageable (after MVP)**
-- Overlay stack + compositing.
-- Advanced widgets.
-- Image protocol render helpers beyond width/cell‑size handling.
-
----
-
-If you want, I can draft concrete Rust trait signatures and a minimal `DiffRenderer` implementation skeleton that follows pi‑tui’s exact update algorithm and cursor tracking.
-
----
-
-## Known divergences (open-ended concerns)
-These are documented parity risks in the current snapshot. Either port the exact pi‑tui behavior or add targeted tests that document differences.
-
-- **Width logic:** Rust uses `unicode-width` + `emojis` while pi‑tui uses East‑Asian width + regex-based default‑ignorable handling. Options: port pi‑tui rules or add targeted width tests that codify the divergence.
-- **Markdown parsing:** Rust uses the `markdown` crate while pi‑tui uses `marked`. Options: add compatibility fixtures/tests or pursue deeper token‑level parity.
-- **Image max-height:** Rust enforces `max_height_cells` sizing in `src/core/terminal_image.rs::render_image`, while pi‑tui TS currently ignores `maxHeightCells` in `packages/tui/src/terminal-image.ts::renderImage` and `packages/tui/src/components/image.ts`. Impact: callers that set a max height will see smaller images (and fewer reserved rows) in Rust than in TS.
