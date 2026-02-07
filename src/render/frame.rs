@@ -69,11 +69,23 @@ impl Line {
     }
 
     pub fn into_string(self) -> String {
-        let mut out = String::new();
-        for span in self.spans {
-            out.push_str(span.as_str());
+        // Fast path: a single span is the common case. Move the inner String out
+        // without allocating/copying.
+        let spans = self.spans;
+        match spans.len() {
+            0 => String::new(),
+            1 => spans.into_iter().next().unwrap().into_string(),
+            _ => {
+                // Multi-span lines must be concatenated. Preallocate to avoid
+                // repeated growth as we append spans.
+                let capacity: usize = spans.iter().map(|span| span.as_str().len()).sum();
+                let mut out = String::with_capacity(capacity);
+                for span in spans {
+                    out.push_str(span.as_str());
+                }
+                out
+            }
         }
-        out
     }
 }
 
@@ -184,5 +196,21 @@ mod tests {
         assert!(!frame.lines()[0].is_image());
         assert!(frame.lines()[1].is_image());
         assert!(frame.lines()[2].is_image());
+    }
+
+    #[test]
+    fn line_into_string_moves_out_single_span_without_copy() {
+        let text = "hello".to_string();
+        let ptr = text.as_ptr();
+        let cap = text.capacity();
+        let len = text.len();
+
+        let line = Line::new(vec![Span::new(text)]);
+        let out = line.into_string();
+
+        assert_eq!(out, "hello");
+        assert_eq!(out.len(), len);
+        assert_eq!(out.capacity(), cap);
+        assert_eq!(out.as_ptr(), ptr);
     }
 }

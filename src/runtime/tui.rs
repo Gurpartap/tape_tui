@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::core::component::Component;
-use crate::core::cursor::CursorPos;
+use crate::core::cursor::{CursorPos, CURSOR_MARKER};
 use crate::core::input::{is_kitty_query_response, KeyEventType};
 use crate::core::input_event::{parse_input_events, InputEvent};
 use crate::core::output::{OutputGate, TerminalCmd};
@@ -642,6 +642,20 @@ impl<T: Terminal> TuiRuntime<T> {
             }
         }
 
+        // Components may emit the legacy CURSOR_MARKER APC sequence. Ensure it never
+        // reaches the renderer/terminal output. If a component didn't provide typed
+        // cursor metadata, use the extracted marker position as a fallback.
+        let extracted_marker_pos = crate::core::cursor::extract_cursor_marker(&mut lines, height);
+        for line in lines.iter_mut() {
+            while let Some(idx) = line.find(CURSOR_MARKER) {
+                let end = idx + CURSOR_MARKER.len();
+                line.replace_range(idx..end, "");
+            }
+        }
+        if cursor_pos.is_none() {
+            cursor_pos = extracted_marker_pos;
+        }
+
         let has_overlays = self.has_overlay();
         let frame = Frame::from(lines).with_cursor(cursor_pos);
         let cursor_pos = frame.cursor();
@@ -1238,6 +1252,97 @@ mod tests {
         let output = runtime.terminal.output.as_str();
         let expected = "\x1b[>7u\x1b[?2026hhello\x1b[0m\x1b]8;;\x07\x1b[?2026l\x1b[6G\x1b[?25l";
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn cursor_marker_is_stripped_from_output_and_used_as_fallback_cursor_pos() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        #[derive(Default)]
+        struct CursorMarkerComponent;
+
+        impl Component for CursorMarkerComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec![format!(
+                    "hello{}{}",
+                    crate::core::cursor::CURSOR_MARKER,
+                    crate::core::cursor::CURSOR_MARKER
+                )]
+            }
+        }
+
+        let terminal = TestTerminal::new(80, 24);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(CursorMarkerComponent::default())));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        runtime.handle_input("\x1b[?1u");
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            !output.contains(crate::core::cursor::CURSOR_MARKER),
+            "cursor marker leaked into output: {output:?}"
+        );
+        assert!(output.contains("hello"), "expected hello in output: {output:?}");
+        assert!(
+            output.ends_with("\x1b[6G\x1b[?25l"),
+            "unexpected output suffix: {output:?}"
+        );
+    }
+
+    #[test]
+    fn cursor_marker_is_stripped_but_cursor_metadata_wins() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        #[derive(Default)]
+        struct CursorMarkerWithMetadataComponent;
+
+        impl Component for CursorMarkerWithMetadataComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec![format!(
+                    "hello{}{}",
+                    crate::core::cursor::CURSOR_MARKER,
+                    crate::core::cursor::CURSOR_MARKER
+                )]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 0 })
+            }
+        }
+
+        let terminal = TestTerminal::new(80, 24);
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
+            CursorMarkerWithMetadataComponent::default(),
+        )));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        runtime.handle_input("\x1b[?1u");
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            !output.contains(crate::core::cursor::CURSOR_MARKER),
+            "cursor marker leaked into output: {output:?}"
+        );
+        assert!(output.contains("hello"), "expected hello in output: {output:?}");
+        assert!(
+            output.ends_with("\x1b[1G\x1b[?25l"),
+            "unexpected output suffix: {output:?}"
+        );
     }
 
     #[test]
