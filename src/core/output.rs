@@ -4,6 +4,21 @@
 
 use crate::core::terminal::Terminal;
 
+// When a frame is large, coalescing all output into a new String doubles peak
+// memory usage (payload + coalesced copy). Stream large flushes in chunks to
+// avoid this.
+const OUTPUT_GATE_STREAM_THRESHOLD_BYTES: usize = 64 * 1024;
+const OUTPUT_GATE_STREAM_CHUNK_BYTES: usize = 16 * 1024;
+
+fn decimal_len(mut n: usize) -> usize {
+    let mut len = 1;
+    while n >= 10 {
+        n /= 10;
+        len += 1;
+    }
+    len
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalCmd {
     /// Raw bytes/control sequences (UTF-8 string) to be written to the terminal.
@@ -71,6 +86,100 @@ impl OutputGate {
         self.cmds.clear();
     }
 
+    fn encoded_len(cmd: &TerminalCmd) -> usize {
+        match cmd {
+            TerminalCmd::Bytes(data) => data.len(),
+            TerminalCmd::BytesStatic(data) => data.len(),
+            TerminalCmd::HideCursor => "\x1b[?25l".len(),
+            TerminalCmd::ShowCursor => "\x1b[?25h".len(),
+            TerminalCmd::MoveUp(n) | TerminalCmd::MoveDown(n) | TerminalCmd::ColumnAbs(n) => {
+                if *n == 0 {
+                    0
+                } else {
+                    // "\x1b[" + digits + suffix
+                    3 + decimal_len(*n)
+                }
+            }
+            TerminalCmd::BracketedPasteEnable => "\x1b[?2004h".len(),
+            TerminalCmd::BracketedPasteDisable => "\x1b[?2004l".len(),
+            TerminalCmd::KittyQuery => "\x1b[?u".len(),
+            TerminalCmd::KittyEnable => "\x1b[>7u".len(),
+            TerminalCmd::KittyDisable => "\x1b[<u".len(),
+            TerminalCmd::QueryCellSize => "\x1b[16t".len(),
+        }
+    }
+
+    fn encode_into(out: &mut String, cmd: TerminalCmd) {
+        use std::fmt::Write as _;
+
+        match cmd {
+            TerminalCmd::Bytes(data) => out.push_str(&data),
+            TerminalCmd::BytesStatic(data) => out.push_str(data),
+            TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
+            TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+            TerminalCmd::MoveUp(n) => {
+                if n > 0 {
+                    let _ = write!(out, "\x1b[{n}A");
+                }
+            }
+            TerminalCmd::MoveDown(n) => {
+                if n > 0 {
+                    let _ = write!(out, "\x1b[{n}B");
+                }
+            }
+            TerminalCmd::ColumnAbs(n) => {
+                if n > 0 {
+                    let _ = write!(out, "\x1b[{n}G");
+                }
+            }
+            TerminalCmd::BracketedPasteEnable => out.push_str("\x1b[?2004h"),
+            TerminalCmd::BracketedPasteDisable => out.push_str("\x1b[?2004l"),
+            TerminalCmd::KittyQuery => out.push_str("\x1b[?u"),
+            TerminalCmd::KittyEnable => out.push_str("\x1b[>7u"),
+            TerminalCmd::KittyDisable => out.push_str("\x1b[<u"),
+            TerminalCmd::QueryCellSize => out.push_str("\x1b[16t"),
+        }
+    }
+
+    fn flush_streaming<T: Terminal>(&mut self, term: &mut T) {
+        let mut buffer = String::with_capacity(OUTPUT_GATE_STREAM_CHUNK_BYTES);
+
+        for cmd in self.cmds.drain(..) {
+            match cmd {
+                TerminalCmd::Bytes(data) => {
+                    if !buffer.is_empty() {
+                        term.write(&buffer);
+                        buffer.clear();
+                    }
+                    if !data.is_empty() {
+                        term.write(&data);
+                    }
+                    continue;
+                }
+                TerminalCmd::BytesStatic(data) if data.len() >= OUTPUT_GATE_STREAM_CHUNK_BYTES => {
+                    if !buffer.is_empty() {
+                        term.write(&buffer);
+                        buffer.clear();
+                    }
+                    term.write(data);
+                    continue;
+                }
+                cmd => {
+                    Self::encode_into(&mut buffer, cmd);
+                }
+            }
+
+            if buffer.len() >= OUTPUT_GATE_STREAM_CHUNK_BYTES {
+                term.write(&buffer);
+                buffer.clear();
+            }
+        }
+
+        if !buffer.is_empty() {
+            term.write(&buffer);
+        }
+    }
+
     /// Flush buffered commands to the terminal.
     ///
     /// This is the single write gate: `Terminal::write(..)` must not be called
@@ -80,38 +189,24 @@ impl OutputGate {
             return;
         }
 
-        let mut out = String::new();
-        for cmd in self.cmds.drain(..) {
-            match cmd {
-                TerminalCmd::Bytes(data) => out.push_str(&data),
-                TerminalCmd::BytesStatic(data) => out.push_str(data),
-                TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
-                TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
-                TerminalCmd::MoveUp(n) => {
-                    if n > 0 {
-                        out.push_str(&format!("\x1b[{n}A"));
-                    }
-                }
-                TerminalCmd::MoveDown(n) => {
-                    if n > 0 {
-                        out.push_str(&format!("\x1b[{n}B"));
-                    }
-                }
-                TerminalCmd::ColumnAbs(n) => {
-                    if n > 0 {
-                        out.push_str(&format!("\x1b[{n}G"));
-                    }
-                }
-                TerminalCmd::BracketedPasteEnable => out.push_str("\x1b[?2004h"),
-                TerminalCmd::BracketedPasteDisable => out.push_str("\x1b[?2004l"),
-                TerminalCmd::KittyQuery => out.push_str("\x1b[?u"),
-                TerminalCmd::KittyEnable => out.push_str("\x1b[>7u"),
-                TerminalCmd::KittyDisable => out.push_str("\x1b[<u"),
-                TerminalCmd::QueryCellSize => out.push_str("\x1b[16t"),
-            }
+        let mut total_len = 0usize;
+        for cmd in &self.cmds {
+            total_len = total_len.saturating_add(Self::encoded_len(cmd));
         }
 
-        term.write(&out);
+        if total_len > OUTPUT_GATE_STREAM_THRESHOLD_BYTES {
+            self.flush_streaming(term);
+            return;
+        }
+
+        let mut out = String::with_capacity(total_len);
+        for cmd in self.cmds.drain(..) {
+            Self::encode_into(&mut out, cmd);
+        }
+
+        if !out.is_empty() {
+            term.write(&out);
+        }
     }
 }
 
@@ -211,6 +306,32 @@ mod tests {
 
         assert_eq!(term.output, expected);
         assert_eq!(term.write_calls, 1);
+    }
+
+    #[test]
+    fn flush_streams_large_payloads_without_coalescing() {
+        let big = "x".repeat(super::OUTPUT_GATE_STREAM_THRESHOLD_BYTES + 1);
+
+        let mut expected = String::new();
+        expected.push_str("\x1b[?25l");
+        expected.push_str(&big);
+        expected.push_str("\x1b[?25h");
+
+        let mut gate = OutputGate::new();
+        gate.extend([
+            TerminalCmd::HideCursor,
+            TerminalCmd::Bytes(big),
+            TerminalCmd::ShowCursor,
+        ]);
+
+        let mut term = RecordingTerminal::default();
+        gate.flush(&mut term);
+
+        assert_eq!(term.output, expected);
+        assert!(
+            term.write_calls > 1,
+            "expected streaming path for large payloads"
+        );
     }
 
     #[test]
