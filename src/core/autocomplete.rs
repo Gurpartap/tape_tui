@@ -91,23 +91,23 @@ struct ParsedPathPrefix {
 }
 
 fn parse_path_prefix(prefix: &str) -> ParsedPathPrefix {
-    if prefix.starts_with("@\"") {
+    if let Some(rest) = prefix.strip_prefix("@\"") {
         return ParsedPathPrefix {
-            raw_prefix: prefix[2..].to_string(),
+            raw_prefix: rest.to_string(),
             is_at_prefix: true,
             is_quoted_prefix: true,
         };
     }
-    if prefix.starts_with('"') {
+    if let Some(rest) = prefix.strip_prefix('"') {
         return ParsedPathPrefix {
-            raw_prefix: prefix[1..].to_string(),
+            raw_prefix: rest.to_string(),
             is_at_prefix: false,
             is_quoted_prefix: true,
         };
     }
-    if prefix.starts_with('@') {
+    if let Some(rest) = prefix.strip_prefix('@') {
         return ParsedPathPrefix {
-            raw_prefix: prefix[1..].to_string(),
+            raw_prefix: rest.to_string(),
             is_at_prefix: true,
             is_quoted_prefix: false,
         };
@@ -239,6 +239,12 @@ impl AbortSignal {
 
     pub fn is_aborted(&self) -> bool {
         self.aborted.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for AbortSignal {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -406,11 +412,8 @@ impl CombinedAutocompleteProvider {
 
     fn expand_home_path(&self, path: &str) -> String {
         let home = std::env::var("HOME").unwrap_or_default();
-        if path.starts_with("~/") {
-            let mut expanded = Path::new(&home)
-                .join(&path[2..])
-                .to_string_lossy()
-                .to_string();
+        if let Some(rest) = path.strip_prefix("~/") {
+            let mut expanded = Path::new(&home).join(rest).to_string_lossy().to_string();
             if path.ends_with('/') && !expanded.ends_with('/') {
                 expanded.push('/');
             }
@@ -438,17 +441,7 @@ impl CombinedAutocompleteProvider {
             || parsed.raw_prefix == "/"
             || (parsed.is_at_prefix && parsed.raw_prefix.is_empty());
 
-        let (search_dir, search_prefix) = if is_root_prefix {
-            let dir = if parsed.raw_prefix.starts_with('~') || expanded_prefix.starts_with('/') {
-                expanded_prefix.clone()
-            } else {
-                self.base_path
-                    .join(&expanded_prefix)
-                    .to_string_lossy()
-                    .to_string()
-            };
-            (dir, String::new())
-        } else if parsed.raw_prefix.ends_with('/') {
+        let (search_dir, search_prefix) = if is_root_prefix || parsed.raw_prefix.ends_with('/') {
             let dir = if parsed.raw_prefix.starts_with('~') || expanded_prefix.starts_with('/') {
                 expanded_prefix.clone()
             } else {
@@ -500,7 +493,9 @@ impl CombinedAutocompleteProvider {
                 format!("{display_prefix}{name}")
             } else if display_prefix.contains('/') {
                 if display_prefix.starts_with("~/") {
-                    let home_relative = &display_prefix[2..];
+                    let home_relative = display_prefix
+                        .strip_prefix("~/")
+                        .expect("display_prefix starts with ~/");
                     let dir = dirname(home_relative);
                     if dir == "." {
                         format!("~/{name}")
