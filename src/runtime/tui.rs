@@ -480,7 +480,12 @@ impl<T: Terminal> TuiRuntime<T> {
         self.panic_hook_guard = None;
     }
 
-    pub fn run(&mut self) {
+    /// Block until at least one input/resize/render event is available, then
+    /// process exactly one iteration.
+    ///
+    /// Note: this does **not** run an event loop until stopped; callers typically
+    /// call this in a loop.
+    pub fn run_blocking_once(&mut self) {
         if self.stopped {
             return;
         }
@@ -490,6 +495,11 @@ impl<T: Terminal> TuiRuntime<T> {
         }
 
         self.run_once();
+    }
+
+    /// Alias for [`TuiRuntime::run_blocking_once`]. Kept for compatibility.
+    pub fn run(&mut self) {
+        self.run_blocking_once();
     }
 
     #[cfg(test)]

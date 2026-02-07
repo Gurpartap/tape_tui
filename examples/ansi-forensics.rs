@@ -828,7 +828,7 @@ fn main() -> std::io::Result<()> {
             c.begin_tick();
         }
 
-        tui.run();
+        tui.run_blocking_once();
 
         if *exit_flag.borrow() {
             break;

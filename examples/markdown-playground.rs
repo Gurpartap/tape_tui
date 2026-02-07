@@ -528,7 +528,7 @@ fn main() -> std::io::Result<()> {
     tui.start()?;
 
     loop {
-        tui.run();
+        tui.run_blocking_once();
 
         if *exit_flag.borrow() {
             break;
