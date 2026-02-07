@@ -6,11 +6,13 @@ use crate::core::text::utils::apply_background_to_line;
 use crate::core::text::width::visible_width;
 use crate::Frame;
 
+pub type TextBgFn = Box<dyn Fn(&str) -> String>;
+
 pub struct Text {
     text: String,
     padding_x: usize,
     padding_y: usize,
-    custom_bg_fn: Option<Box<dyn Fn(&str) -> String>>,
+    custom_bg_fn: Option<TextBgFn>,
     cached_text: Option<String>,
     cached_width: Option<usize>,
     cached_frame: Option<Frame>,
@@ -52,7 +54,7 @@ impl Text {
         self.invalidate();
     }
 
-    pub fn set_custom_bg_fn(&mut self, custom_bg_fn: Option<Box<dyn Fn(&str) -> String>>) {
+    pub fn set_custom_bg_fn(&mut self, custom_bg_fn: Option<TextBgFn>) {
         self.custom_bg_fn = custom_bg_fn;
         self.invalidate();
     }
