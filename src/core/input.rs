@@ -423,11 +423,14 @@ pub fn matches_key(data: &str, key_id: &str, kitty_active: bool) -> bool {
                         }
                     }
 
-                    if parsed.alt && !parsed.ctrl && !parsed.shift && !kitty_active && is_letter(ch)
+                    if parsed.alt
+                        && !parsed.ctrl
+                        && !parsed.shift
+                        && !kitty_active
+                        && is_letter(ch)
+                        && data == format!("\x1b{}", ch)
                     {
-                        if data == format!("\x1b{}", ch) {
-                            return true;
-                        }
+                        return true;
                     }
 
                     if parsed.ctrl && !parsed.shift && !parsed.alt {
@@ -547,9 +550,9 @@ pub fn parse_key(data: &str, kitty_active: bool) -> Option<String> {
             }
 
             let codepoint = kitty.codepoint;
-            let is_latin_letter = codepoint >= 97 && codepoint <= 122;
+            let is_latin_letter = (97..=122).contains(&codepoint);
             let is_known_symbol =
-                codepoint >= 0 && codepoint <= 127 && is_symbol_key(codepoint as u8 as char);
+                (0..=127).contains(&codepoint) && is_symbol_key(codepoint as u8 as char);
             let effective_codepoint = if is_latin_letter || is_known_symbol {
                 codepoint
             } else {
@@ -573,10 +576,8 @@ pub fn parse_key(data: &str, kitty_active: bool) -> Option<String> {
         return Some(key_id);
     }
 
-    if kitty_active {
-        if data == "\x1b\r" || data == "\n" {
-            return Some("shift+enter".to_string());
-        }
+    if kitty_active && (data == "\x1b\r" || data == "\n") {
+        return Some("shift+enter".to_string());
     }
 
     if let Some(key_id) = legacy_sequence_key_id(data) {
@@ -685,7 +686,7 @@ pub fn parse_key(data: &str, kitty_active: bool) -> Option<String> {
             let ch = (code + 96) as char;
             return Some(format!("ctrl+{}", ch));
         }
-        if (b'A'..=b'Z').contains(&code) {
+        if code.is_ascii_uppercase() {
             let lower = (code + 32) as char;
             return Some(format!("shift+{}", lower));
         }
@@ -710,7 +711,7 @@ pub fn parse_text(data: &str, kitty_active: bool) -> Option<String> {
 
     let has_control_chars = data.chars().any(|ch| {
         let code = ch as u32;
-        code < 32 || code == 0x7f || (code >= 0x80 && code <= 0x9f)
+        code < 32 || code == 0x7f || (0x80..=0x9f).contains(&code)
     });
     if has_control_chars {
         return None;
@@ -760,9 +761,9 @@ fn parse_key_id(key_id: &str) -> Option<ParsedKeyId> {
     }
     Some(ParsedKeyId {
         key,
-        ctrl: parts.iter().any(|part| *part == "ctrl"),
-        shift: parts.iter().any(|part| *part == "shift"),
-        alt: parts.iter().any(|part| *part == "alt"),
+        ctrl: parts.contains(&"ctrl"),
+        shift: parts.contains(&"shift"),
+        alt: parts.contains(&"alt"),
     })
 }
 
