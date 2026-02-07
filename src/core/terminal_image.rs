@@ -729,7 +729,7 @@ mod tests {
         let state = TerminalImageState::default();
         for _ in 0..100 {
             let id = allocate_image_id(&state);
-            assert!(id >= 1 && id <= 0xffff_fffe);
+            assert!((1..=0xffff_fffe).contains(&id));
         }
     }
 
