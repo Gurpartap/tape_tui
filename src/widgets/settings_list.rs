@@ -14,6 +14,7 @@ use crate::widgets::input::Input;
 
 pub type SubmenuDone = Box<dyn FnMut(Option<String>)>;
 pub type SubmenuFactory = Box<dyn FnMut(String, SubmenuDone) -> Box<dyn Component>>;
+pub type SettingsListItemFormatFn = Box<dyn Fn(&str, bool) -> String>;
 
 pub struct SettingItem {
     pub id: String,
@@ -42,8 +43,8 @@ impl SettingItem {
 }
 
 pub struct SettingsListTheme {
-    pub label: Box<dyn Fn(&str, bool) -> String>,
-    pub value: Box<dyn Fn(&str, bool) -> String>,
+    pub label: SettingsListItemFormatFn,
+    pub value: SettingsListItemFormatFn,
     pub description: Box<dyn Fn(&str) -> String>,
     pub cursor: String,
     pub hint: Box<dyn Fn(&str) -> String>,
