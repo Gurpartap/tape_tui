@@ -703,10 +703,10 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
             });
         }
 
-        if text_before_cursor.starts_with('/') {
-            if let Some(space_index) = text_before_cursor.find(' ') {
-                let command_name = &text_before_cursor[1..space_index];
-                let argument_text = &text_before_cursor[space_index + 1..];
+        if let Some(prefix) = text_before_cursor.strip_prefix('/') {
+            if let Some(space_index) = prefix.find(' ') {
+                let command_name = &prefix[..space_index];
+                let argument_text = &prefix[space_index + 1..];
 
                 if let Some(command) = self
                     .commands
@@ -728,7 +728,6 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                 return None;
             }
 
-            let prefix = &text_before_cursor[1..];
             let command_items: Vec<CommandInfo> = self
                 .commands
                 .iter()
