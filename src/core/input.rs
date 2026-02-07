@@ -779,7 +779,7 @@ fn raw_ctrl_char(key: char) -> Option<char> {
 }
 
 fn is_letter(ch: char) -> bool {
-    matches!(ch, 'a'..='z')
+    ch.is_ascii_lowercase()
 }
 
 fn is_symbol_key(ch: char) -> bool {
@@ -992,8 +992,8 @@ fn matches_kitty_sequence(data: &str, expected_codepoint: i32, expected_modifier
 
     if parsed.base_layout_key == Some(expected_codepoint) {
         let cp = parsed.codepoint;
-        let is_latin_letter = cp >= 97 && cp <= 122;
-        let is_known_symbol = cp >= 0 && cp <= 127 && is_symbol_key(cp as u8 as char);
+        let is_latin_letter = (97..=122).contains(&cp);
+        let is_known_symbol = (0..=127).contains(&cp) && is_symbol_key(cp as u8 as char);
         if !is_latin_letter && !is_known_symbol {
             return true;
         }
@@ -1039,7 +1039,7 @@ fn matches_modify_other_keys(data: &str, expected_keycode: i32, expected_modifie
 }
 
 fn matches_legacy_sequence(data: &str, sequences: &[&str]) -> bool {
-    sequences.iter().any(|seq| *seq == data)
+    sequences.contains(&data)
 }
 
 #[derive(Clone, Copy)]
