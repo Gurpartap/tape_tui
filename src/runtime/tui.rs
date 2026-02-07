@@ -27,6 +27,8 @@ use crate::runtime::ime::position_hardware_cursor;
 const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
 
+type ComponentRc = Rc<RefCell<Box<dyn Component>>>;
+
 #[derive(Debug, Default)]
 struct CrashCleanup {
     ran: AtomicBool,
@@ -61,7 +63,7 @@ pub struct TuiRuntime<T: Terminal> {
     terminal: T,
     output: OutputGate,
     terminal_image_state: Arc<TerminalImageState>,
-    root: Rc<RefCell<Box<dyn Component>>>,
+    root: ComponentRc,
     renderer: DiffRenderer,
     focus: FocusState,
     overlays: Rc<RefCell<OverlayState>>,
@@ -85,14 +87,14 @@ struct OverlayState {
     entries: Vec<OverlayEntry>,
     next_id: u64,
     dirty: bool,
-    pending_pre_focus: Option<Rc<RefCell<Box<dyn Component>>>>,
+    pending_pre_focus: Option<ComponentRc>,
 }
 
 struct OverlayEntry {
     id: u64,
-    component: Rc<RefCell<Box<dyn Component>>>,
+    component: ComponentRc,
     options: Option<OverlayOptions>,
-    pre_focus: Option<Rc<RefCell<Box<dyn Component>>>>,
+    pre_focus: Option<ComponentRc>,
     hidden: bool,
 }
 
@@ -297,7 +299,7 @@ impl OverlayHandle {
 }
 
 impl<T: Terminal> TuiRuntime<T> {
-    pub fn new(terminal: T, root: Rc<RefCell<Box<dyn Component>>>) -> Self {
+    pub fn new(terminal: T, root: ComponentRc) -> Self {
         let clear_on_shrink = env_flag("PI_CLEAR_ON_SHRINK");
         let show_hardware_cursor = env_flag("PI_HARDWARE_CURSOR");
         Self {
@@ -348,7 +350,7 @@ impl<T: Terminal> TuiRuntime<T> {
 
     pub fn show_overlay(
         &mut self,
-        component: Rc<RefCell<Box<dyn Component>>>,
+        component: ComponentRc,
         options: Option<OverlayOptions>,
     ) -> OverlayHandle {
         let pre_focus = self.focus.focused();
@@ -907,10 +909,7 @@ impl<T: Terminal> TuiRuntime<T> {
         None
     }
 
-    fn pre_focus_for_overlay(
-        &self,
-        component: &Rc<RefCell<Box<dyn Component>>>,
-    ) -> Option<Option<Rc<RefCell<Box<dyn Component>>>>> {
+    fn pre_focus_for_overlay(&self, component: &ComponentRc) -> Option<Option<ComponentRc>> {
         let state = self.overlays.borrow();
         state
             .entries
@@ -919,10 +918,7 @@ impl<T: Terminal> TuiRuntime<T> {
             .map(|entry| entry.pre_focus.clone())
     }
 
-    fn is_overlay_visible_for_component(
-        &self,
-        component: &Rc<RefCell<Box<dyn Component>>>,
-    ) -> bool {
+    fn is_overlay_visible_for_component(&self, component: &ComponentRc) -> bool {
         let state = self.overlays.borrow();
         if let Some(entry) = state
             .entries
