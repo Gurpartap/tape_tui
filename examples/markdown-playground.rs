@@ -458,13 +458,14 @@ impl Component for PlaygroundApp {
 }
 
 fn overlay_options() -> OverlayOptions {
-    let mut options = OverlayOptions::default();
-    options.anchor = Some(OverlayAnchor::Center);
-    options.margin = Some(OverlayMargin::uniform(2));
-    options.width = Some(SizeValue::percent(60.0));
-    options.min_width = Some(34);
-    options.max_height = Some(SizeValue::percent(60.0));
-    options
+    OverlayOptions {
+        anchor: Some(OverlayAnchor::Center),
+        margin: Some(OverlayMargin::uniform(2)),
+        width: Some(SizeValue::percent(60.0)),
+        min_width: Some(34),
+        max_height: Some(SizeValue::percent(60.0)),
+        ..Default::default()
+    }
 }
 
 fn install_playground_keybindings(handle: &EditorKeybindingsHandle) {
