@@ -55,20 +55,46 @@ File: `src/core/output.rs`
 - Unit test:
   - `flush_streams_large_payloads_without_coalescing` asserts the streaming path is taken for payloads larger than `OUTPUT_GATE_STREAM_THRESHOLD_BYTES`.
 
-### 2) PanicHookGuard composability (identity tracking + conditional drop)
+### 2) PanicHookGuard composability (process-global wrapper + lock-free cleanup registry)
 
 File: `src/platform/process_terminal.rs`
 
-- Identity tracking:
-  - `PanicHookId { data, vtable }` + `panic_hook_id(..)` compute a stable identity for a hook by comparing the fat pointer components.
-- Guard drop logic avoids clobbering newer hooks:
-  - `PanicHookGuard::drop` calls `std::panic::take_hook()` and compares `panic_hook_id(current)` vs `self.installed`.
-  - If the current hook is not the one this guard installed, it re-installs the current hook and returns (no clobber).
-  - If it matches, it restores the previous hook captured by `install_panic_hook(..)` (using `Arc::try_unwrap` when possible).
-- Installation API:
-  - `install_panic_hook(..) -> PanicHookGuard`
-- Unix-only unit test:
-  - `panic_hook_guard_drop_does_not_clobber_later_hooks` (under `#[cfg(all(test, unix))]`) validates that dropping an older guard does not override a later-installed hook.
+Background
+- Panic hooks are process-global. This crate may be used by multiple independent runtimes within one process.
+- Crash cleanup must be best-effort and must not hang.
+- The panic hook path must be lock-free (a panic may occur while a mutex is held).
+
+Design
+- Instead of stacking per-guard hooks, the platform layer installs a single process-global wrapper hook plus a global registry of cleanup callbacks.
+- The wrapper hook is installed when at least one `PanicHookGuard` exists, and removed when the last guard is dropped.
+
+Identity tracking (used for uninstall safety)
+- `PanicHookId { data, vtable }` + `panic_hook_id(..)` compute a stable identity for a hook by comparing the fat pointer components.
+- On uninstall, identity is used to restore the previous hook only if the currently installed hook is still our wrapper (so we never clobber hooks installed after ours).
+
+Lock-free registry of cleanups
+- Global head pointer:
+  - `PANIC_CLEANUP_HEAD: AtomicPtr<PanicCleanupNode>`
+- Each `PanicCleanupNode` stores:
+  - `cleanup: Arc<dyn Fn() + Send + Sync>`
+  - `ran: AtomicBool` (cleanup executes at most once per node/process)
+  - `active: AtomicBool` (guard drop deactivates the node)
+  - `next: AtomicPtr<PanicCleanupNode>`
+- Nodes are intentionally leaked for the program lifetime; guard drop only flips `active=false`.
+  This avoids any memory reclamation/ABA complexity on the panic path.
+
+Wrapper install/uninstall bookkeeping (not on panic path)
+- Global refcount:
+  - `PANIC_HOOK_ACTIVE_GUARDS: AtomicUsize`
+  - 0 → 1 triggers wrapper install
+  - 1 → 0 triggers wrapper uninstall
+- `sync_panic_hook_state()` performs the install/uninstall under `PANIC_HOOK_WRAPPER_STATE: Mutex<PanicHookWrapperState>`.
+  - The installed wrapper hook itself never locks.
+  - The wrapper hook runs `run_all_panic_cleanups()` (atomic traversal) and then delegates to the captured previous hook.
+
+Unix-only unit tests
+- `panic_hook_guard_drop_does_not_clobber_later_hooks` validates we do not overwrite a later-installed hook.
+- `panic_hook_guards_restore_base_hook_when_dropped_out_of_order` validates that dropping guards out of LIFO order still restores the base hook chain when the last guard is dropped.
 
 ### 3) HookTerminal crash-safety and CrashCleanup usage
 
