@@ -51,6 +51,7 @@ impl SizeValue {
     }
 }
 
+#[derive(Default)]
 pub struct OverlayOptions {
     pub width: Option<SizeValue>,
     pub min_width: Option<usize>,
@@ -62,23 +63,6 @@ pub struct OverlayOptions {
     pub col: Option<SizeValue>,
     pub margin: Option<OverlayMargin>,
     pub visible: Option<Box<dyn Fn(usize, usize) -> bool>>,
-}
-
-impl Default for OverlayOptions {
-    fn default() -> Self {
-        Self {
-            width: None,
-            min_width: None,
-            max_height: None,
-            anchor: None,
-            offset_x: None,
-            offset_y: None,
-            row: None,
-            col: None,
-            margin: None,
-            visible: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,9 +341,11 @@ mod tests {
 
     #[test]
     fn layout_percent_positioning() {
-        let mut options = OverlayOptions::default();
-        options.row = Some(SizeValue::Percent(50.0));
-        options.col = Some(SizeValue::Percent(50.0));
+        let options = OverlayOptions {
+            row: Some(SizeValue::Percent(50.0)),
+            col: Some(SizeValue::Percent(50.0)),
+            ..Default::default()
+        };
         let layout = resolve_overlay_layout(Some(&options), 2, 20, 10);
         assert_eq!(layout.row, 4);
         assert_eq!(layout.col, 0);
