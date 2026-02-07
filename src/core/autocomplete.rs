@@ -174,12 +174,16 @@ pub struct AutocompleteSuggestions {
     pub prefix: String,
 }
 
+pub type SlashCommandArgumentCompletionFn =
+    dyn Fn(&str) -> Option<Vec<AutocompleteItem>> + Send + Sync;
+
+pub type SlashCommandArgumentCompletions = Arc<SlashCommandArgumentCompletionFn>;
+
 #[derive(Clone)]
 pub struct SlashCommand {
     pub name: String,
     pub description: Option<String>,
-    pub get_argument_completions:
-        Option<Arc<dyn Fn(&str) -> Option<Vec<AutocompleteItem>> + Send + Sync>>,
+    pub get_argument_completions: Option<SlashCommandArgumentCompletions>,
 }
 
 #[derive(Clone)]
