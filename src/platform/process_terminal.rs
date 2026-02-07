@@ -5,7 +5,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
@@ -542,8 +542,8 @@ type PanicHookFn = dyn Fn(&std::panic::PanicHookInfo) + Send + Sync + 'static;
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PanicHookId {
-    data: *const (),
-    vtable: *const (),
+    data: usize,
+    vtable: usize,
 }
 
 #[cfg(unix)]
@@ -552,41 +552,28 @@ fn panic_hook_id(hook: &PanicHookFn) -> PanicHookId {
     // installed hook is the one this guard installed.
     let raw = hook as *const PanicHookFn;
     let (data, vtable): (*const (), *const ()) = unsafe { std::mem::transmute(raw) };
-    PanicHookId { data, vtable }
+    PanicHookId {
+        data: data as usize,
+        vtable: vtable as usize,
+    }
 }
 
 #[cfg(unix)]
-pub struct PanicHookGuard {
-    previous: Option<Arc<Box<PanicHookFn>>>,
-    installed: PanicHookId,
+struct PanicCleanupNode {
+    cleanup: Arc<dyn Fn() + Send + Sync + 'static>,
+    ran: AtomicBool,
+    active: AtomicBool,
+    next: AtomicPtr<PanicCleanupNode>,
 }
 
 #[cfg(unix)]
-impl Drop for PanicHookGuard {
-    fn drop(&mut self) {
-        // Panic hooks are process-global. If another part of the program installed
-        // a newer hook after ours, do not clobber it when dropping this guard.
-        let current = std::panic::take_hook();
-        let current_id = panic_hook_id(current.as_ref());
-
-        if current_id != self.installed {
-            std::panic::set_hook(current);
-            return;
-        }
-
-        // Drop the hook we installed so its captured `previous` Arc clone is
-        // released before we attempt to unwrap it.
-        drop(current);
-
-        let Some(previous) = self.previous.take() else {
-            return;
-        };
-
-        match Arc::try_unwrap(previous) {
-            Ok(previous) => std::panic::set_hook(previous),
-            Err(previous) => std::panic::set_hook(Box::new(move |info| {
-                (previous)(info);
-            })),
+impl PanicCleanupNode {
+    fn new(cleanup: Arc<dyn Fn() + Send + Sync + 'static>) -> Self {
+        Self {
+            cleanup,
+            ran: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+            next: AtomicPtr::new(std::ptr::null_mut()),
         }
     }
 }
@@ -594,10 +581,164 @@ impl Drop for PanicHookGuard {
 #[cfg(unix)]
 fn run_cleanup_once<F>(cleanup: &Arc<F>, ran: &AtomicBool)
 where
-    F: Fn() + Send + Sync + 'static,
+    F: Fn() + Send + Sync + 'static + ?Sized,
 {
     if !ran.swap(true, Ordering::SeqCst) {
         cleanup();
+    }
+}
+
+/// Global registry of cleanup nodes for the process panic hook.
+///
+/// Nodes are intentionally leaked; guards mark nodes inactive on drop.
+#[cfg(unix)]
+static PANIC_CLEANUP_HEAD: AtomicPtr<PanicCleanupNode> = AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(unix)]
+static PANIC_HOOK_ACTIVE_GUARDS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(unix)]
+#[derive(Default)]
+struct PanicHookWrapperState {
+    installed: Option<PanicHookId>,
+    previous: Option<Arc<Box<PanicHookFn>>>,
+}
+
+#[cfg(unix)]
+static PANIC_HOOK_WRAPPER_STATE: Mutex<PanicHookWrapperState> = Mutex::new(PanicHookWrapperState {
+    installed: None,
+    previous: None,
+});
+
+#[cfg(unix)]
+fn register_panic_cleanup(cleanup: Arc<dyn Fn() + Send + Sync + 'static>) -> *mut PanicCleanupNode {
+    let node = Box::new(PanicCleanupNode::new(cleanup));
+    let node_ptr = Box::into_raw(node);
+
+    loop {
+        let head = PANIC_CLEANUP_HEAD.load(Ordering::Acquire);
+        // SAFETY: `node_ptr` is a fresh allocation; no other thread can observe it
+        // until we publish it by swapping PANIC_CLEANUP_HEAD.
+        unsafe {
+            (*node_ptr).next.store(head, Ordering::Relaxed);
+        }
+
+        if PANIC_CLEANUP_HEAD
+            .compare_exchange(head, node_ptr, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            break;
+        }
+    }
+
+    node_ptr
+}
+
+#[cfg(unix)]
+fn run_all_panic_cleanups() {
+    let mut node_ptr = PANIC_CLEANUP_HEAD.load(Ordering::Acquire);
+    while !node_ptr.is_null() {
+        // SAFETY: nodes are leaked for the program lifetime.
+        let node = unsafe { &*node_ptr };
+        if node.active.load(Ordering::Acquire) {
+            run_cleanup_once(&node.cleanup, &node.ran);
+        }
+        node_ptr = node.next.load(Ordering::Acquire);
+    }
+}
+
+#[cfg(unix)]
+fn sync_panic_hook_state() {
+    let mut state = match PANIC_HOOK_WRAPPER_STATE.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    // Converge to the desired state (wrapper installed iff there is at least one guard).
+    loop {
+        let want_wrapper = PANIC_HOOK_ACTIVE_GUARDS.load(Ordering::SeqCst) != 0;
+
+        let current = std::panic::take_hook();
+        let current_id = panic_hook_id(current.as_ref());
+
+        match (want_wrapper, state.installed) {
+            (true, Some(installed)) if current_id == installed => {
+                // Wrapper already installed and still current.
+                std::panic::set_hook(current);
+            }
+            (true, _) => {
+                // Wrapper missing or replaced: (re)install it around the current hook.
+                state.installed = None;
+                state.previous = None;
+
+                let previous = Arc::new(current);
+                let previous_for_hook = Arc::clone(&previous);
+                let hook: Box<PanicHookFn> = Box::new(move |info| {
+                    run_all_panic_cleanups();
+                    (previous_for_hook)(info);
+                });
+                let installed = panic_hook_id(hook.as_ref());
+                std::panic::set_hook(hook);
+
+                state.installed = Some(installed);
+                state.previous = Some(previous);
+            }
+            (false, Some(installed)) if current_id == installed => {
+                // Uninstall: restore the hook that was active before we installed the wrapper.
+                drop(current);
+
+                let previous = state.previous.take();
+                state.installed = None;
+
+                let Some(previous) = previous else {
+                    // `take_hook()` installed the default hook; keep it.
+                    break;
+                };
+
+                match Arc::try_unwrap(previous) {
+                    Ok(previous) => std::panic::set_hook(previous),
+                    Err(previous) => std::panic::set_hook(Box::new(move |info| {
+                        (previous)(info);
+                    })),
+                }
+            }
+            (false, Some(_)) => {
+                // Another part of the program installed a newer hook after ours.
+                // Do not clobber it when removing the last guard.
+                std::panic::set_hook(current);
+                state.installed = None;
+                state.previous = None;
+            }
+            (false, None) => {
+                std::panic::set_hook(current);
+            }
+        }
+
+        let want_wrapper_now = PANIC_HOOK_ACTIVE_GUARDS.load(Ordering::SeqCst) != 0;
+        let wrapper_installed_now = state.installed.is_some();
+        if want_wrapper_now == wrapper_installed_now {
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+pub struct PanicHookGuard {
+    node: *mut PanicCleanupNode,
+}
+
+#[cfg(unix)]
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        // SAFETY: nodes are leaked and remain valid for the program lifetime.
+        unsafe {
+            (*self.node).active.store(false, Ordering::Release);
+        }
+
+        let previous = PANIC_HOOK_ACTIVE_GUARDS.fetch_sub(1, Ordering::SeqCst);
+        if previous == 1 {
+            sync_panic_hook_state();
+        }
     }
 }
 
@@ -633,24 +774,14 @@ pub fn install_panic_hook<F>(cleanup: F) -> PanicHookGuard
 where
     F: Fn() + Send + Sync + 'static,
 {
-    let cleanup = Arc::new(cleanup);
-    let ran = Arc::new(AtomicBool::new(false));
-    let previous = Arc::new(std::panic::take_hook());
-    let previous_for_hook = Arc::clone(&previous);
-    let cleanup_for_hook = Arc::clone(&cleanup);
-    let ran_for_hook = Arc::clone(&ran);
+    let node = register_panic_cleanup(Arc::new(cleanup));
 
-    let hook: Box<PanicHookFn> = Box::new(move |info| {
-        run_cleanup_once(&cleanup_for_hook, &ran_for_hook);
-        (previous_for_hook)(info);
-    });
-    let installed = panic_hook_id(hook.as_ref());
-    std::panic::set_hook(hook);
-
-    PanicHookGuard {
-        previous: Some(previous),
-        installed,
+    let previous = PANIC_HOOK_ACTIVE_GUARDS.fetch_add(1, Ordering::SeqCst);
+    if previous == 0 {
+        sync_panic_hook_state();
     }
+
+    PanicHookGuard { node }
 }
 
 /// Minimal terminal writer for panic/signal cleanup.
@@ -965,6 +1096,50 @@ mod tests {
         );
 
         drop(guard_b);
+    }
+
+    #[test]
+    fn panic_hook_guards_restore_base_hook_when_dropped_out_of_order() {
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .expect("panic hook test lock poisoned");
+
+        let original = std::panic::take_hook();
+
+        struct RestoreOriginal {
+            hook: Option<Box<super::PanicHookFn>>,
+        }
+
+        impl Drop for RestoreOriginal {
+            fn drop(&mut self) {
+                if let Some(hook) = self.hook.take() {
+                    std::panic::set_hook(hook);
+                }
+            }
+        }
+
+        let _restore = RestoreOriginal {
+            hook: Some(original),
+        };
+
+        fn base_hook(_: &std::panic::PanicHookInfo) {}
+
+        let base_hook: Box<super::PanicHookFn> = Box::new(base_hook);
+        let base_hook_id = super::panic_hook_id(base_hook.as_ref());
+        std::panic::set_hook(base_hook);
+
+        let guard_a = install_panic_hook(|| {});
+        let guard_b = install_panic_hook(|| {});
+
+        // Drop guards out of LIFO order. When all guards are gone, the base hook must be restored.
+        drop(guard_a);
+        drop(guard_b);
+
+        let current = std::panic::take_hook();
+        let current_id = super::panic_hook_id(current.as_ref());
+        std::panic::set_hook(current);
+
+        assert_eq!(current_id, base_hook_id, "base hook not restored");
     }
 
     #[test]
