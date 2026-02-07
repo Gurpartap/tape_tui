@@ -218,6 +218,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingTerminal {
         output: String,
+        writes: Vec<String>,
         write_calls: usize,
     }
 
@@ -235,6 +236,7 @@ mod tests {
         fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
         fn write(&mut self, data: &str) {
             self.write_calls += 1;
+            self.writes.push(data.to_string());
             self.output.push_str(data);
         }
         fn columns(&self) -> u16 {
@@ -331,6 +333,79 @@ mod tests {
         assert!(
             term.write_calls > 1,
             "expected streaming path for large payloads"
+        );
+    }
+
+    #[test]
+    fn flush_streaming_preserves_byte_order_across_chunk_boundaries_for_mixed_cmds() {
+        let big_static: &'static str = include_str!("../runtime/tui.rs");
+        assert!(
+            big_static.len() >= super::OUTPUT_GATE_STREAM_CHUNK_BYTES,
+            "expected include_str! payload to force BytesStatic streaming branch"
+        );
+
+        // Ensure we take the streaming path even if this file shrinks.
+        let extra_len = super::OUTPUT_GATE_STREAM_THRESHOLD_BYTES
+            .saturating_sub(big_static.len())
+            .saturating_add(1);
+        let extra = "x".repeat(extra_len);
+
+        // Fill the streaming buffer to exactly one chunk using control commands.
+        let moves_for_chunk = super::OUTPUT_GATE_STREAM_CHUNK_BYTES / "\x1b[1A".len();
+        assert_eq!(
+            moves_for_chunk * "\x1b[1A".len(),
+            super::OUTPUT_GATE_STREAM_CHUNK_BYTES,
+            "expected an integral number of MoveUp(1) encodes per chunk"
+        );
+
+        let direct_bytes = "DIRECT_BYTES";
+
+        let mut cmds = Vec::new();
+        cmds.extend(std::iter::repeat_n(TerminalCmd::MoveUp(1), moves_for_chunk));
+        cmds.extend([
+            TerminalCmd::BytesStatic("static-1"),
+            TerminalCmd::HideCursor,
+            TerminalCmd::Bytes(direct_bytes.to_string()),
+            TerminalCmd::MoveDown(2),
+            TerminalCmd::BytesStatic(big_static),
+            TerminalCmd::Bytes(extra),
+            TerminalCmd::ShowCursor,
+        ]);
+
+        let expected = encode_old_per_cmd_writes(&cmds);
+
+        let mut gate = OutputGate::new();
+        gate.extend(cmds);
+
+        let mut term = RecordingTerminal::default();
+        gate.flush(&mut term);
+
+        assert_eq!(term.output, expected);
+        assert!(
+            term.write_calls > 1,
+            "expected streaming path to produce multiple writes"
+        );
+
+        let chunk = term
+            .writes
+            .iter()
+            .find(|w| w.len() == super::OUTPUT_GATE_STREAM_CHUNK_BYTES)
+            .expect("expected at least one chunk-sized write");
+        assert!(
+            chunk
+                .as_bytes()
+                .chunks("\x1b[1A".len())
+                .all(|c| c == b"\x1b[1A"),
+            "expected chunk-sized write to be composed of repeated MoveUp(1) encodes"
+        );
+
+        assert!(
+            term.writes.iter().any(|w| w == direct_bytes),
+            "expected Bytes cmd to be written directly as its own write"
+        );
+        assert!(
+            term.writes.iter().any(|w| w == big_static),
+            "expected large BytesStatic cmd to be written directly"
         );
     }
 
