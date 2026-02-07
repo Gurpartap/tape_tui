@@ -55,10 +55,10 @@ fn wait_writable(fd: c_int) -> std::io::Result<()> {
             return Ok(());
         }
 
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("poll(POLLOUT) returned revents=0x{:x}", fds.revents),
-        ));
+        return Err(std::io::Error::other(format!(
+            "poll(POLLOUT) returned revents=0x{:x}",
+            fds.revents
+        )));
     }
 }
 
@@ -85,8 +85,7 @@ where
             Ok(count) => {
                 let remaining = bytes.len() - written;
                 if count > remaining {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(std::io::Error::other(
                         "write returned more bytes than requested",
                     ));
                 }
@@ -246,11 +245,10 @@ impl ProcessTerminal {
         if self.original_termios.is_none() {
             self.original_termios = Some(get_termios(self.stdin_fd)?);
         }
-        let mut raw = self
+        let mut raw = *self
             .original_termios
             .as_ref()
-            .expect("original termios missing")
-            .clone();
+            .expect("original termios missing");
         unsafe {
             libc::cfmakeraw(&mut raw);
         }
@@ -667,7 +665,7 @@ impl HookTerminal {
         // Prefer the controlling TTY (works even if stdout is redirected).
         // Open in non-blocking mode so crash cleanup can never hang.
         let flags = libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
-        let fd = unsafe { libc::open(b"/dev/tty\0".as_ptr() as *const _, flags) };
+        let fd = unsafe { libc::open(c"/dev/tty".as_ptr(), flags) };
         if fd >= 0 {
             Self { fd, owns_fd: true }
         } else {

@@ -273,7 +273,7 @@ fn is_complete_sequence(data: &str) -> SequenceStatus {
 
     if after.starts_with('[') {
         if after.starts_with("[M") {
-            return if data.as_bytes().len() >= 6 {
+            return if data.len() >= 6 {
                 SequenceStatus::Complete
             } else {
                 SequenceStatus::Incomplete

@@ -569,7 +569,7 @@ fn base64_encode(data: &[u8]) -> String {
     if data.is_empty() {
         return String::new();
     }
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     let mut idx = 0usize;
 
     while idx < data.len() {
