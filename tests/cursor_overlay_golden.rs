@@ -66,9 +66,11 @@ fn overlay_composite_anchor_fixture() {
     let term_width = 10;
     let term_height = 5;
 
-    let mut options = OverlayOptions::default();
-    options.width = Some(SizeValue::absolute(3));
-    options.anchor = Some(OverlayAnchor::BottomRight);
+    let options = OverlayOptions {
+        width: Some(SizeValue::absolute(3)),
+        anchor: Some(OverlayAnchor::BottomRight),
+        ..Default::default()
+    };
 
     let layout = resolve_overlay_layout(Some(&options), 1, term_width, term_height);
     let overlays = vec![RenderedOverlay {
