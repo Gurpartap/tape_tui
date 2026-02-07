@@ -373,7 +373,7 @@ fn apply_line_resets(lines: &mut [String], is_image: &[bool]) {
 
 fn strict_width_enabled() -> bool {
     // Strict width checking is enabled when PI_STRICT_WIDTH is set to a non-empty value.
-    std::env::var_os("PI_STRICT_WIDTH").map_or(false, |val| !val.is_empty())
+    std::env::var_os("PI_STRICT_WIDTH").is_some_and(|val| !val.is_empty())
 }
 
 fn clamp_non_image_line_to_width(line: &str, width: usize) -> String {
