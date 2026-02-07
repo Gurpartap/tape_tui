@@ -865,9 +865,9 @@ impl Editor {
             let text_before_cursor = current_line
                 .get(..self.state.cursor_col)
                 .unwrap_or(current_line);
-            if self.is_in_slash_command_context(text_before_cursor) {
-                self.try_trigger_autocomplete(false);
-            } else if self.is_in_at_file_context(text_before_cursor) {
+            if self.is_in_slash_command_context(text_before_cursor)
+                || self.is_in_at_file_context(text_before_cursor)
+            {
                 self.try_trigger_autocomplete(false);
             }
         }
@@ -934,9 +934,9 @@ impl Editor {
                 let text_before_cursor = current_line
                     .get(..self.state.cursor_col)
                     .unwrap_or(current_line);
-                if self.is_in_slash_command_context(text_before_cursor) {
-                    self.try_trigger_autocomplete(false);
-                } else if self.is_in_at_file_context(text_before_cursor) {
+                if self.is_in_slash_command_context(text_before_cursor)
+                    || self.is_in_at_file_context(text_before_cursor)
+                {
                     self.try_trigger_autocomplete(false);
                 }
             }
@@ -1109,9 +1109,9 @@ impl Editor {
             let text_before_cursor = current_line
                 .get(..self.state.cursor_col)
                 .unwrap_or(current_line);
-            if self.is_in_slash_command_context(text_before_cursor) {
-                self.try_trigger_autocomplete(false);
-            } else if self.is_in_at_file_context(text_before_cursor) {
+            if self.is_in_slash_command_context(text_before_cursor)
+                || self.is_in_at_file_context(text_before_cursor)
+            {
                 self.try_trigger_autocomplete(false);
             }
         }
@@ -1521,7 +1521,6 @@ impl Editor {
                     continue;
                 }
 
-                let mut cursor = cursor;
                 let mut valid_suffix = true;
                 if cursor < bytes.len() && bytes[cursor] == b' ' {
                     cursor += 1;
@@ -2586,9 +2585,9 @@ impl Component for Editor {
                 return;
             }
             Some(Action::CursorUp) => {
-                if self.is_editor_empty() {
-                    self.navigate_history(-1);
-                } else if self.history_index > -1 && self.is_on_first_visual_line() {
+                if self.is_editor_empty()
+                    || (self.history_index > -1 && self.is_on_first_visual_line())
+                {
                     self.navigate_history(-1);
                 } else if self.is_on_first_visual_line() {
                     self.move_to_line_start();
