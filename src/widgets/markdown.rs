@@ -492,11 +492,11 @@ impl Markdown {
 
                 let allocated: usize = growth.iter().sum();
                 let mut leftover = remaining.saturating_sub(allocated);
-                for idx in 0..num_cols {
+                for col_width in min_column_widths.iter_mut().take(num_cols) {
                     if leftover == 0 {
                         break;
                     }
-                    min_column_widths[idx] += 1;
+                    *col_width += 1;
                     leftover -= 1;
                 }
             }
@@ -570,13 +570,13 @@ impl Markdown {
 
         for line_idx in 0..header_line_count {
             let mut row_parts = Vec::with_capacity(num_cols);
-            for col_idx in 0..num_cols {
+            for (col_idx, col_width) in column_widths.iter().enumerate().take(num_cols) {
                 let text = header_lines
                     .get(col_idx)
                     .and_then(|lines| lines.get(line_idx))
                     .cloned()
                     .unwrap_or_default();
-                let padding = column_widths[col_idx].saturating_sub(visible_width(&text));
+                let padding = col_width.saturating_sub(visible_width(&text));
                 let padded = format!("{text}{}", " ".repeat(padding));
                 row_parts.push((self.theme.bold)(&padded));
             }
@@ -597,13 +597,13 @@ impl Markdown {
 
             for line_idx in 0..row_line_count {
                 let mut row_parts = Vec::with_capacity(num_cols);
-                for col_idx in 0..num_cols {
+                for (col_idx, col_width) in column_widths.iter().enumerate().take(num_cols) {
                     let text = row_lines
                         .get(col_idx)
                         .and_then(|lines| lines.get(line_idx))
                         .cloned()
                         .unwrap_or_default();
-                    let padding = column_widths[col_idx].saturating_sub(visible_width(&text));
+                    let padding = col_width.saturating_sub(visible_width(&text));
                     row_parts.push(format!("{text}{}", " ".repeat(padding)));
                 }
                 lines.push(format!("│ {} │", row_parts.join(" │ ")));
