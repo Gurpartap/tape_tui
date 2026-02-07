@@ -656,6 +656,12 @@ impl<T: Terminal> TuiRuntime<T> {
             cursor_pos = extracted_marker_pos;
         }
 
+        // Clamp cursor column to the terminal width to avoid emitting huge `CSI n G` moves.
+        if let Some(mut pos) = cursor_pos {
+            pos.col = pos.col.min(width.saturating_sub(1));
+            cursor_pos = Some(pos);
+        }
+
         let has_overlays = self.has_overlay();
         let frame = Frame::from(lines).with_cursor(cursor_pos);
         let cursor_pos = frame.cursor();
@@ -1256,6 +1262,48 @@ mod tests {
         let output = runtime.terminal.output.as_str();
         let expected = "\x1b[>7u\x1b[?2026hhello\x1b[0m\x1b]8;;\x07\x1b[?2026l\x1b[6G\x1b[?25l";
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn cursor_col_is_clamped_to_terminal_width() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        #[derive(Default)]
+        struct WideCursorComponent;
+
+        impl Component for WideCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["hello".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 999 })
+            }
+        }
+
+        let terminal = TestTerminal::new(10, 24);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(WideCursorComponent::default())));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        runtime.handle_input("\x1b[?1u");
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            output.ends_with("\x1b[10G\x1b[?25l"),
+            "unexpected output suffix: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[1000G"),
+            "expected cursor col clamp to avoid huge column move: {output:?}"
+        );
     }
 
     #[test]
