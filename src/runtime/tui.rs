@@ -1352,7 +1352,10 @@ mod tests {
             !output.contains(crate::core::cursor::CURSOR_MARKER),
             "cursor marker leaked into output: {output:?}"
         );
-        assert!(output.contains("hello"), "expected hello in output: {output:?}");
+        assert!(
+            output.contains("hello"),
+            "expected hello in output: {output:?}"
+        );
         assert!(
             output.ends_with("\x1b[6G\x1b[?25l"),
             "unexpected output suffix: {output:?}"
@@ -1400,7 +1403,10 @@ mod tests {
             !output.contains(crate::core::cursor::CURSOR_MARKER),
             "cursor marker leaked into output: {output:?}"
         );
-        assert!(output.contains("hello"), "expected hello in output: {output:?}");
+        assert!(
+            output.contains("hello"),
+            "expected hello in output: {output:?}"
+        );
         assert!(
             output.ends_with("\x1b[1G\x1b[?25l"),
             "unexpected output suffix: {output:?}"

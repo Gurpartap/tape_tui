@@ -977,13 +977,8 @@ mod tests {
 
         let buf = [b'x'; 4096];
         loop {
-            let written = unsafe {
-                libc::write(
-                    write_fd,
-                    buf.as_ptr() as *const libc::c_void,
-                    buf.len(),
-                )
-            };
+            let written =
+                unsafe { libc::write(write_fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
             if written > 0 {
                 continue;
             }
