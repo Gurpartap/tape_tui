@@ -533,17 +533,57 @@ impl Drop for SignalHookGuard {
 
 /// Panic hook guard for cleanup hooks.
 #[cfg(unix)]
+type PanicHookFn = dyn Fn(&std::panic::PanicHookInfo) + Send + Sync + 'static;
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PanicHookId {
+    data: *const (),
+    vtable: *const (),
+}
+
+#[cfg(unix)]
+fn panic_hook_id(hook: &PanicHookFn) -> PanicHookId {
+    // Compare fat pointers (data + vtable) to detect whether the currently
+    // installed hook is the one this guard installed.
+    let raw = hook as *const PanicHookFn;
+    let (data, vtable): (*const (), *const ()) = unsafe { std::mem::transmute(raw) };
+    PanicHookId { data, vtable }
+}
+
+#[cfg(unix)]
 pub struct PanicHookGuard {
-    previous: Arc<Box<dyn Fn(&std::panic::PanicHookInfo) + Send + Sync + 'static>>,
+    previous: Option<Arc<Box<PanicHookFn>>>,
+    installed: PanicHookId,
 }
 
 #[cfg(unix)]
 impl Drop for PanicHookGuard {
     fn drop(&mut self) {
-        let previous = Arc::clone(&self.previous);
-        std::panic::set_hook(Box::new(move |info| {
-            (previous)(info);
-        }));
+        // Panic hooks are process-global. If another part of the program installed
+        // a newer hook after ours, do not clobber it when dropping this guard.
+        let current = std::panic::take_hook();
+        let current_id = panic_hook_id(current.as_ref());
+
+        if current_id != self.installed {
+            std::panic::set_hook(current);
+            return;
+        }
+
+        // Drop the hook we installed so its captured `previous` Arc clone is
+        // released before we attempt to unwrap it.
+        drop(current);
+
+        let Some(previous) = self.previous.take() else {
+            return;
+        };
+
+        match Arc::try_unwrap(previous) {
+            Ok(previous) => std::panic::set_hook(previous),
+            Err(previous) => std::panic::set_hook(Box::new(move |info| {
+                (previous)(info);
+            })),
+        }
     }
 }
 
@@ -596,12 +636,17 @@ where
     let cleanup_for_hook = Arc::clone(&cleanup);
     let ran_for_hook = Arc::clone(&ran);
 
-    std::panic::set_hook(Box::new(move |info| {
+    let hook: Box<PanicHookFn> = Box::new(move |info| {
         run_cleanup_once(&cleanup_for_hook, &ran_for_hook);
         (previous_for_hook)(info);
-    }));
+    });
+    let installed = panic_hook_id(hook.as_ref());
+    std::panic::set_hook(hook);
 
-    PanicHookGuard { previous }
+    PanicHookGuard {
+        previous: Some(previous),
+        installed,
+    }
 }
 
 /// Minimal terminal writer for panic/signal cleanup.
@@ -610,30 +655,33 @@ where
 /// - never panics
 /// - never blocks indefinitely
 /// - does not touch termios / raw mode
-#[cfg(all(unix, not(test)))]
+#[cfg(unix)]
 pub(crate) struct HookTerminal {
     fd: c_int,
     owns_fd: bool,
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(unix)]
 impl HookTerminal {
     pub(crate) fn new() -> Self {
         // Prefer the controlling TTY (works even if stdout is redirected).
-        // Fall back to stdout if /dev/tty is unavailable.
-        let fd = unsafe { libc::open(b"/dev/tty\0".as_ptr() as *const _, libc::O_WRONLY) };
+        // Open in non-blocking mode so crash cleanup can never hang.
+        let flags = libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+        let fd = unsafe { libc::open(b"/dev/tty\0".as_ptr() as *const _, flags) };
         if fd >= 0 {
             Self { fd, owns_fd: true }
         } else {
+            // No controlling TTY (or not accessible). Disable output rather than
+            // risking a blocking write to stdout/stderr (which may be a full pipe).
             Self {
-                fd: libc::STDOUT_FILENO,
+                fd: -1,
                 owns_fd: false,
             }
         }
     }
 
     fn write_best_effort(&self, data: &str) {
-        if data.is_empty() {
+        if self.fd < 0 || data.is_empty() {
             return;
         }
 
@@ -661,20 +709,22 @@ impl HookTerminal {
                 continue;
             }
 
-            // Avoid blocking/retrying forever (e.g. if stdout is a full pipe).
+            // Best-effort crash cleanup: do not block or spin forever.
+            // - WouldBlock/EAGAIN: drop remaining output.
+            // - Any other error: drop remaining output.
             break;
         }
     }
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(unix)]
 impl Default for HookTerminal {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(unix)]
 impl Drop for HookTerminal {
     fn drop(&mut self) {
         if self.owns_fd {
@@ -685,7 +735,7 @@ impl Drop for HookTerminal {
     }
 }
 
-#[cfg(all(unix, not(test)))]
+#[cfg(unix)]
 impl Terminal for HookTerminal {
     fn start(
         &mut self,
@@ -758,10 +808,16 @@ impl Terminal for ProcessTerminal {
 #[cfg(all(test, unix))]
 mod tests {
     use std::io;
-    use std::sync::mpsc;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc, Mutex, OnceLock,
+    };
     use std::time::{Duration, Instant};
 
-    use super::{get_termios, poll_readable, write_all_fd_with, ProcessTerminal, StopTestHooks};
+    use super::{
+        get_termios, install_panic_hook, poll_readable, write_all_fd_with, HookTerminal,
+        ProcessTerminal, StopTestHooks,
+    };
     use crate::core::terminal::Terminal;
 
     #[cfg(unix)]
@@ -840,6 +896,121 @@ mod tests {
         };
         set_nonblocking(fd, false);
         result
+    }
+
+    fn panic_hook_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn panic_hook_guard_drop_does_not_clobber_later_hooks() {
+        let _guard = panic_hook_test_lock()
+            .lock()
+            .expect("panic hook test lock poisoned");
+
+        let original = std::panic::take_hook();
+        // Keep this test quiet: install a no-op base hook so the default hook doesn't
+        // print to stderr when we trigger a panic.
+        std::panic::set_hook(Box::new(|_| {}));
+
+        struct RestoreOriginal {
+            hook: Option<Box<dyn Fn(&std::panic::PanicHookInfo) + Send + Sync + 'static>>,
+        }
+
+        impl Drop for RestoreOriginal {
+            fn drop(&mut self) {
+                if let Some(hook) = self.hook.take() {
+                    std::panic::set_hook(hook);
+                }
+            }
+        }
+
+        let _restore = RestoreOriginal {
+            hook: Some(original),
+        };
+
+        let cleanup_a = Arc::new(AtomicUsize::new(0));
+        let cleanup_b = Arc::new(AtomicUsize::new(0));
+
+        let guard_a = install_panic_hook({
+            let cleanup_a = Arc::clone(&cleanup_a);
+            move || {
+                cleanup_a.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let guard_b = install_panic_hook({
+            let cleanup_b = Arc::clone(&cleanup_b);
+            move || {
+                cleanup_b.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        // Dropping the older guard must not clobber the newer hook (guard_b).
+        drop(guard_a);
+
+        let _ = std::panic::catch_unwind(|| {
+            panic!("boom");
+        });
+
+        assert_eq!(
+            cleanup_b.load(Ordering::SeqCst),
+            1,
+            "expected newer hook cleanup to run"
+        );
+
+        drop(guard_b);
+    }
+
+    #[test]
+    fn hook_terminal_write_best_effort_returns_on_would_block() {
+        let mut fds = [0 as c_int; 2];
+        let result = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        assert_eq!(result, 0, "pipe failed");
+
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+
+        // Make the write end non-blocking and fill the pipe until it would block.
+        set_nonblocking(write_fd, true);
+
+        let buf = [b'x'; 4096];
+        loop {
+            let written = unsafe {
+                libc::write(
+                    write_fd,
+                    buf.as_ptr() as *const libc::c_void,
+                    buf.len(),
+                )
+            };
+            if written > 0 {
+                continue;
+            }
+            if written == 0 {
+                break;
+            }
+
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if err.kind() == io::ErrorKind::WouldBlock {
+                break;
+            }
+            panic!("unexpected error filling pipe: {err:?}");
+        }
+
+        let terminal = HookTerminal {
+            fd: write_fd,
+            owns_fd: false,
+        };
+        terminal.write_best_effort("cleanup");
+
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
     }
 
     #[test]
