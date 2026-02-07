@@ -24,6 +24,12 @@ struct InputState {
     handler: Option<Box<dyn FnMut(String) + Send>>,
 }
 
+#[cfg(unix)]
+type ResizeHandlerFn = dyn FnMut() + Send;
+
+#[cfg(unix)]
+type ResizeHandler = Arc<Mutex<Option<Box<ResizeHandlerFn>>>>;
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -201,7 +207,7 @@ pub struct ProcessTerminal {
     stdout_fd: c_int,
     original_termios: Option<libc::termios>,
     input_state: Arc<Mutex<InputState>>,
-    resize_handler: Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>,
+    resize_handler: ResizeHandler,
     input_thread: Option<JoinHandle<()>>,
     stop_flag: Arc<AtomicBool>,
     drain_mode: Arc<AtomicBool>,
@@ -913,7 +919,7 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {}));
 
         struct RestoreOriginal {
-            hook: Option<Box<dyn Fn(&std::panic::PanicHookInfo) + Send + Sync + 'static>>,
+            hook: Option<Box<super::PanicHookFn>>,
         }
 
         impl Drop for RestoreOriginal {
