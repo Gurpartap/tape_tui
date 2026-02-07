@@ -9,6 +9,8 @@ use crate::core::cursor::CursorPos;
 use crate::core::text::utils::apply_background_to_line;
 use crate::core::text::width::visible_width;
 
+pub type BoxBgFn = std::boxed::Box<dyn Fn(&str) -> String>;
+
 struct RenderCache {
     child_lines: Vec<String>,
     width: usize,
@@ -21,16 +23,12 @@ pub struct Box {
     padding_x: usize,
     padding_y: usize,
     last_cursor_pos: Option<CursorPos>,
-    bg_fn: Option<StdBox<dyn Fn(&str) -> String>>,
+    bg_fn: Option<BoxBgFn>,
     cache: Option<RenderCache>,
 }
 
 impl Box {
-    pub fn new(
-        padding_x: usize,
-        padding_y: usize,
-        bg_fn: Option<StdBox<dyn Fn(&str) -> String>>,
-    ) -> Self {
+    pub fn new(padding_x: usize, padding_y: usize, bg_fn: Option<BoxBgFn>) -> Self {
         Self {
             children: Vec::new(),
             padding_x,
@@ -65,7 +63,7 @@ impl Box {
         self.invalidate_cache();
     }
 
-    pub fn set_bg_fn(&mut self, bg_fn: Option<StdBox<dyn Fn(&str) -> String>>) {
+    pub fn set_bg_fn(&mut self, bg_fn: Option<BoxBgFn>) {
         self.bg_fn = bg_fn;
     }
 
