@@ -1,3 +1,7 @@
+@/Users/gurpartap/.codex/SCRIBE.md
+
+Use scribe cli tool to read/explore code: When you need to understand code and its dependencies, **use scribe** instead of iterative Read/Grep operations.
+
 # AGENTS.md
 
 ## Project Scope
@@ -28,7 +32,7 @@
 - Prefer deterministic, golden-style tests for renderer output.
 
 ## Docs
-- Update `/Users/gurpartap/Developer/Incubating/tv/docs{ARCHITECTURE,COMPARISON}.md` when phase boundaries change.
+- Update `/Users/gurpartap/Developer/Incubating/tv/docs{ARCHITECTURE,COMPARISON,EXTENSION_CAPABILITY_MATRIX}.md` when phase boundaries change.
 
 ## Commit Message Policy
 - Do **not** rely on uncommitted planning/spec files for context.

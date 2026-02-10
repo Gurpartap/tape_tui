@@ -137,16 +137,19 @@ pub struct OverlayHandle {
 ///
 /// # Self-healing contract
 /// Any raw access can move the cursor, write arbitrary bytes, or otherwise perturb the terminal.
-/// The diff renderer cannot soundly "diff" against an unknown cursor/screen state, so `Drop`
-/// **always** performs a resync step by:
-/// - enqueueing a visible-screen clear + home (`ESC[2J ESC[H`) via the runtime output gate, and
-/// - resetting the renderer's internal baseline as if the screen was externally cleared.
+/// The runtime cannot query terminal state to fully recover, so `Drop` performs the minimal
+/// "self-healing" resync this phase supports:
+/// - request a full viewport redraw next render (no scrollback clear), and
+/// - request a render so the next tick repaints the viewport even if content is unchanged.
 ///
-/// After that resync, a render is requested so the next tick repaints the full viewport from a
-/// known baseline.
+/// Limitations:
+/// - The guard does **not** clear the screen or reset the renderer baseline.
+/// - Raw terminal access must not scroll, clear, or otherwise leave the cursor/screen state
+///   incompatible with subsequent diff renders.
 ///
-/// Importantly, we still preserve the runtime's *deterministic* output ordering by enqueueing the
-/// resync in the output gate (we do not flush from `Drop`).
+/// Importantly, we still preserve the runtime's *deterministic* output ordering: `Drop` only
+/// schedules a redraw; the actual bytes still flow through the normal output gate and flush at
+/// tick boundaries.
 #[cfg(feature = "unsafe-terminal-access")]
 pub struct TerminalGuard<'a, T: Terminal> {
     runtime: &'a mut TuiRuntime<T>,
@@ -172,9 +175,9 @@ impl<'a, T: Terminal> std::ops::DerefMut for TerminalGuard<'a, T> {
 impl<'a, T: Terminal> Drop for TerminalGuard<'a, T> {
     fn drop(&mut self) {
         // Raw terminal access can arbitrarily desync the renderer's cursor/screen bookkeeping.
-        // Force a self-healing resync: clear visible screen (not scrollback) + reset baseline
-        // + request a repaint next tick. Do not flush here; keep flushing at tick boundaries.
-        self.runtime.clear_screen();
+        // Force a self-healing resync: request a full redraw next tick so the viewport is repainted.
+        // Do not flush here; keep flushing at tick boundaries.
+        self.runtime.request_full_redraw();
     }
 }
 
@@ -533,19 +536,25 @@ impl<T: Terminal> TuiRuntime<T> {
     /// # Safety and determinism
     /// - This bypasses the runtime's single write gate, so it is only available when the crate is
     ///   compiled with `--features unsafe-terminal-access`.
-    /// - The returned guard is *self-healing*: when dropped it enqueues a screen clear + renderer
-    ///   reset and requests a render so subsequent frames are deterministic again.
-    /// - The resync is enqueued in the output gate; it is not flushed immediately (flush remains
-    ///   at tick boundaries).
+    /// - The returned guard is *self-healing*: when dropped it requests a full redraw next render
+    ///   and requests a render so the viewport is repainted even if content is unchanged.
+    /// - The guard does not flush the runtime output gate; the requested repaint is emitted on the
+    ///   next tick boundary.
+    /// - The runtime cannot query terminal state; callers must not scroll/clear/leave cursor state
+    ///   incompatible with subsequent diff renders.
     ///
     /// # Panics
-    /// Panics if called while the runtime is stopped. Raw terminal I/O while stopped can perturb
-    /// the renderer's first-render baseline and is therefore forbidden.
+    /// Panics if called while the runtime is stopped or if there is pending output in the runtime
+    /// output gate (to avoid out-of-order writes).
     #[cfg(feature = "unsafe-terminal-access")]
     pub fn terminal_guard_unsafe(&mut self) -> TerminalGuard<'_, T> {
         assert!(
             !self.stopped,
             "terminal_guard_unsafe() requires a started TuiRuntime; call start() first"
+        );
+        assert!(
+            self.output.is_empty(),
+            "terminal_guard_unsafe() requires an empty OutputGate; flush_pending_output()/tick first"
         );
         TerminalGuard { runtime: self }
     }
@@ -2791,36 +2800,45 @@ mod tests {
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
-        runtime.render_now(); // establish baseline
+        runtime.terminal.output.clear();
+
+        // Establish diff renderer baseline.
+        runtime.render_now();
+        runtime.terminal.output.clear();
+
+        // Stable diff should not rewrite line content.
+        runtime.render_now();
+        let stable_output = runtime.terminal.output.clone();
+        assert!(
+            !stable_output.contains("line-a") && !stable_output.contains("line-b"),
+            "expected stable diff to avoid line rewrites, got: {stable_output:?}"
+        );
         runtime.terminal.output.clear();
 
         {
             let mut guard = runtime.terminal_guard_unsafe();
-            guard.write("RAW");
+            guard.write("\x1b[?25l");
         }
 
-        // Guard drop enqueues a resync and requests a render; `render_if_needed()` should repaint
-        // the whole frame even though content is unchanged.
         runtime.terminal.output.clear();
         runtime.render_if_needed();
 
         let output = runtime.terminal.output.as_str();
-        let clear_idx = output
-            .find("\x1b[2J\x1b[H")
-            .expect("expected guard resync to enqueue clear screen bytes (ESC[2J ESC[H)");
         let line_a_idx = output.find("line-a").expect("expected frame repaint after guard drop");
         let line_b_idx = output.find("line-b").expect("expected frame repaint after guard drop");
-        assert!(
-            clear_idx < line_a_idx,
-            "expected clear screen bytes before frame repaint, got: {output:?}"
+        assert!(line_a_idx < line_b_idx, "expected line-a before line-b, got: {output:?}");
+        assert_eq!(
+            output.matches("\x1b[2K").count(),
+            2,
+            "expected full redraw to clear each line, got: {output:?}"
         );
         assert!(
-            line_a_idx < line_b_idx,
-            "expected line-a before line-b on repaint, got: {output:?}"
+            !output.contains("\x1b[2J\x1b[H"),
+            "expected no full screen clear (ESC[2J ESC[H), got: {output:?}"
         );
         assert!(
             !output.contains("\x1b[3J"),
-            "expected no scrollback clear (ESC[3J) during guard resync, got: {output:?}"
+            "expected no scrollback clear (ESC[3J), got: {output:?}"
         );
     }
 }
