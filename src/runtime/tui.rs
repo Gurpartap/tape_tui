@@ -129,12 +129,26 @@ pub struct OverlayHandle {
     wake: Arc<RuntimeWake>,
 }
 
+// Cross-thread terminal ops requested by extensions. These ops are applied by the
+// runtime tick to preserve a single, deterministic output gate (`OutputGate::flush`).
+#[derive(Debug, Clone, Copy)]
+enum TerminalOp {
+    ShowCursor,
+    HideCursor,
+    ClearLine,
+    ClearFromCursor,
+    ClearScreen,
+    MoveBy(i32),
+    RequestFullRedraw,
+}
+
 #[derive(Default)]
 struct RuntimeWakeState {
     pending_inputs: Vec<String>,
     pending_resize: bool,
     render_requested: bool,
     pending_title: Option<String>,
+    pending_terminal_ops: Vec<TerminalOp>,
     stop_requested: bool,
 }
 
@@ -156,6 +170,7 @@ impl RuntimeWake {
             && !state.pending_resize
             && !state.render_requested
             && state.pending_title.is_none()
+            && state.pending_terminal_ops.is_empty()
         {
             state = self
                 .cvar
@@ -202,6 +217,15 @@ impl RuntimeWake {
         self.cvar.notify_one();
     }
 
+    fn enqueue_terminal_op(&self, op: TerminalOp) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_terminal_ops.push(op);
+        self.cvar.notify_one();
+    }
+
     fn take_pending_resize(&self) -> bool {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -226,6 +250,14 @@ impl RuntimeWake {
             Err(poisoned) => poisoned.into_inner(),
         };
         std::mem::take(&mut state.pending_inputs)
+    }
+
+    fn drain_terminal_ops(&self) -> Vec<TerminalOp> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut state.pending_terminal_ops)
     }
 
     fn take_render_requested(&self) -> bool {
@@ -259,7 +291,10 @@ impl RuntimeWake {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        state.pending_resize || !state.pending_inputs.is_empty() || state.pending_title.is_some()
+        state.pending_resize
+            || !state.pending_inputs.is_empty()
+            || state.pending_title.is_some()
+            || !state.pending_terminal_ops.is_empty()
     }
 
     fn reset_for_start(&self) {
@@ -272,6 +307,7 @@ impl RuntimeWake {
         state.pending_inputs.clear();
         state.render_requested = false;
         state.pending_title = None;
+        state.pending_terminal_ops.clear();
     }
 
     fn request_stop(&self) {
@@ -296,6 +332,7 @@ impl RuntimeWake {
             && !state.pending_resize
             && !state.render_requested
             && state.pending_title.is_none()
+            && state.pending_terminal_ops.is_empty()
         {
             if let Some(before_wait) = before_wait.take() {
                 before_wait();
@@ -322,6 +359,37 @@ impl RenderHandle {
 
     pub fn set_title(&self, title: impl Into<String>) {
         self.wake.set_title(title.into());
+    }
+
+    pub fn show_cursor(&self) {
+        self.wake.enqueue_terminal_op(TerminalOp::ShowCursor);
+    }
+
+    pub fn hide_cursor(&self) {
+        self.wake.enqueue_terminal_op(TerminalOp::HideCursor);
+    }
+
+    pub fn clear_line(&self) {
+        self.wake.enqueue_terminal_op(TerminalOp::ClearLine);
+    }
+
+    pub fn clear_from_cursor(&self) {
+        self.wake.enqueue_terminal_op(TerminalOp::ClearFromCursor);
+    }
+
+    pub fn clear_screen(&self) {
+        self.wake.enqueue_terminal_op(TerminalOp::ClearScreen);
+    }
+
+    pub fn move_by(&self, lines: i32) {
+        if lines == 0 {
+            return;
+        }
+        self.wake.enqueue_terminal_op(TerminalOp::MoveBy(lines));
+    }
+
+    pub fn request_full_redraw(&self) {
+        self.wake.enqueue_terminal_op(TerminalOp::RequestFullRedraw);
     }
 }
 
@@ -764,6 +832,12 @@ impl<T: Terminal> TuiRuntime<T> {
         loop {
             let mut did_work = false;
 
+            let ops = self.wake.drain_terminal_ops();
+            if !ops.is_empty() {
+                self.apply_terminal_ops(ops);
+                did_work = true;
+            }
+
             if self.take_overlay_dirty() {
                 self.reconcile_focus();
                 self.request_render();
@@ -827,6 +901,11 @@ impl<T: Terminal> TuiRuntime<T> {
     pub fn run_once(&mut self) {
         if self.stopped {
             return;
+        }
+
+        let ops = self.wake.drain_terminal_ops();
+        if !ops.is_empty() {
+            self.apply_terminal_ops(ops);
         }
 
         if self.take_overlay_dirty() {
@@ -1018,6 +1097,20 @@ impl<T: Terminal> TuiRuntime<T> {
         );
         self.output.extend(cursor_cmds);
         self.renderer.set_hardware_cursor_row(updated_row);
+    }
+
+    fn apply_terminal_ops(&mut self, ops: Vec<TerminalOp>) {
+        for op in ops {
+            match op {
+                TerminalOp::ShowCursor => self.show_cursor(),
+                TerminalOp::HideCursor => self.hide_cursor(),
+                TerminalOp::ClearLine => self.clear_line(),
+                TerminalOp::ClearFromCursor => self.clear_from_cursor(),
+                TerminalOp::ClearScreen => self.clear_screen(),
+                TerminalOp::MoveBy(lines) => self.move_by(lines),
+                TerminalOp::RequestFullRedraw => self.request_full_redraw(),
+            }
+        }
     }
 
     fn flush_output(&mut self) {
@@ -2391,6 +2484,88 @@ mod tests {
     fn env_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn render_handle_hide_cursor_wakes_and_flushes_without_render() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        let terminal = TestTerminal::default();
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed(); // clear initial render request
+        runtime.terminal.output.clear();
+
+        let handle = runtime.render_handle();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let join = thread::spawn(move || {
+            ready_rx.recv().expect("wait for runtime to block");
+            handle.hide_cursor();
+        });
+
+        runtime.run_with_before_wait(|| {
+            let _ = ready_tx.send(());
+        });
+
+        join.join().expect("join hide cursor thread");
+
+        assert!(
+            runtime.terminal.output.contains("\x1b[?25l"),
+            "expected hide cursor bytes, got: {:?}",
+            runtime.terminal.output
+        );
+        assert!(
+            !runtime.terminal.output.contains("\x1b[?2026h"),
+            "expected no render sync start bytes, got: {:?}",
+            runtime.terminal.output
+        );
+    }
+
+    #[test]
+    fn render_handle_clear_screen_triggers_redraw() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        struct HelloComponent;
+
+        impl Component for HelloComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["hello".to_string()]
+            }
+        }
+
+        let terminal = TestTerminal::new(80, 24);
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(HelloComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed(); // establish baseline
+        runtime.terminal.output.clear();
+
+        let handle = runtime.render_handle();
+        handle.clear_screen();
+
+        runtime.run_once();
+
+        let output = runtime.terminal.output.as_str();
+        let clear_idx = output
+            .find("\x1b[2J\x1b[H")
+            .expect("expected clear screen bytes (ESC[2J ESC[H)");
+        let hello_idx = output.find("hello").expect("expected frame content after clear");
+        assert!(
+            clear_idx < hello_idx,
+            "expected clear screen bytes before frame content, got: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[3J"),
+            "expected no scrollback clear (ESC[3J), got: {output:?}"
+        );
     }
 
     #[derive(Default, Debug)]
