@@ -113,6 +113,7 @@ struct OverlayState {
     next_id: u64,
     dirty: bool,
     pending_pre_focus: Option<ComponentRc>,
+    pending_focus_overlay_id: Option<u64>,
 }
 
 struct OverlayEntry {
@@ -466,6 +467,11 @@ impl OverlayHandle {
             if let Some(entry) = state.entries.iter_mut().find(|entry| entry.id == self.id) {
                 if entry.hidden != hidden {
                     entry.hidden = hidden;
+                    if !hidden {
+                        state.pending_focus_overlay_id = Some(self.id);
+                    } else if state.pending_focus_overlay_id == Some(self.id) {
+                        state.pending_focus_overlay_id = None;
+                    }
                     state.dirty = true;
                     self.wake.request_render();
                 }
@@ -1379,6 +1385,10 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     fn reconcile_focus(&mut self) {
+        if self.apply_pending_overlay_focus() {
+            return;
+        }
+
         let focused = self.focus.focused();
         if let Some(focused) = focused {
             if let Some(pre_focus) = self.pre_focus_for_overlay(&focused) {
@@ -1401,6 +1411,35 @@ impl<T: Terminal> TuiRuntime<T> {
         } else if let Some(restore) = self.take_pending_pre_focus() {
             self.focus.set_focus(Some(restore));
         }
+    }
+
+    fn apply_pending_overlay_focus(&mut self) -> bool {
+        let pre_focus = self.focus.focused();
+
+        let target = {
+            let mut state = self.overlays.borrow_mut();
+            let Some(id) = state.pending_focus_overlay_id.take() else {
+                return false;
+            };
+            let Some(entry) = state.entries.iter_mut().find(|entry| entry.id == id) else {
+                return false;
+            };
+            if !self.is_overlay_visible(entry) {
+                return false;
+            }
+
+            if pre_focus
+                .as_ref()
+                .map_or(true, |component| !Rc::ptr_eq(component, &entry.component))
+            {
+                entry.pre_focus = pre_focus.clone();
+            }
+
+            Rc::clone(&entry.component)
+        };
+
+        self.focus.set_focus(Some(target));
+        true
     }
 
     fn topmost_visible_overlay(&self) -> Option<Rc<RefCell<Box<dyn Component>>>> {
@@ -2355,6 +2394,130 @@ mod tests {
         runtime.wake.signal_resize();
         runtime.run_once();
         assert!(*overlay_focus.borrow());
+    }
+
+    #[test]
+    fn overlay_set_hidden_unhide_focuses_overlay_and_routes_input() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component = TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
+
+        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        runtime.start().expect("runtime start");
+        runtime.set_focus(Rc::clone(&root));
+
+        let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
+        let overlay_focus = Rc::new(RefCell::new(false));
+        let overlay_component =
+            TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
+        let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(overlay_component)));
+
+        let handle = runtime.show_overlay(Rc::clone(&overlay), None);
+        runtime.run_once();
+
+        handle.set_hidden(true);
+        runtime.run_once();
+        assert!(*root_focus.borrow());
+        assert!(!*overlay_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        overlay_inputs.borrow_mut().clear();
+
+        handle.set_hidden(false);
+        runtime.run_once();
+        assert!(*overlay_focus.borrow());
+
+        runtime.handle_input("x");
+        assert_eq!(overlay_inputs.borrow().as_slice(), &["x".to_string()]);
+        assert!(root_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn overlay_set_hidden_hides_focused_overlay_and_restores_previous_focus() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component = TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
+
+        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        runtime.start().expect("runtime start");
+        runtime.set_focus(Rc::clone(&root));
+
+        let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
+        let overlay_focus = Rc::new(RefCell::new(false));
+        let overlay_component =
+            TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
+        let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(overlay_component)));
+
+        let handle = runtime.show_overlay(Rc::clone(&overlay), None);
+        runtime.run_once();
+        assert!(*overlay_focus.borrow());
+
+        handle.set_hidden(true);
+        runtime.run_once();
+        assert!(*root_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        overlay_inputs.borrow_mut().clear();
+
+        runtime.handle_input("y");
+        assert_eq!(root_inputs.borrow().as_slice(), &["y".to_string()]);
+        assert!(overlay_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn overlay_set_hidden_unhide_moves_focus_even_when_another_overlay_is_focused() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&root_focus),
+        );
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
+
+        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        runtime.start().expect("runtime start");
+        runtime.set_focus(Rc::clone(&root));
+
+        let overlay_a_focus = Rc::new(RefCell::new(false));
+        let overlay_a_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&overlay_a_focus),
+        );
+        let overlay_a: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(overlay_a_component)));
+        runtime.show_overlay(Rc::clone(&overlay_a), None);
+        runtime.run_once();
+        assert!(*overlay_a_focus.borrow());
+
+        let overlay_b_focus = Rc::new(RefCell::new(false));
+        let overlay_b_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&overlay_b_focus),
+        );
+        let overlay_b: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(overlay_b_component)));
+        let overlay_b_handle = runtime.show_overlay(Rc::clone(&overlay_b), None);
+        runtime.run_once();
+        assert!(*overlay_b_focus.borrow());
+
+        overlay_b_handle.set_hidden(true);
+        runtime.run_once();
+        assert!(*overlay_a_focus.borrow());
+        assert!(!*overlay_b_focus.borrow());
+
+        overlay_b_handle.set_hidden(false);
+        runtime.run_once();
+        assert!(*overlay_b_focus.borrow());
     }
 
     #[test]
