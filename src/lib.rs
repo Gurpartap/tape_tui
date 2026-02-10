@@ -48,8 +48,8 @@ pub use crate::core::input_event::InputEvent;
 pub use crate::platform::stdin_buffer::{StdinBuffer, StdinBufferEventMap, StdinBufferOptions};
 
 // Terminal interface and implementations
-pub use crate::core::terminal::Terminal;
 pub use crate::core::output::TerminalTitleExt;
+pub use crate::core::terminal::Terminal;
 pub use crate::platform::process_terminal::ProcessTerminal;
 
 // Terminal image support

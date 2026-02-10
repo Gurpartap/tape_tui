@@ -94,6 +94,14 @@ fn parse_size_value(value: Option<SizeValue>, reference: usize) -> Option<usize>
     }
 }
 
+fn clamp_within(value: usize, min: usize, max: usize) -> usize {
+    if min > max {
+        max
+    } else {
+        value.clamp(min, max)
+    }
+}
+
 pub fn resolve_overlay_layout(
     options: Option<&OverlayOptions>,
     overlay_height: usize,
@@ -168,9 +176,9 @@ pub fn resolve_overlay_layout(
     }
 
     let max_row = term_height.saturating_sub(margin_bottom + effective_height);
-    row = row.clamp(margin_top, max_row);
+    row = clamp_within(row, margin_top, max_row);
     let max_col = term_width.saturating_sub(margin_right + width);
-    col = col.clamp(margin_left, max_col);
+    col = clamp_within(col, margin_left, max_col);
 
     OverlayLayout {
         width,
