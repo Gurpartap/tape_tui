@@ -37,6 +37,39 @@ impl DiffRenderer {
         self.hardware_cursor_row = row;
     }
 
+    /// Resets internal bookkeeping after the runtime clears the visible screen out-of-band
+    /// (e.g. `ESC[2J ESC[H`).
+    ///
+    /// This is intentionally *not* a `CLEAR_ALL` (`ESC[3J`) reset: the next `render(..)` call
+    /// should behave like a first render and re-emit the full frame without clearing scrollback.
+    pub fn reset_for_external_clear_screen(&mut self) {
+        self.previous_lines.clear();
+        self.previous_width = 0;
+        self.max_lines_rendered = 0;
+        self.cursor_row = 0;
+        self.hardware_cursor_row = 0;
+        self.previous_viewport_top = 0;
+        self.force_full_redraw_next = false;
+    }
+
+    /// Applies a cursor move that happened out-of-band (only `CSI nA` / `CSI nB`, no scrolling).
+    ///
+    /// The terminal clamps cursor movement to the visible viewport. We mirror that clamp in the
+    /// renderer's stored `hardware_cursor_row` (absolute row coordinates).
+    ///
+    /// Note: This does not mutate `previous_lines` because it is strictly cursor bookkeeping.
+    pub fn apply_out_of_band_move_by(&mut self, delta: i32, term_height: usize) {
+        let viewport_top = self.max_lines_rendered.saturating_sub(term_height);
+        let viewport_bottom = viewport_top + term_height.saturating_sub(1);
+
+        let next = self.hardware_cursor_row as i64 + delta as i64;
+        let clamped = next
+            .clamp(viewport_top as i64, viewport_bottom as i64)
+            .max(0) as usize;
+
+        self.hardware_cursor_row = clamped;
+    }
+
     pub fn request_full_redraw_next(&mut self) {
         self.force_full_redraw_next = true;
     }
@@ -633,7 +666,10 @@ mod tests {
             )
         };
 
-        assert!(!render(&mut renderer).is_empty(), "expected first render output");
+        assert!(
+            !render(&mut renderer).is_empty(),
+            "expected first render output"
+        );
 
         let cmds = render(&mut renderer);
         assert!(
@@ -691,5 +727,57 @@ mod tests {
             renderer.render(image_frame, 5, 5, false, false);
         }));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn apply_out_of_band_move_by_clamps_to_viewport() {
+        let mut renderer = DiffRenderer::new();
+
+        let height = 3;
+        let lines: Vec<String> = (0..10).map(|i| format!("line{i}")).collect();
+        renderer.render(lines.clone().into(), 80, height, false, false);
+
+        assert_eq!(renderer.previous_lines_len(), 10);
+        assert_eq!(renderer.max_lines_rendered(), 10);
+
+        let viewport_top = renderer.max_lines_rendered().saturating_sub(height);
+        let viewport_bottom = viewport_top + height.saturating_sub(1);
+        assert!(viewport_top > 0, "expected viewport_top > 0 for this test");
+
+        renderer.apply_out_of_band_move_by(-1000, height);
+        assert_eq!(renderer.hardware_cursor_row(), viewport_top);
+        assert_eq!(
+            renderer.previous_lines_len(),
+            10,
+            "cursor moves must not touch lines"
+        );
+
+        renderer.apply_out_of_band_move_by(1000, height);
+        assert_eq!(renderer.hardware_cursor_row(), viewport_bottom);
+        assert_eq!(
+            renderer.previous_lines_len(),
+            10,
+            "cursor moves must not touch lines"
+        );
+    }
+
+    #[test]
+    fn reset_for_external_clear_screen_causes_next_render_to_behave_like_first_render() {
+        let mut renderer = DiffRenderer::new();
+
+        let frame: Frame = vec!["one".to_string(), "two".to_string()].into();
+        let out1 = cmds_to_bytes(renderer.render(frame.clone(), 20, 5, false, false));
+        assert!(!out1.is_empty());
+        assert_eq!(renderer.previous_lines_len(), 2);
+
+        renderer.reset_for_external_clear_screen();
+
+        let out2 = cmds_to_bytes(renderer.render(frame, 20, 5, false, false));
+        assert!(
+            !out2.is_empty(),
+            "expected full output after external reset"
+        );
+        assert!(!out2.contains(super::CLEAR_ALL));
+        assert!(!out2.contains("\x1b[3J"));
     }
 }
