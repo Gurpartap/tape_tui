@@ -129,6 +129,55 @@ pub struct OverlayHandle {
     wake: Arc<RuntimeWake>,
 }
 
+/// Explicit escape hatch for *direct* terminal access.
+///
+/// This type is feature-gated behind `unsafe-terminal-access` because it bypasses the runtime's
+/// single write gate (`OutputGate::flush(..)`) and can easily desync the renderer from the actual
+/// terminal state.
+///
+/// # Self-healing contract
+/// Any raw access can move the cursor, write arbitrary bytes, or otherwise perturb the terminal.
+/// The diff renderer cannot soundly "diff" against an unknown cursor/screen state, so `Drop`
+/// **always** performs a resync step by:
+/// - enqueueing a visible-screen clear + home (`ESC[2J ESC[H`) via the runtime output gate, and
+/// - resetting the renderer's internal baseline as if the screen was externally cleared.
+///
+/// After that resync, a render is requested so the next tick repaints the full viewport from a
+/// known baseline.
+///
+/// Importantly, we still preserve the runtime's *deterministic* output ordering by enqueueing the
+/// resync in the output gate (we do not flush from `Drop`).
+#[cfg(feature = "unsafe-terminal-access")]
+pub struct TerminalGuard<'a, T: Terminal> {
+    runtime: &'a mut TuiRuntime<T>,
+}
+
+#[cfg(feature = "unsafe-terminal-access")]
+impl<'a, T: Terminal> std::ops::Deref for TerminalGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime.terminal
+    }
+}
+
+#[cfg(feature = "unsafe-terminal-access")]
+impl<'a, T: Terminal> std::ops::DerefMut for TerminalGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime.terminal
+    }
+}
+
+#[cfg(feature = "unsafe-terminal-access")]
+impl<'a, T: Terminal> Drop for TerminalGuard<'a, T> {
+    fn drop(&mut self) {
+        // Raw terminal access can arbitrarily desync the renderer's cursor/screen bookkeeping.
+        // Force a self-healing resync: clear visible screen (not scrollback) + reset baseline
+        // + request a repaint next tick. Do not flush here; keep flushing at tick boundaries.
+        self.runtime.clear_screen();
+    }
+}
+
 // Cross-thread terminal ops requested by extensions. These ops are applied by the
 // runtime tick to preserve a single, deterministic output gate (`OutputGate::flush`).
 #[derive(Debug, Clone, Copy)]
@@ -474,6 +523,31 @@ impl<T: Terminal> TuiRuntime<T> {
         RenderHandle {
             wake: Arc::clone(&self.wake),
         }
+    }
+
+    /// Feature-gated explicit escape hatch for raw terminal operations.
+    ///
+    /// This is intended for rare extensions that truly need direct access to the underlying
+    /// `Terminal` implementation (e.g. to emit an unsupported control sequence).
+    ///
+    /// # Safety and determinism
+    /// - This bypasses the runtime's single write gate, so it is only available when the crate is
+    ///   compiled with `--features unsafe-terminal-access`.
+    /// - The returned guard is *self-healing*: when dropped it enqueues a screen clear + renderer
+    ///   reset and requests a render so subsequent frames are deterministic again.
+    /// - The resync is enqueued in the output gate; it is not flushed immediately (flush remains
+    ///   at tick boundaries).
+    ///
+    /// # Panics
+    /// Panics if called while the runtime is stopped. Raw terminal I/O while stopped can perturb
+    /// the renderer's first-render baseline and is therefore forbidden.
+    #[cfg(feature = "unsafe-terminal-access")]
+    pub fn terminal_guard_unsafe(&mut self) -> TerminalGuard<'_, T> {
+        assert!(
+            !self.stopped,
+            "terminal_guard_unsafe() requires a started TuiRuntime; call start() first"
+        );
+        TerminalGuard { runtime: self }
     }
 
     /// Set the terminal window/tab title.
@@ -2693,5 +2767,60 @@ mod tests {
             assert_eq!(state.drain_input_calls, 0);
             assert_eq!(state.stop_calls, 0);
         });
+    }
+
+    #[cfg(feature = "unsafe-terminal-access")]
+    #[test]
+    fn unsafe_terminal_guard_resyncs_renderer_and_forces_full_repaint() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        struct TwoLineComponent;
+
+        impl Component for TwoLineComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["line-a".to_string(), "line-b".to_string()]
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 2);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(TwoLineComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.render_now(); // establish baseline
+        runtime.terminal.output.clear();
+
+        {
+            let mut guard = runtime.terminal_guard_unsafe();
+            guard.write("RAW");
+        }
+
+        // Guard drop enqueues a resync and requests a render; `render_if_needed()` should repaint
+        // the whole frame even though content is unchanged.
+        runtime.terminal.output.clear();
+        runtime.render_if_needed();
+
+        let output = runtime.terminal.output.as_str();
+        let clear_idx = output
+            .find("\x1b[2J\x1b[H")
+            .expect("expected guard resync to enqueue clear screen bytes (ESC[2J ESC[H)");
+        let line_a_idx = output.find("line-a").expect("expected frame repaint after guard drop");
+        let line_b_idx = output.find("line-b").expect("expected frame repaint after guard drop");
+        assert!(
+            clear_idx < line_a_idx,
+            "expected clear screen bytes before frame repaint, got: {output:?}"
+        );
+        assert!(
+            line_a_idx < line_b_idx,
+            "expected line-a before line-b on repaint, got: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[3J"),
+            "expected no scrollback clear (ESC[3J) during guard resync, got: {output:?}"
+        );
     }
 }
