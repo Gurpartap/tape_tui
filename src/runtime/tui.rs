@@ -423,6 +423,137 @@ impl<T: Terminal> TuiRuntime<T> {
         self.wake.set_title(title);
     }
 
+    /// Enqueue a show-cursor command.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn show_cursor(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.output.push(TerminalCmd::ShowCursor);
+    }
+
+    /// Enqueue a hide-cursor command.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn hide_cursor(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.output.push(TerminalCmd::HideCursor);
+    }
+
+    /// Clear from the cursor to end-of-line, then force a full redraw next render.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn clear_line(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.output.push(TerminalCmd::ClearLine);
+        self.renderer.request_full_redraw_next();
+        self.request_render();
+    }
+
+    /// Clear from cursor to end of screen, then force a full redraw next render.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn clear_from_cursor(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.output.push(TerminalCmd::ClearFromCursor);
+        self.renderer.request_full_redraw_next();
+        self.request_render();
+    }
+
+    /// Clear the screen and reset the renderer as if the terminal was externally cleared.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn clear_screen(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.output.push(TerminalCmd::ClearScreen);
+        self.renderer.reset_for_external_clear_screen();
+        self.request_render();
+    }
+
+    /// Move the cursor up/down by a number of lines, without requesting a render.
+    ///
+    /// This updates the renderer's internal cursor model so the next render can place
+    /// the cursor deterministically without desync.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn move_by(&mut self, lines: i32) {
+        if self.stopped {
+            return;
+        }
+        if lines == 0 {
+            return;
+        }
+        if lines > 0 {
+            self.output.push(TerminalCmd::MoveDown(lines as usize));
+        } else {
+            self.output.push(TerminalCmd::MoveUp((-lines) as usize));
+        }
+        self.renderer
+            .apply_out_of_band_move_by(lines, self.terminal.rows() as usize);
+    }
+
+    pub fn terminal_rows(&self) -> u16 {
+        self.terminal.rows()
+    }
+
+    pub fn terminal_columns(&self) -> u16 {
+        self.terminal.columns()
+    }
+
+    pub fn kitty_protocol_active(&self) -> bool {
+        self.kitty_keyboard_enabled || self.kitty_enable_pending
+    }
+
+    /// Force the next render to redraw the entire viewport (without clearing scrollback).
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn request_full_redraw(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.renderer.request_full_redraw_next();
+        self.request_render();
+    }
+
+    /// Enable/disable showing the terminal's hardware cursor.
+    ///
+    /// When disabling, we enqueue an explicit hide-cursor command immediately to keep
+    /// terminal state consistent even if no further render happens soon.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn set_show_hardware_cursor(&mut self, enabled: bool) {
+        if self.stopped {
+            return;
+        }
+        if self.show_hardware_cursor == enabled {
+            return;
+        }
+        self.show_hardware_cursor = enabled;
+        if !enabled {
+            self.output.push(TerminalCmd::HideCursor);
+        }
+        self.request_render();
+    }
+
+    /// Enable/disable clearing behavior when the terminal shrinks.
+    ///
+    /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
+    pub fn set_clear_on_shrink(&mut self, enabled: bool) {
+        if self.stopped {
+            return;
+        }
+        self.clear_on_shrink = enabled;
+    }
+
     pub fn terminal_image_state(&self) -> Arc<TerminalImageState> {
         Arc::clone(&self.terminal_image_state)
     }
@@ -1751,6 +1882,125 @@ mod tests {
         assert!(
             output.ends_with("\x1b[1A\x1b[7G\x1b[?25l"),
             "unexpected output suffix: {output:?}"
+        );
+    }
+
+    #[test]
+    fn request_full_redraw_rewrites_viewport_without_scrollback_clear() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        struct TwoLineComponent;
+
+        impl Component for TwoLineComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["line-a".to_string(), "line-b".to_string()]
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 2);
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(TwoLineComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        // First render establishes the renderer baseline.
+        runtime.render_now();
+        runtime.terminal.output.clear();
+
+        // Rendering identical content should be a no-op diff (no line content rewritten).
+        runtime.render_now();
+        let output2 = runtime.terminal.output.clone();
+        assert!(
+            !output2.contains("line-a") && !output2.contains("line-b"),
+            "expected no line rewrites on stable diff, got: {output2:?}"
+        );
+        runtime.terminal.output.clear();
+
+        runtime.request_full_redraw();
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(output.contains("line-a"), "expected line-a in output: {output:?}");
+        assert!(output.contains("line-b"), "expected line-b in output: {output:?}");
+        assert_eq!(
+            output.matches("\x1b[2K").count(),
+            2,
+            "expected exactly 2 full-line clears, got: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[3J"),
+            "expected no scrollback clear (ESC[3J), got: {output:?}"
+        );
+        assert!(
+            !output.contains("\x1b[2J\x1b[H"),
+            "expected no full screen clear (ESC[2J ESC[H), got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn move_by_updates_cursor_model_for_next_cursor_placement() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        struct CursorComponent;
+
+        impl Component for CursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["hello".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 0 })
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 2);
+        let root: Rc<RefCell<Box<dyn Component>>> =
+            Rc::new(RefCell::new(Box::new(CursorComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        runtime.render_now();
+        runtime.terminal.output.clear();
+
+        runtime.move_by(1);
+        runtime.render_now();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            output.contains("\x1b[1A"),
+            "expected render to move cursor up after out-of-band move down, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn kitty_protocol_active_true_when_enable_pending_or_enabled() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        let terminal = TestTerminal::default();
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        assert!(!runtime.kitty_protocol_active());
+
+        runtime.handle_input("\x1b[?1u");
+        assert!(runtime.kitty_protocol_active(), "expected kitty pending after query response");
+
+        runtime.run_once(); // flush pending enable
+        assert!(
+            runtime.kitty_protocol_active(),
+            "expected kitty enabled after flush"
         );
     }
 
