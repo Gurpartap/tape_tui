@@ -6,6 +6,7 @@ use std::io;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::core::component::Component;
 use crate::core::cursor::{CursorPos, CURSOR_MARKER};
@@ -26,8 +27,31 @@ use crate::runtime::ime::position_hardware_cursor;
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
+const COALESCE_MAX_DURATION_MS: u64 = 2;
+const COALESCE_MAX_ITERATIONS: usize = 8;
 
 type ComponentRc = Rc<RefCell<Box<dyn Component>>>;
+
+#[derive(Clone, Copy, Debug)]
+struct CoalesceBudget {
+    max_duration: Duration,
+    max_iterations: usize,
+}
+
+impl Default for CoalesceBudget {
+    fn default() -> Self {
+        Self {
+            max_duration: Duration::from_millis(COALESCE_MAX_DURATION_MS),
+            max_iterations: COALESCE_MAX_ITERATIONS,
+        }
+    }
+}
+
+impl CoalesceBudget {
+    fn allows(&self, start: Instant, iterations: usize) -> bool {
+        start.elapsed() < self.max_duration && iterations < self.max_iterations
+    }
+}
 
 #[derive(Debug, Default)]
 struct CrashCleanup {
@@ -72,6 +96,7 @@ pub struct TuiRuntime<T: Terminal> {
     show_hardware_cursor: bool,
     stopped: bool,
     wake: Arc<RuntimeWake>,
+    coalesce_budget: CoalesceBudget,
     input_buffer: String,
     cell_size_query_pending: bool,
     kitty_keyboard_enabled: bool,
@@ -213,12 +238,28 @@ impl RuntimeWake {
         requested
     }
 
+    fn peek_render_requested(&self) -> bool {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.render_requested
+    }
+
     fn clear_render_requested(&self) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
         state.render_requested = false;
+    }
+
+    fn has_pending_non_render(&self) -> bool {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_resize || !state.pending_inputs.is_empty() || state.pending_title.is_some()
     }
 
     fn reset_for_start(&self) {
@@ -340,6 +381,7 @@ impl<T: Terminal> TuiRuntime<T> {
             show_hardware_cursor,
             stopped: true,
             wake: Arc::new(RuntimeWake::default()),
+            coalesce_budget: CoalesceBudget::default(),
             input_buffer: String::new(),
             cell_size_query_pending: false,
             kitty_keyboard_enabled: false,
@@ -353,6 +395,11 @@ impl<T: Terminal> TuiRuntime<T> {
 
     pub fn set_on_debug(&mut self, handler: Option<Box<dyn FnMut()>>) {
         self.on_debug = handler;
+    }
+
+    #[cfg(test)]
+    fn set_coalesce_budget_for_tests(&mut self, budget: CoalesceBudget) {
+        self.coalesce_budget = budget;
     }
 
     pub fn render_handle(&self) -> RenderHandle {
@@ -523,7 +570,7 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     /// Block until at least one input/resize/render event is available, then
-    /// process exactly one iteration.
+    /// coalesce work and render once (bounded).
     ///
     /// Note: this does **not** run an event loop until stopped; callers typically
     /// call this in a loop.
@@ -536,7 +583,7 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
 
-        self.run_once();
+        self.run_coalesced_once();
     }
 
     /// Alias for [`TuiRuntime::run_blocking_once`]. Kept for compatibility.
@@ -554,7 +601,81 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
 
-        self.run_once();
+        self.run_coalesced_once();
+    }
+
+    fn run_coalesced_once(&mut self) {
+        // Coalescing contract:
+        // - We drain all work already queued (and any work that arrives during the
+        //   non-blocking coalescing window).
+        // - If the coalescing budget expires while work remains queued, we render using
+        //   the work drained so far and intentionally defer the remaining work to the next tick.
+        // This is a deliberate behavior change to batch renders while bounding latency.
+        let start = Instant::now();
+        let mut iterations = 0;
+        let mut yielded = false;
+
+        loop {
+            let mut did_work = false;
+
+            if self.take_overlay_dirty() {
+                self.reconcile_focus();
+                self.request_render();
+                did_work = true;
+            }
+
+            if self.wake.take_pending_resize() {
+                self.reconcile_focus();
+                if let Some(component) = self.focus.focused() {
+                    let event = InputEvent::Resize {
+                        columns: self.terminal.columns(),
+                        rows: self.terminal.rows(),
+                    };
+                    component.borrow_mut().handle_event(&event);
+                }
+                self.request_render();
+                did_work = true;
+            }
+
+            let inputs = self.wake.drain_inputs();
+            if !inputs.is_empty() {
+                for data in inputs {
+                    self.handle_input(&data);
+                }
+                did_work = true;
+            }
+
+            if let Some(title) = self.wake.take_pending_title() {
+                self.output
+                    .push(TerminalCmd::Bytes(osc_title_sequence(&title)));
+                did_work = true;
+            }
+
+            if !did_work {
+                if self.wake.peek_render_requested() {
+                    self.wake.clear_render_requested();
+                    self.do_render();
+                }
+                break;
+            }
+
+            if !self.coalesce_budget.allows(start, iterations) {
+                if self.wake.peek_render_requested() {
+                    self.wake.clear_render_requested();
+                    self.do_render();
+                }
+                break;
+            }
+
+            iterations += 1;
+
+            if !yielded && !self.has_pending_non_render() && self.wake.peek_render_requested() {
+                std::thread::yield_now();
+                yielded = true;
+            }
+        }
+
+        self.flush_output();
     }
 
     pub fn run_once(&mut self) {
@@ -591,7 +712,6 @@ impl<T: Terminal> TuiRuntime<T> {
         }
 
         self.render_if_needed();
-        self.flush_output();
     }
 
     pub fn handle_input(&mut self, data: &str) {
@@ -661,15 +781,16 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn render_if_needed(&mut self) {
-        if !self.wake.take_render_requested() {
-            return;
+        if self.wake.take_render_requested() {
+            self.do_render();
         }
-        self.do_render();
+        self.flush_output();
     }
 
     pub fn render_now(&mut self) {
         self.wake.clear_render_requested();
         self.do_render();
+        self.flush_output();
     }
 
     fn do_render(&mut self) {
@@ -736,7 +857,6 @@ impl<T: Terminal> TuiRuntime<T> {
         );
         self.output.extend(cursor_cmds);
         self.renderer.set_hardware_cursor_row(updated_row);
-        self.flush_output();
     }
 
     fn flush_output(&mut self) {
@@ -982,6 +1102,15 @@ impl<T: Terminal> TuiRuntime<T> {
         dirty
     }
 
+    fn peek_overlay_dirty(&self) -> bool {
+        let state = self.overlays.borrow();
+        state.dirty
+    }
+
+    fn has_pending_non_render(&self) -> bool {
+        self.peek_overlay_dirty() || self.wake.has_pending_non_render()
+    }
+
     fn take_pending_pre_focus(&mut self) -> Option<Rc<RefCell<Box<dyn Component>>>> {
         let mut state = self.overlays.borrow_mut();
         state.pending_pre_focus.take()
@@ -1060,7 +1189,10 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_cell_size_response, CrashCleanup, OverlayOptions, TuiRuntime};
+    use super::{
+        find_cell_size_response, CoalesceBudget, CrashCleanup, OverlayOptions, RenderHandle,
+        TuiRuntime,
+    };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
     use crate::core::terminal::Terminal;
@@ -1070,6 +1202,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct TestTerminal {
@@ -1770,6 +1903,81 @@ mod tests {
         });
 
         join.join().expect("join render thread");
+        assert_eq!(state.borrow().renders, baseline + 1);
+    }
+
+    #[test]
+    fn render_request_during_render_is_preserved_for_next_tick() {
+        struct RenderDuringRender {
+            state: Rc<RefCell<RenderState>>,
+            handle_slot: Rc<RefCell<Option<RenderHandle>>>,
+            requested: bool,
+        }
+
+        impl Component for RenderDuringRender {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                self.state.borrow_mut().renders += 1;
+                if !self.requested {
+                    self.requested = true;
+                    if let Some(handle) = self.handle_slot.borrow().as_ref() {
+                        handle.request_render();
+                    }
+                }
+                Vec::new()
+            }
+        }
+
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let handle_slot: Rc<RefCell<Option<RenderHandle>>> = Rc::new(RefCell::new(None));
+        let component = RenderDuringRender {
+            state: Rc::clone(&state),
+            handle_slot: Rc::clone(&handle_slot),
+            requested: false,
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+        runtime.set_coalesce_budget_for_tests(CoalesceBudget {
+            max_duration: Duration::from_secs(10),
+            max_iterations: 1,
+        });
+
+        runtime.start().expect("runtime start");
+        *handle_slot.borrow_mut() = Some(runtime.render_handle());
+
+        runtime.request_render();
+        runtime.run_blocking_once();
+        assert_eq!(state.borrow().renders, 1);
+
+        runtime.run_blocking_once();
+        assert_eq!(state.borrow().renders, 2);
+    }
+
+    #[test]
+    fn coalesces_multiple_events_into_single_render() {
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        runtime.set_coalesce_budget_for_tests(CoalesceBudget {
+            max_duration: Duration::from_secs(10),
+            max_iterations: 4,
+        });
+
+        runtime.start().expect("runtime start");
+        runtime.set_focus(Rc::clone(&root));
+        runtime.render_if_needed();
+        let baseline = state.borrow().renders;
+
+        runtime.wake.enqueue_input("a".to_string());
+        runtime.wake.enqueue_input("b".to_string());
+        runtime.wake.signal_resize();
+        runtime.request_render();
+
+        runtime.run_blocking_once();
         assert_eq!(state.borrow().renders, baseline + 1);
     }
 
