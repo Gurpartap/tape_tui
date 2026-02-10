@@ -1,4 +1,4 @@
-//! TUI runtime (Phase 5).
+//! TUI runtime.
 
 use std::cell::RefCell;
 use std::env;
@@ -1284,6 +1284,8 @@ impl<T: Terminal> TuiRuntime<T> {
                 let layout = resolve_overlay_layout(entry.options.as_ref(), 0, width, height);
                 let mut component = entry.component.borrow_mut();
                 component.set_terminal_rows(height);
+                let viewport_rows = layout.max_height.unwrap_or(height);
+                component.set_viewport_size(layout.width, viewport_rows);
                 let mut overlay_lines = component.render(layout.width);
                 let mut cursor_pos = component.cursor_pos();
                 if let Some(max_height) = layout.max_height {
@@ -2090,6 +2092,51 @@ mod tests {
             output.ends_with("\x1b[1A\x1b[7G\x1b[?25l"),
             "unexpected output suffix: {output:?}"
         );
+    }
+
+    struct ViewportRecordingComponent {
+        last: Rc<RefCell<Option<(usize, usize)>>>,
+    }
+
+    impl ViewportRecordingComponent {
+        fn new(last: Rc<RefCell<Option<(usize, usize)>>>) -> Self {
+            Self { last }
+        }
+    }
+
+    impl Component for ViewportRecordingComponent {
+        fn render(&mut self, _width: usize) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn set_viewport_size(&mut self, cols: usize, rows: usize) {
+            *self.last.borrow_mut() = Some((cols, rows));
+        }
+    }
+
+    #[test]
+    fn overlay_sets_viewport_size_from_layout_budget() {
+        let terminal = TestTerminal::new(20, 10);
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        let last = Rc::new(RefCell::new(None));
+        let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
+            ViewportRecordingComponent::new(Rc::clone(&last)),
+        )));
+        let options = OverlayOptions {
+            width: Some(SizeValue::absolute(10)),
+            max_height: Some(SizeValue::absolute(3)),
+            ..Default::default()
+        };
+
+        runtime.show_overlay(overlay, Some(options));
+        runtime.render_now();
+
+        assert_eq!(*last.borrow(), Some((10, 3)));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Component and Focusable traits (Phase 5).
+//! Component and Focusable traits.
 
 use crate::core::input_event::InputEvent;
 
@@ -6,6 +6,16 @@ use crate::core::input_event::InputEvent;
 pub trait Component {
     /// Render to a list of lines at the given width.
     fn render(&mut self, width: usize) -> Vec<String>;
+
+    /// Provide an allocated viewport size for this component (optional).
+    ///
+    /// This is intended for overlay components that need to size nested terminal
+    /// emulation (for example, a PTY-backed TUI) to match the space the overlay
+    /// is allowed to use.
+    ///
+    /// This is a constraint/budget, not a promise about the number of lines that
+    /// will be rendered.
+    fn set_viewport_size(&mut self, _cols: usize, _rows: usize) {}
 
     /// Handle input events.
     fn handle_event(&mut self, _event: &InputEvent) {}
