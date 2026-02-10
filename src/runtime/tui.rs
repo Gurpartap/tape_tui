@@ -425,6 +425,11 @@ impl<T: Terminal> TuiRuntime<T> {
 
     /// Enqueue a show-cursor command.
     ///
+    /// This only enqueues terminal protocol bytes into the runtime output gate. The bytes are
+    /// normally flushed at tick boundaries (e.g. `run_once` / `render_if_needed` / `render_now`).
+    /// If you need the cursor visibility to change immediately without forcing a render, call
+    /// [`TuiRuntime::flush_pending_output`].
+    ///
     /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
     pub fn show_cursor(&mut self) {
         if self.stopped {
@@ -434,6 +439,11 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     /// Enqueue a hide-cursor command.
+    ///
+    /// This only enqueues terminal protocol bytes into the runtime output gate. The bytes are
+    /// normally flushed at tick boundaries (e.g. `run_once` / `render_if_needed` / `render_now`).
+    /// If you need the cursor visibility to change immediately without forcing a render, call
+    /// [`TuiRuntime::flush_pending_output`].
     ///
     /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
     pub fn hide_cursor(&mut self) {
@@ -483,6 +493,11 @@ impl<T: Terminal> TuiRuntime<T> {
     ///
     /// This updates the renderer's internal cursor model so the next render can place
     /// the cursor deterministically without desync.
+    ///
+    /// This only enqueues terminal protocol bytes into the runtime output gate. The bytes are
+    /// normally flushed at tick boundaries (e.g. `run_once` / `render_if_needed` / `render_now`).
+    /// If you need the cursor move to take effect immediately without forcing a render, call
+    /// [`TuiRuntime::flush_pending_output`].
     ///
     /// No-op when stopped to avoid perturbing the renderer's first-render baseline.
     pub fn move_by(&mut self, lines: i32) {
@@ -924,6 +939,21 @@ impl<T: Terminal> TuiRuntime<T> {
         self.flush_output();
     }
 
+    /// Flush queued terminal protocol bytes without rendering.
+    ///
+    /// Many helpers (such as [`TuiRuntime::hide_cursor`], [`TuiRuntime::show_cursor`], and
+    /// [`TuiRuntime::move_by`]) enqueue bytes into the runtime output gate but do not flush
+    /// immediately. The runtime typically flushes at tick boundaries (e.g. `run_once` /
+    /// `render_if_needed` / `render_now`) to preserve a single, deterministic write gate.
+    ///
+    /// Call this when you need immediate terminal effects without forcing a render.
+    pub fn flush_pending_output(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.flush_output();
+    }
+
     fn do_render(&mut self) {
         let width = self.terminal.columns() as usize;
         let height = self.terminal.rows() as usize;
@@ -1326,6 +1356,7 @@ mod tests {
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
+    use crate::core::output::TerminalCmd;
     use crate::core::terminal::Terminal;
     use crate::core::terminal_image::get_cell_dimensions;
     use crate::render::overlay::SizeValue;
@@ -2310,6 +2341,51 @@ mod tests {
         runtime.run_once();
         assert_eq!(state.borrow().renders, baseline);
         assert_eq!(runtime.terminal.output, "\x1b]0;b\x07");
+    }
+
+    #[test]
+    fn flush_pending_output_flushes_without_render() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        let terminal = TestTerminal::default();
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        runtime.hide_cursor();
+        assert!(
+            runtime.terminal.output.is_empty(),
+            "expected hide_cursor() to enqueue only (no flush), got: {:?}",
+            runtime.terminal.output
+        );
+
+        runtime.flush_pending_output();
+        assert_eq!(runtime.terminal.output, "\x1b[?25l");
+        assert!(
+            !runtime.terminal.output.contains("\x1b[?2026h"),
+            "expected no render sync start bytes, got: {:?}",
+            runtime.terminal.output
+        );
+    }
+
+    #[test]
+    fn flush_pending_output_is_noop_when_stopped() {
+        let terminal = TestTerminal::default();
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.output.push(TerminalCmd::HideCursor);
+        runtime.flush_pending_output();
+
+        assert!(
+            runtime.terminal.output.is_empty(),
+            "expected no writes when stopped, got: {:?}",
+            runtime.terminal.output
+        );
     }
 
     fn env_test_lock() -> &'static Mutex<()> {
