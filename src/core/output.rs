@@ -19,6 +19,14 @@ fn decimal_len(mut n: usize) -> usize {
     len
 }
 
+pub(crate) fn osc_title_sequence(title: &str) -> String {
+    let mut seq = String::with_capacity(title.len() + 5);
+    seq.push_str("\x1b]0;");
+    seq.push_str(title);
+    seq.push('\x07');
+    seq
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalCmd {
     /// Raw bytes/control sequences (UTF-8 string) to be written to the terminal.
@@ -141,7 +149,7 @@ impl OutputGate {
         }
     }
 
-    fn flush_streaming<T: Terminal>(&mut self, term: &mut T) {
+    fn flush_streaming<T: Terminal + ?Sized>(&mut self, term: &mut T) {
         let mut buffer = String::with_capacity(OUTPUT_GATE_STREAM_CHUNK_BYTES);
 
         for cmd in self.cmds.drain(..) {
@@ -184,7 +192,7 @@ impl OutputGate {
     ///
     /// This is the single write gate: `Terminal::write(..)` must not be called
     /// from anywhere else.
-    pub fn flush<T: Terminal>(&mut self, term: &mut T) {
+    pub fn flush<T: Terminal + ?Sized>(&mut self, term: &mut T) {
         if self.cmds.is_empty() {
             return;
         }
@@ -210,9 +218,27 @@ impl OutputGate {
     }
 }
 
+/// Terminal helper methods implemented in terms of `OutputGate`.
+///
+/// These are intentionally out-of-band from the frame/diff render pipeline, but still flow through
+/// `OutputGate` so the crate-wide "single write gate" invariant holds.
+pub trait TerminalTitleExt: Terminal {
+    /// Set the terminal window/tab title.
+    ///
+    /// TypeScript parity: `Terminal.setTitle(title)` writes `OSC 0;title BEL`.
+    fn set_title(&mut self, title: &str) {
+        let mut gate = OutputGate::new();
+
+        gate.push(TerminalCmd::Bytes(osc_title_sequence(title)));
+        gate.flush(self);
+    }
+}
+
+impl<T: Terminal + ?Sized> TerminalTitleExt for T {}
+
 #[cfg(test)]
 mod tests {
-    use super::{OutputGate, TerminalCmd};
+    use super::{OutputGate, TerminalCmd, TerminalTitleExt};
     use crate::core::terminal::Terminal;
 
     #[derive(Default)]
@@ -434,5 +460,32 @@ mod tests {
 
         assert_eq!(term.output, "");
         assert_eq!(term.write_calls, 0);
+    }
+
+    #[test]
+    fn terminal_title_ext_writes_osc_0_title_bel() {
+        let mut term = RecordingTerminal::default();
+        term.set_title("pi - test");
+        assert_eq!(term.output, "\x1b]0;pi - test\x07");
+        assert_eq!(term.write_calls, 1);
+    }
+
+    #[test]
+    fn terminal_title_ext_allows_empty_title() {
+        let mut term = RecordingTerminal::default();
+        term.set_title("");
+        assert_eq!(term.output, "\x1b]0;\x07");
+        assert_eq!(term.write_calls, 1);
+    }
+
+    #[test]
+    fn terminal_title_ext_works_via_trait_object() {
+        let mut term = RecordingTerminal::default();
+        {
+            let term_obj: &mut dyn Terminal = &mut term;
+            term_obj.set_title("pi");
+        }
+        assert_eq!(term.output, "\x1b]0;pi\x07");
+        assert_eq!(term.write_calls, 1);
     }
 }

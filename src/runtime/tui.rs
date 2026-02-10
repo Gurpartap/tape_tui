@@ -11,7 +11,7 @@ use crate::core::component::Component;
 use crate::core::cursor::{CursorPos, CURSOR_MARKER};
 use crate::core::input::{is_kitty_query_response, KeyEventType};
 use crate::core::input_event::{parse_input_events, InputEvent};
-use crate::core::output::{OutputGate, TerminalCmd};
+use crate::core::output::{osc_title_sequence, OutputGate, TerminalCmd};
 use crate::core::terminal::Terminal;
 use crate::core::terminal_image::{
     get_capabilities, is_image_line, set_cell_dimensions, CellDimensions, TerminalImageState,
@@ -109,6 +109,7 @@ struct RuntimeWakeState {
     pending_inputs: Vec<String>,
     pending_resize: bool,
     render_requested: bool,
+    pending_title: Option<String>,
     stop_requested: bool,
 }
 
@@ -129,6 +130,7 @@ impl RuntimeWake {
             && state.pending_inputs.is_empty()
             && !state.pending_resize
             && !state.render_requested
+            && state.pending_title.is_none()
         {
             state = self
                 .cvar
@@ -166,6 +168,15 @@ impl RuntimeWake {
         self.cvar.notify_one();
     }
 
+    fn set_title(&self, title: String) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_title = Some(title);
+        self.cvar.notify_one();
+    }
+
     fn take_pending_resize(&self) -> bool {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -174,6 +185,14 @@ impl RuntimeWake {
         let pending = state.pending_resize;
         state.pending_resize = false;
         pending
+    }
+
+    fn take_pending_title(&self) -> Option<String> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_title.take()
     }
 
     fn drain_inputs(&self) -> Vec<String> {
@@ -211,6 +230,7 @@ impl RuntimeWake {
         state.pending_resize = false;
         state.pending_inputs.clear();
         state.render_requested = false;
+        state.pending_title = None;
     }
 
     fn request_stop(&self) {
@@ -234,6 +254,7 @@ impl RuntimeWake {
             && state.pending_inputs.is_empty()
             && !state.pending_resize
             && !state.render_requested
+            && state.pending_title.is_none()
         {
             if let Some(before_wait) = before_wait.take() {
                 before_wait();
@@ -256,6 +277,10 @@ pub struct RenderHandle {
 impl RenderHandle {
     pub fn request_render(&self) {
         self.wake.request_render();
+    }
+
+    pub fn set_title(&self, title: impl Into<String>) {
+        self.wake.set_title(title.into());
     }
 }
 
@@ -334,6 +359,21 @@ impl<T: Terminal> TuiRuntime<T> {
         RenderHandle {
             wake: Arc::clone(&self.wake),
         }
+    }
+
+    /// Set the terminal window/tab title.
+    ///
+    /// While running, this queues a title update that flushes on the runtime thread
+    /// without forcing a render. When stopped, it writes immediately.
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        let title = title.into();
+        if self.stopped {
+            let mut output = OutputGate::new();
+            output.push(TerminalCmd::Bytes(osc_title_sequence(&title)));
+            output.flush(&mut self.terminal);
+            return;
+        }
+        self.wake.set_title(title);
     }
 
     pub fn terminal_image_state(&self) -> Arc<TerminalImageState> {
@@ -543,6 +583,11 @@ impl<T: Terminal> TuiRuntime<T> {
 
         for data in inputs {
             self.handle_input(&data);
+        }
+
+        if let Some(title) = self.wake.take_pending_title() {
+            self.output
+                .push(TerminalCmd::Bytes(osc_title_sequence(&title)));
         }
 
         self.render_if_needed();
@@ -1726,6 +1771,87 @@ mod tests {
 
         join.join().expect("join render thread");
         assert_eq!(state.borrow().renders, baseline + 1);
+    }
+
+    #[test]
+    fn title_handle_flushes_without_render() {
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+        let baseline = state.borrow().renders;
+        runtime.terminal.output.clear();
+
+        let handle = runtime.render_handle();
+        let join = thread::spawn(move || {
+            handle.set_title("pi");
+        });
+        join.join().expect("join title thread");
+
+        runtime.run_once();
+        assert_eq!(state.borrow().renders, baseline);
+        assert_eq!(runtime.terminal.output, "\x1b]0;pi\x07");
+    }
+
+    #[test]
+    fn title_handle_wakes_blocking_run() {
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+        let baseline = state.borrow().renders;
+        runtime.terminal.output.clear();
+
+        let handle = runtime.render_handle();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let join = thread::spawn(move || {
+            ready_rx.recv().expect("wait for runtime to block");
+            handle.set_title("pi");
+        });
+
+        runtime.run_with_before_wait(|| {
+            let _ = ready_tx.send(());
+        });
+
+        join.join().expect("join title thread");
+        assert_eq!(state.borrow().renders, baseline);
+        assert_eq!(runtime.terminal.output, "\x1b]0;pi\x07");
+    }
+
+    #[test]
+    fn title_last_wins_coalescing() {
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+        let baseline = state.borrow().renders;
+        runtime.terminal.output.clear();
+
+        let handle = runtime.render_handle();
+        handle.set_title("a");
+        handle.set_title("b");
+
+        runtime.run_once();
+        assert_eq!(state.borrow().renders, baseline);
+        assert_eq!(runtime.terminal.output, "\x1b]0;b\x07");
     }
 
     fn env_test_lock() -> &'static Mutex<()> {

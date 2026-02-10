@@ -1,6 +1,7 @@
 //! Rust port of pi-tui (skeleton).
 //!
-//! Invariant: single output gate — only `core::output::OutputGate::flush(..)` writes to the terminal.
+//! Invariant: single output gate — only `core::output::OutputGate::flush(..)` writes to the
+//! terminal.
 
 pub mod config;
 pub mod logging;
@@ -48,6 +49,7 @@ pub use crate::platform::stdin_buffer::{StdinBuffer, StdinBufferEventMap, StdinB
 
 // Terminal interface and implementations
 pub use crate::core::terminal::Terminal;
+pub use crate::core::output::TerminalTitleExt;
 pub use crate::platform::process_terminal::ProcessTerminal;
 
 // Terminal image support
