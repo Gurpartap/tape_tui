@@ -2,7 +2,6 @@
 
 ## Project Scope
 - Rust port of pi-tui (terminal UI) with parity against `/Users/gurpartap/Projects/github.com/badlogic/pi-mono/packages/tui`.
-- Source of truth: `/Users/gurpartap/Developer/Incubating/tv/pi-tui-rust-architecture.md` and `/Users/gurpartap/Developer/Incubating/tv/ROADMAP.md`.
 
 ## Core Principles
 - Correctness over cleverness
@@ -29,8 +28,7 @@
 - Prefer deterministic, golden-style tests for renderer output.
 
 ## Docs
-- Update `/Users/gurpartap/Developer/Incubating/tv/ROADMAP.md` when phase boundaries change.
-- Keep parity notes in `/Users/gurpartap/Developer/Incubating/tv/pi-tui-rust-architecture.md` in sync with new discoveries.
+- Update `/Users/gurpartap/Developer/Incubating/tv/docs{ARCHITECTURE,COMPARISON}.md` when phase boundaries change.
 
 ## Commit Message Policy
 - Do **not** rely on uncommitted planning/spec files for context.

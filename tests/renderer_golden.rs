@@ -12,6 +12,9 @@ fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
             TerminalCmd::BytesStatic(data) => out.push_str(data),
             TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
             TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+            TerminalCmd::ClearLine => out.push_str("\x1b[K"),
+            TerminalCmd::ClearFromCursor => out.push_str("\x1b[J"),
+            TerminalCmd::ClearScreen => out.push_str("\x1b[2J\x1b[H"),
             TerminalCmd::MoveUp(n) => {
                 if n > 0 {
                     out.push_str(&format!("\x1b[{n}A"));

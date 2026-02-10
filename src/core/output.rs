@@ -38,6 +38,16 @@ pub enum TerminalCmd {
     HideCursor,
     ShowCursor,
 
+    /// Clear operations.
+    ///
+    /// TypeScript parity (exact bytes):
+    /// - `ClearLine` -> `\x1b[K`
+    /// - `ClearFromCursor` -> `\x1b[J`
+    /// - `ClearScreen` -> `\x1b[2J\x1b[H`
+    ClearLine,
+    ClearFromCursor,
+    ClearScreen,
+
     /// Cursor movement.
     ///
     /// Semantics:
@@ -100,6 +110,9 @@ impl OutputGate {
             TerminalCmd::BytesStatic(data) => data.len(),
             TerminalCmd::HideCursor => "\x1b[?25l".len(),
             TerminalCmd::ShowCursor => "\x1b[?25h".len(),
+            TerminalCmd::ClearLine => "\x1b[K".len(),
+            TerminalCmd::ClearFromCursor => "\x1b[J".len(),
+            TerminalCmd::ClearScreen => "\x1b[2J\x1b[H".len(),
             TerminalCmd::MoveUp(n) | TerminalCmd::MoveDown(n) | TerminalCmd::ColumnAbs(n) => {
                 if *n == 0 {
                     0
@@ -125,6 +138,9 @@ impl OutputGate {
             TerminalCmd::BytesStatic(data) => out.push_str(data),
             TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
             TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+            TerminalCmd::ClearLine => out.push_str("\x1b[K"),
+            TerminalCmd::ClearFromCursor => out.push_str("\x1b[J"),
+            TerminalCmd::ClearScreen => out.push_str("\x1b[2J\x1b[H"),
             TerminalCmd::MoveUp(n) => {
                 if n > 0 {
                     let _ = write!(out, "\x1b[{n}A");
@@ -281,6 +297,9 @@ mod tests {
                 TerminalCmd::BytesStatic(data) => out.push_str(data),
                 TerminalCmd::HideCursor => out.push_str("\x1b[?25l"),
                 TerminalCmd::ShowCursor => out.push_str("\x1b[?25h"),
+                TerminalCmd::ClearLine => out.push_str("\x1b[K"),
+                TerminalCmd::ClearFromCursor => out.push_str("\x1b[J"),
+                TerminalCmd::ClearScreen => out.push_str("\x1b[2J\x1b[H"),
                 TerminalCmd::MoveUp(n) => {
                     if *n > 0 {
                         out.push_str(&format!("\x1b[{n}A"));
@@ -449,6 +468,25 @@ mod tests {
 
         assert_eq!(term.output, "\x1b[2A\x1b[3B\x1b[4G");
         assert_eq!(term.write_calls, 1);
+    }
+
+    #[test]
+    fn clear_cmds_encode_to_ansi_sequences() {
+        let mut gate = OutputGate::new();
+        gate.extend([
+            TerminalCmd::ClearLine,
+            TerminalCmd::ClearFromCursor,
+            TerminalCmd::ClearScreen,
+        ]);
+
+        let mut term = RecordingTerminal::default();
+        gate.flush(&mut term);
+
+        let expected = "\x1b[K\x1b[J\x1b[2J\x1b[H";
+        assert_eq!(term.output, expected);
+        assert_eq!(term.write_calls, 1, "expected a single coalesced write");
+        assert_eq!(term.writes.len(), 1);
+        assert_eq!(term.writes[0], expected);
     }
 
     #[test]
