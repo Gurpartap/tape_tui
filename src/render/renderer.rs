@@ -21,6 +21,7 @@ pub struct DiffRenderer {
     cursor_row: usize,
     hardware_cursor_row: usize,
     previous_viewport_top: usize,
+    force_full_redraw_next: bool,
 }
 
 impl DiffRenderer {
@@ -34,6 +35,10 @@ impl DiffRenderer {
 
     pub fn set_hardware_cursor_row(&mut self, row: usize) {
         self.hardware_cursor_row = row;
+    }
+
+    pub fn request_full_redraw_next(&mut self) {
+        self.force_full_redraw_next = true;
     }
 
     pub fn previous_lines_len(&self) -> usize {
@@ -111,6 +116,7 @@ impl DiffRenderer {
 
         // Snapshot strict-width mode once per render call (avoids repeated env reads).
         let strict_width = strict_width_enabled();
+        let force_full_redraw_next = std::mem::take(&mut self.force_full_redraw_next);
 
         let width_changed = self.previous_width != 0 && self.previous_width != width;
 
@@ -174,6 +180,89 @@ impl DiffRenderer {
         }
 
         let Some(first_changed) = first_changed else {
+            if force_full_redraw_next {
+                let mut buffer = String::from(SYNC_START);
+
+                if lines.is_empty() {
+                    buffer.push('\r');
+                    buffer.push_str("\x1b[2K");
+                } else {
+                    let first_row = lines.len().saturating_sub(height);
+                    let render_end = lines.len().saturating_sub(1);
+
+                    let prev_viewport_bottom = prev_viewport_top + height.saturating_sub(1);
+                    let move_target_row = first_row;
+
+                    if move_target_row > prev_viewport_bottom {
+                        let current_screen_row = hardware_cursor_row
+                            .saturating_sub(prev_viewport_top)
+                            .min(height.saturating_sub(1));
+                        let move_to_bottom =
+                            height.saturating_sub(1).saturating_sub(current_screen_row);
+                        if move_to_bottom > 0 {
+                            buffer.push_str(&format!("\x1b[{}B", move_to_bottom));
+                        }
+                        let scroll = move_target_row - prev_viewport_bottom;
+                        for _ in 0..scroll {
+                            buffer.push_str("\r\n");
+                        }
+                        prev_viewport_top = prev_viewport_top.saturating_add(scroll);
+                        viewport_top = viewport_top.saturating_add(scroll);
+                        hardware_cursor_row = move_target_row;
+                    }
+
+                    let line_diff = compute_line_diff(
+                        move_target_row,
+                        hardware_cursor_row,
+                        prev_viewport_top,
+                        viewport_top,
+                    );
+                    if line_diff > 0 {
+                        buffer.push_str(&format!("\x1b[{}B", line_diff));
+                    } else if line_diff < 0 {
+                        buffer.push_str(&format!("\x1b[{}A", -line_diff));
+                    }
+
+                    buffer.push('\r');
+
+                    for i in first_row..=render_end {
+                        if i > first_row {
+                            buffer.push_str("\r\n");
+                        }
+                        buffer.push_str("\x1b[2K");
+                        let line = &lines[i];
+                        if is_image[i] {
+                            buffer.push_str(line);
+                            continue;
+                        }
+
+                        let line_width = visible_width(line);
+                        if line_width > width {
+                            if strict_width {
+                                panic!(
+                                    "Rendered line {} exceeds terminal width ({} > {}). PI_STRICT_WIDTH is set.",
+                                    i, line_width, width
+                                );
+                            }
+                            buffer.push_str(&clamp_non_image_line_to_width(line, width));
+                        } else {
+                            buffer.push_str(line);
+                        }
+                    }
+                }
+
+                buffer.push_str(SYNC_END);
+                cmds.push(TerminalCmd::Bytes(buffer));
+
+                self.cursor_row = lines.len().saturating_sub(1);
+                self.hardware_cursor_row = lines.len().saturating_sub(1);
+                self.max_lines_rendered = self.max_lines_rendered.max(lines.len());
+                self.previous_viewport_top = self.max_lines_rendered.saturating_sub(height);
+                self.previous_lines = lines;
+                self.previous_width = width;
+
+                return cmds;
+            }
             self.previous_viewport_top = self.max_lines_rendered.saturating_sub(height);
             return cmds;
         };
@@ -529,6 +618,42 @@ mod tests {
         let output =
             cmds_to_bytes(renderer.render(vec!["line".to_string()].into(), 20, 5, false, false));
         assert!(output.is_empty(), "expected no output, got: {output:?}");
+    }
+
+    #[test]
+    fn force_full_redraw_emits_output_even_if_identical() {
+        let mut renderer = DiffRenderer::new();
+        let render = |r: &mut DiffRenderer| {
+            r.render(
+                vec!["one".to_string(), "two".to_string()].into(),
+                20,
+                5,
+                false,
+                false,
+            )
+        };
+
+        assert!(!render(&mut renderer).is_empty(), "expected first render output");
+
+        let cmds = render(&mut renderer);
+        assert!(
+            cmds.is_empty(),
+            "expected identical render to produce no cmds, got: {cmds:?}"
+        );
+
+        renderer.request_full_redraw_next();
+        let forced = cmds_to_bytes(render(&mut renderer));
+        assert!(forced.contains(super::SYNC_START));
+        assert!(forced.contains(super::SYNC_END));
+        assert_eq!(forced.matches("\x1b[2K").count(), 2);
+        assert!(!forced.contains(super::CLEAR_ALL));
+        assert!(!forced.contains("\x1b[3J"));
+
+        let cmds = render(&mut renderer);
+        assert!(
+            cmds.is_empty(),
+            "expected request flag to be consumed, got: {cmds:?}"
+        );
     }
 
     #[test]
