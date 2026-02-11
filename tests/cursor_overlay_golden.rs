@@ -88,3 +88,30 @@ fn overlay_composite_anchor_fixture() {
 
     assert_eq!(composed, expected);
 }
+
+#[test]
+fn overlay_mixed_ansi_osc_fixture() {
+    let expected = fixture::read_lines_unescaped("overlay_mixed_ansi_osc.txt");
+    let term_width = 10;
+    let term_height = 2;
+    let overlays = vec![RenderedOverlay {
+        lines: vec!["\x1b[31mAB\x1b]8;;https://x\x07CDEFGH\x1b]8;;\x07\x1b[0m".to_string()],
+        row: 0,
+        col: 2,
+        width: 6,
+    }];
+    let base = vec!["0123456789".to_string(), "INPUT".to_string()];
+    let composed = composite_overlays(base, &overlays, term_width, term_height, 2, is_image_line);
+
+    assert_eq!(composed, expected);
+    assert_eq!(
+        composed[0].matches("\x1b[0m\x1b]8;;\x07").count(),
+        2,
+        "overlay composition must bracket inserted segments with reset guards"
+    );
+    assert_eq!(composed[1], "INPUT");
+    assert!(
+        !composed[1].contains('\x1b'),
+        "base lines after a composited overlay should remain unstyled"
+    );
+}

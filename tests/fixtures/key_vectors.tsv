@@ -10,3 +10,32 @@ match	1	\x1b[1;5A	ctrl+up	true
 match	1	\x1b[1089::99;5u	ctrl+c	true
 match	1	\x1b[99::118;5u	ctrl+v	false
 match	0	\x1b\r	alt+enter	true
+parse	0	\x1b[a	shift+up
+parse	0	\x1b[b	shift+down
+parse	0	\x1b[c	shift+right
+parse	0	\x1b[d	shift+left
+parse	0	\x1bOa	ctrl+up
+parse	0	\x1bOb	ctrl+down
+parse	0	\x1bOc	ctrl+right
+parse	0	\x1bOd	ctrl+left
+parse	0	\x1b[2$	shift+insert
+parse	0	\x1b[2^	ctrl+insert
+parse	0	\x1b[3$	shift+delete
+parse	0	\x1b[3^	ctrl+delete
+parse	0	\x1b[5^	ctrl+pageUp
+parse	0	\x1b[8^	ctrl+end
+parse	0	\x1b[7$	shift+home
+parse	0	\x1b[8$	shift+end
+parse	0	\x1bb	alt+left
+parse	0	\x1bf	alt+right
+parse	0	\x1b	escape
+parse	0	\x1bq	alt+q
+parse	0	\x1b\x01	ctrl+alt+a
+parse	0	\x1b 	alt+space
+parse	0	\x1b\x7f	alt+backspace
+match	0	\x1b[a	shift+up	true
+match	0	\x1b[3$	shift+delete	true
+match	0	\x1b[5^	ctrl+pageUp	true
+match	0	\x1bq	alt+q	true
+match	0	\x1b\x01	ctrl+alt+a	true
+match	0	\x1b 	alt+space	true

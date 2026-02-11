@@ -1,0 +1,2 @@
+01\x1b[0m\x1b]8;;\x07\x1b[31mAB\x1b]8;;https://x\x07CDEF\x1b[0m\x1b]8;;\x0789
+INPUT

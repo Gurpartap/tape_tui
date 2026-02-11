@@ -321,6 +321,8 @@ impl ProcessTerminal {
                             let mut state =
                                 input_state.lock().expect("input handler lock poisoned");
                             if let Some(handler) = state.handler.as_mut() {
+                                // Preserve bracketed-paste wire contract at terminal boundary:
+                                // handlers always receive start/content/end markers together.
                                 handler(format!("\x1b[200~{}\x1b[201~", content));
                             }
                         }
@@ -955,6 +957,14 @@ mod tests {
     };
     use crate::core::terminal::Terminal;
 
+    // Test trust map:
+    // - Primary guards: bracketed_paste_split_chunks_is_rewrapped_once,
+    //   bracketed_paste_rewrap_preserves_surrounding_input_order,
+    //   input_thread_kitty_release_does_not_absorb_following_plain_text,
+    //   malformed_tail_then_valid_bytes_preserve_all_input_without_duplicates.
+    // - Legacy smoke: input_thread_flushes_incomplete_escape_after_timeout,
+    //   input_thread_forwards_split_kitty_press_release_sequences.
+
     #[cfg(unix)]
     use libc::{self, c_int};
 
@@ -1360,6 +1370,389 @@ mod tests {
             .recv_timeout(Duration::from_millis(200))
             .expect("missing paste event");
         assert_eq!(received, "\x1b[200~hello\x1b[201~");
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    fn bracketed_paste_split_chunks_is_rewrapped_once() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                b"\x1b[200~".as_ptr() as *const libc::c_void,
+                b"\x1b[200~".len(),
+            )
+        };
+        assert!(
+            rx.recv_timeout(Duration::from_millis(60)).is_err(),
+            "paste emitted before content/end marker"
+        );
+
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                b"hello world".as_ptr() as *const libc::c_void,
+                b"hello world".len(),
+            )
+        };
+        assert!(
+            rx.recv_timeout(Duration::from_millis(60)).is_err(),
+            "paste emitted before end marker"
+        );
+
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                b"\x1b[201~".as_ptr() as *const libc::c_void,
+                b"\x1b[201~".len(),
+            )
+        };
+
+        let received = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing paste event");
+        assert_eq!(received, "\x1b[200~hello world\x1b[201~");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(40)).is_err(),
+            "expected one rewrapped paste event"
+        );
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    fn bracketed_paste_rewrap_preserves_surrounding_input_order() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let payload = b"a\x1b[200~paste\x1b[201~b";
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                payload.as_ptr() as *const libc::c_void,
+                payload.len(),
+            )
+        };
+
+        let first = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing leading char event");
+        let second = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing paste event");
+        let third = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing trailing char event");
+
+        assert_eq!(first, "a");
+        assert_eq!(second, "\x1b[200~paste\x1b[201~");
+        assert_eq!(third, "b");
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    // Legacy smoke test: validates eventual timeout flush at integration level.
+    // Comparator-sensitive timing guarantees live in stdin_buffer invariants.
+    fn input_thread_flushes_incomplete_escape_after_timeout() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let partial = b"\x1b[<35";
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                partial.as_ptr() as *const libc::c_void,
+                partial.len(),
+            )
+        };
+
+        let flushed = rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("missing timeout flush event");
+        assert_eq!(flushed, "\x1b[<35");
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    // Legacy smoke test: validates basic split press/release forwarding.
+    // Do not treat as the sole guard against release-tail absorption.
+    // Pair with input_thread_kitty_release_does_not_absorb_following_plain_text.
+    fn input_thread_forwards_split_kitty_press_release_sequences() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let chunk1 = b"\x1b[97u\x1b[97;1:";
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                chunk1.as_ptr() as *const libc::c_void,
+                chunk1.len(),
+            )
+        };
+
+        let first = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing kitty press event");
+        assert_eq!(first, "\x1b[97u");
+
+        let chunk2 = b"3u";
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                chunk2.as_ptr() as *const libc::c_void,
+                chunk2.len(),
+            )
+        };
+
+        let second = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing kitty release event");
+        assert_eq!(second, "\x1b[97;1:3u");
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    fn input_thread_kitty_release_does_not_absorb_following_plain_text() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                b"\x1b[97u\x1b[97;1:".as_ptr() as *const libc::c_void,
+                b"\x1b[97u\x1b[97;1:".len(),
+            )
+        };
+
+        let first = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing kitty press event");
+        assert_eq!(first, "\x1b[97u");
+
+        let _ = unsafe {
+            libc::write(pty.master, b"3ux".as_ptr() as *const libc::c_void, b"3ux".len())
+        };
+
+        let second = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing kitty release event");
+        let third = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing plain text event");
+        assert_eq!(second, "\x1b[97;1:3u");
+        assert_eq!(third, "x");
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    fn input_thread_partial_sequence_not_emitted_before_timeout() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                b"\x1b[<35".as_ptr() as *const libc::c_void,
+                b"\x1b[<35".len(),
+            )
+        };
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(5)).is_err(),
+            "partial sequence emitted before timeout window elapsed"
+        );
+
+        let flushed = rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("missing timeout flush event");
+        assert_eq!(flushed, "\x1b[<35");
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    fn paste_and_normal_input_interleaving_preserves_order_without_duplicates() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                b"a\x1b[200~".as_ptr() as *const libc::c_void,
+                b"a\x1b[200~".len(),
+            )
+        };
+        let first = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing leading normal input");
+        assert_eq!(first, "a");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(60)).is_err(),
+            "paste emitted before end marker"
+        );
+
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                b"bc\x1b[201~d".as_ptr() as *const libc::c_void,
+                b"bc\x1b[201~d".len(),
+            )
+        };
+
+        let second = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing paste event");
+        let third = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing trailing normal input");
+        assert_eq!(second, "\x1b[200~bc\x1b[201~");
+        assert_eq!(third, "d");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(40)).is_err(),
+            "unexpected duplicate or out-of-order extra input events"
+        );
+
+        terminal.stop().expect("terminal stop");
+    }
+
+    #[test]
+    fn malformed_tail_then_valid_bytes_preserve_all_input_without_duplicates() {
+        let pty = open_pty();
+
+        let (tx, rx) = mpsc::channel();
+        let mut terminal = ProcessTerminal::new();
+        terminal.stdin_fd = pty.slave;
+        terminal.stdout_fd = pty.slave;
+
+        terminal
+            .start(
+                Box::new(move |data| {
+                    let _ = tx.send(data);
+                }),
+                Box::new(|| {}),
+            )
+            .expect("terminal start");
+
+        let input = "a\x1b[<35;1;xm\x1b[AZ";
+        let _ = unsafe {
+            libc::write(
+                pty.master,
+                input.as_bytes().as_ptr() as *const libc::c_void,
+                input.len(),
+            )
+        };
+
+        let first = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("missing first normal input");
+        assert_eq!(first, "a");
+
+        let second = rx
+            .recv_timeout(Duration::from_millis(300))
+            .expect("missing timeout-flushed malformed tail");
+        assert_eq!(second, "\x1b[<35;1;xm\x1b[AZ");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(40)).is_err(),
+            "unexpected duplicate trailing data"
+        );
 
         terminal.stop().expect("terminal stop");
     }

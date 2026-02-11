@@ -347,24 +347,141 @@ mod tests {
         false
     }
 
-    #[test]
-    fn layout_percent_positioning() {
-        let options = OverlayOptions {
-            row: Some(SizeValue::Percent(50.0)),
-            col: Some(SizeValue::Percent(50.0)),
-            ..Default::default()
-        };
-        let layout = resolve_overlay_layout(Some(&options), 2, 20, 10);
-        assert_eq!(layout.row, 4);
-        assert_eq!(layout.col, 0);
+    fn count_occurrences(haystack: &str, needle: &str) -> usize {
+        haystack.match_indices(needle).count()
     }
 
     #[test]
-    fn composite_preserves_styles_and_width() {
-        let base = "base";
-        let overlay = "\x1b[31mred\x1b[0m";
-        let composed = composite_line_at(base, overlay, 0, 3, 4, not_image);
-        assert!(composed.contains("red"));
-        assert!(visible_width(&composed) <= 4);
+    fn layout_anchor_matrix_all_variants() {
+        let cases = [
+            (OverlayAnchor::TopLeft, 0, 0),
+            (OverlayAnchor::TopRight, 0, 14),
+            (OverlayAnchor::BottomLeft, 7, 0),
+            (OverlayAnchor::BottomRight, 7, 14),
+            (OverlayAnchor::TopCenter, 0, 7),
+            (OverlayAnchor::BottomCenter, 7, 7),
+            (OverlayAnchor::LeftCenter, 3, 0),
+            (OverlayAnchor::RightCenter, 3, 14),
+            (OverlayAnchor::Center, 3, 7),
+        ];
+        for (anchor, expected_row, expected_col) in cases {
+            let options = OverlayOptions {
+                width: Some(SizeValue::Absolute(6)),
+                anchor: Some(anchor),
+                ..Default::default()
+            };
+            let layout = resolve_overlay_layout(Some(&options), 3, 20, 10);
+            assert_eq!(layout.row, expected_row, "anchor {anchor:?} row mismatch");
+            assert_eq!(layout.col, expected_col, "anchor {anchor:?} col mismatch");
+        }
+    }
+
+    #[test]
+    fn layout_percent_boundaries_and_clamping() {
+        let cases = [
+            (0.0, 0.0, 0, 0),
+            (50.0, 50.0, 4, 6),
+            (100.0, 100.0, 8, 12),
+            (175.0, 250.0, 8, 12),
+            (-25.0, -10.0, 0, 0),
+        ];
+        for (row_percent, col_percent, expected_row, expected_col) in cases {
+            let options = OverlayOptions {
+                width: Some(SizeValue::Absolute(8)),
+                row: Some(SizeValue::Percent(row_percent)),
+                col: Some(SizeValue::Percent(col_percent)),
+                ..Default::default()
+            };
+            let layout = resolve_overlay_layout(Some(&options), 2, 20, 10);
+            assert_eq!(
+                layout.row, expected_row,
+                "row percent {row_percent} should resolve predictably"
+            );
+            assert_eq!(
+                layout.col, expected_col,
+                "col percent {col_percent} should resolve predictably"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_margin_and_size_constraints_interact_correctly() {
+        let options = OverlayOptions {
+            width: Some(SizeValue::Absolute(30)),
+            min_width: Some(20),
+            max_height: Some(SizeValue::Percent(90.0)),
+            anchor: Some(OverlayAnchor::BottomRight),
+            margin: Some(OverlayMargin {
+                top: Some(1),
+                right: Some(3),
+                bottom: Some(4),
+                left: Some(2),
+            }),
+            ..Default::default()
+        };
+        let layout = resolve_overlay_layout(Some(&options), 6, 20, 10);
+        assert_eq!(layout.width, 15);
+        assert_eq!(layout.max_height, Some(5));
+        assert_eq!(layout.row, 1);
+        assert_eq!(layout.col, 2);
+    }
+
+    #[test]
+    fn layout_absolute_position_overrides_anchor_then_offsets_and_clamps() {
+        let options = OverlayOptions {
+            width: Some(SizeValue::Absolute(5)),
+            anchor: Some(OverlayAnchor::BottomRight),
+            row: Some(SizeValue::Absolute(2)),
+            col: Some(SizeValue::Absolute(1)),
+            offset_y: Some(-10),
+            offset_x: Some(50),
+            margin: Some(OverlayMargin::uniform(1)),
+            ..Default::default()
+        };
+        let layout = resolve_overlay_layout(Some(&options), 2, 20, 10);
+        assert_eq!(layout.row, 1);
+        assert_eq!(layout.col, 14);
+    }
+
+    #[test]
+    fn composite_line_truncates_mixed_ansi_osc_overlay_and_closes_segments() {
+        let base = "0123456789";
+        let overlay = "\x1b[31mAB\x1b]8;;https://x\x07CDEFGH\x1b]8;;\x07\x1b[0m";
+        let composed = composite_line_at(base, overlay, 2, 6, 10, not_image);
+        let expected =
+            "01\x1b[0m\x1b]8;;\x07\x1b[31mAB\x1b]8;;https://x\x07CDEF\x1b[0m\x1b]8;;\x0789";
+        assert_eq!(composed, expected);
+        assert_eq!(visible_width(&composed), 10);
+        assert_eq!(count_occurrences(&composed, SEGMENT_RESET), 2);
+    }
+
+    #[test]
+    fn composite_line_pads_short_mixed_ansi_osc_overlay() {
+        let base = "abcdef";
+        let overlay = "\x1b]8;;https://x\x07Z\x1b]8;;\x07";
+        let composed = composite_line_at(base, overlay, 0, 4, 6, not_image);
+        let expected =
+            "\x1b[0m\x1b]8;;\x07\x1b]8;;https://x\x07Z\x1b]8;;\x07   \x1b[0m\x1b]8;;\x07ef";
+        assert_eq!(composed, expected);
+        assert_eq!(visible_width(&composed), 6);
+    }
+
+    #[test]
+    fn composite_overlays_inserts_reset_guards_for_style_safety() {
+        let base = vec![
+            "\x1b[3mXXXXXXXXXX\x1b[23m".to_string(),
+            "INPUT".to_string(),
+        ];
+        let overlays = vec![RenderedOverlay {
+            lines: vec!["OVR".to_string()],
+            row: 0,
+            col: 5,
+            width: 3,
+        }];
+        let composed = composite_overlays(base, &overlays, 10, 2, 2, not_image);
+        assert_eq!(composed.len(), 2);
+        assert_eq!(visible_width(&composed[0]), 10);
+        assert_eq!(count_occurrences(&composed[0], SEGMENT_RESET), 2);
+        assert_eq!(composed[1], "INPUT");
     }
 }

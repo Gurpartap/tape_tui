@@ -712,6 +712,35 @@ mod tests {
     }
 
     #[test]
+    fn image_line_detection_handles_very_long_lines_with_wrapped_sequences() {
+        let prefix = "x".repeat(256 * 1024);
+        let suffix = "y".repeat(256 * 1024);
+
+        let kitty_line = format!("{prefix}\x1b_Gf=100;payload\x1b\\{suffix}");
+        assert!(is_image_line(&kitty_line));
+
+        let iterm_line = format!(
+            "\x1b[31m{prefix}\x1b]1337;File=inline=1:AAAA\x07{suffix}\x1b[0m"
+        );
+        assert!(is_image_line(&iterm_line));
+    }
+
+    #[test]
+    fn image_line_detection_long_line_negative_cases() {
+        let prefix = "x".repeat(300 * 1024);
+        let suffix = "y".repeat(64 * 1024);
+
+        let plain_line = format!("{prefix}{suffix}");
+        assert!(!is_image_line(&plain_line));
+
+        let missing_escape = format!("{prefix}_Gf=100;payload{suffix}");
+        assert!(!is_image_line(&missing_escape));
+
+        let wrong_iterm_prefix = format!("{prefix}\x1b]1337;NoFile=inline=1:AAAA\x07{suffix}");
+        assert!(!is_image_line(&wrong_iterm_prefix));
+    }
+
+    #[test]
     fn cell_dimensions_update() {
         let state = TerminalImageState::default();
         let original = get_cell_dimensions(&state);

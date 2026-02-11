@@ -1,0 +1,5 @@
+[inline](https://example.com)
+<https://example.com>
+[label](https://example.com/path)
+[person](mailto:user@example.com)
+<mailto:user@example.com>

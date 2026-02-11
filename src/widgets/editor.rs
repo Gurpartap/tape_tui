@@ -2008,7 +2008,7 @@ impl Editor {
             return;
         }
         let new_index = self.history_index - direction;
-        if new_index < -1 || new_index as usize >= self.history.len() {
+        if new_index < -1 || (new_index >= 0 && new_index as usize >= self.history.len()) {
             return;
         }
         if self.history_index == -1 && new_index >= 0 {
@@ -2752,6 +2752,7 @@ mod tests {
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
+    use crate::core::editor_component::EditorComponent;
     use crate::core::input_event::parse_input_events;
     use crate::default_editor_keybindings_handle;
     use crate::widgets::select_list::SelectListTheme;
@@ -2957,6 +2958,174 @@ mod tests {
 
         send(&mut editor, "\x19"); // ctrl+y
         assert_eq!(editor.get_text(), "hello world");
+    }
+
+    #[test]
+    fn editor_history_navigation_bounds_and_exits_on_edit() {
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
+        EditorComponent::add_to_history(&mut editor, "first");
+        EditorComponent::add_to_history(&mut editor, "second");
+
+        send(&mut editor, "\x1b[A");
+        assert_eq!(editor.get_text(), "second");
+        assert_eq!(editor.history_index, 0);
+
+        send(&mut editor, "\x1b[A");
+        assert_eq!(editor.get_text(), "first");
+        assert_eq!(editor.history_index, 1);
+
+        send(&mut editor, "\x1b[A");
+        assert_eq!(editor.get_text(), "first");
+        assert_eq!(editor.history_index, 1);
+
+        send(&mut editor, "\x1b[B");
+        assert_eq!(editor.get_text(), "second");
+        assert_eq!(editor.history_index, 0);
+
+        send(&mut editor, "\x1b[B");
+        assert_eq!(editor.get_text(), "");
+        assert_eq!(editor.history_index, -1);
+
+        send(&mut editor, "\x1b[A");
+        assert_eq!(editor.get_text(), "second");
+        assert_eq!(editor.history_index, 0);
+
+        send(&mut editor, "!");
+        assert_eq!(editor.get_text(), "second!");
+        assert_eq!(editor.history_index, -1);
+
+        send(&mut editor, "\x1b[B");
+        assert_eq!(editor.get_text(), "second!");
+        assert_eq!(editor.history_index, -1);
+    }
+
+    #[test]
+    fn editor_grapheme_movement_and_deletion_are_cluster_aware() {
+        let emoji = "👨‍👩‍👧‍👦";
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
+
+        editor.set_text(&format!("a{emoji}b"));
+        editor.state.cursor_line = 0;
+        editor.set_cursor_col(editor.state.lines[0].len());
+
+        editor.move_cursor(0, -1);
+        assert_eq!(editor.get_cursor(), (0, format!("a{emoji}").len()));
+        editor.move_cursor(0, -1);
+        assert_eq!(editor.get_cursor(), (0, 1));
+        editor.move_cursor(0, 1);
+        assert_eq!(editor.get_cursor(), (0, 1 + emoji.len()));
+
+        editor.set_text(&format!("a{emoji}b"));
+        editor.state.cursor_line = 0;
+        editor.set_cursor_col(1 + emoji.len());
+        editor.handle_backspace();
+        assert_eq!(editor.get_text(), "ab");
+        assert_eq!(editor.get_cursor(), (0, 1));
+
+        editor.set_text(&format!("a{emoji}b"));
+        editor.state.cursor_line = 0;
+        editor.set_cursor_col(1);
+        editor.handle_forward_delete();
+        assert_eq!(editor.get_text(), "ab");
+        assert_eq!(editor.get_cursor(), (0, 1));
+    }
+
+    #[test]
+    fn editor_word_navigation_and_deletion_handle_punctuation_and_multiline() {
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
+
+        editor.set_text("foo,  bar");
+        editor.state.cursor_line = 0;
+        editor.set_cursor_col("foo,  bar".len());
+
+        editor.move_word_backwards();
+        assert_eq!(editor.get_cursor(), (0, 6));
+        editor.move_word_backwards();
+        assert_eq!(editor.get_cursor(), (0, 3));
+        editor.move_word_backwards();
+        assert_eq!(editor.get_cursor(), (0, 0));
+
+        editor.move_word_forwards();
+        assert_eq!(editor.get_cursor(), (0, 3));
+        editor.move_word_forwards();
+        assert_eq!(editor.get_cursor(), (0, 4));
+        editor.move_word_forwards();
+        assert_eq!(editor.get_cursor(), (0, "foo,  bar".len()));
+
+        editor.set_text("foo,bar");
+        editor.state.cursor_line = 0;
+        editor.set_cursor_col(4);
+        editor.delete_word_backwards();
+        assert_eq!(editor.get_text(), "foobar");
+        assert_eq!(editor.get_cursor(), (0, 3));
+
+        editor.set_text("left\nright");
+        editor.state.cursor_line = 1;
+        editor.set_cursor_col(0);
+        editor.delete_word_backwards();
+        assert_eq!(editor.get_text(), "leftright");
+        assert_eq!(editor.get_cursor(), (0, 4));
+
+        editor.set_text("left\nright");
+        editor.state.cursor_line = 0;
+        editor.set_cursor_col(4);
+        editor.delete_word_forwards();
+        assert_eq!(editor.get_text(), "leftright");
+        assert_eq!(editor.get_cursor(), (0, 4));
+    }
+
+    #[test]
+    fn editor_yank_pop_rotates_kill_ring_entries() {
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
+        editor.add_to_kill_ring("one", false);
+        editor.last_action = None;
+        editor.add_to_kill_ring("two", false);
+
+        editor.yank();
+        assert_eq!(editor.get_text(), "two");
+
+        editor.yank_pop();
+        assert_eq!(editor.get_text(), "one");
+
+        editor.yank_pop();
+        assert_eq!(editor.get_text(), "two");
+    }
+
+    #[test]
+    fn editor_undo_breaks_coalescing_after_cursor_move() {
+        let mut editor = Editor::new(
+            theme(),
+            default_editor_keybindings_handle(),
+            EditorOptions::default(),
+        );
+        for ch in "abc".chars() {
+            send(&mut editor, &ch.to_string());
+        }
+        send(&mut editor, "\x1b[D");
+        send(&mut editor, "X");
+        assert_eq!(editor.get_text(), "abXc");
+
+        send(&mut editor, "\x1f"); // ctrl+-
+        assert_eq!(editor.get_text(), "abc");
+
+        send(&mut editor, "\x1f"); // ctrl+-
+        assert_eq!(editor.get_text(), "");
     }
 
     #[test]
