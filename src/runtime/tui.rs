@@ -23,6 +23,7 @@ use crate::render::overlay::{
 };
 use crate::render::renderer::DiffRenderer;
 use crate::render::Frame;
+use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::focus::FocusState;
 use crate::runtime::ime::position_hardware_cursor;
 
@@ -88,7 +89,10 @@ pub struct TuiRuntime<T: Terminal> {
     terminal: T,
     output: OutputGate,
     terminal_image_state: Arc<TerminalImageState>,
-    root: ComponentRc,
+    components: ComponentRegistry,
+    root: Vec<ComponentId>,
+    root_focus: Option<ComponentId>,
+    root_focus_active: Option<ComponentId>,
     renderer: DiffRenderer,
     focus: FocusState,
     overlays: Rc<RefCell<OverlayState>>,
@@ -114,6 +118,7 @@ struct OverlayState {
     next_id: u64,
     dirty: bool,
     pending_pre_focus: Option<ComponentRc>,
+    pending_pre_focus_root: Option<ComponentId>,
     pending_focus_overlay_id: Option<u64>,
 }
 
@@ -122,7 +127,14 @@ struct OverlayEntry {
     component: ComponentRc,
     options: Option<OverlayOptions>,
     pre_focus: Option<ComponentRc>,
+    pre_focus_root: Option<ComponentId>,
     hidden: bool,
+}
+
+enum OverlayPreFocus {
+    Component(ComponentRc),
+    Root(ComponentId),
+    None,
 }
 
 pub struct OverlayHandle {
@@ -189,6 +201,8 @@ pub enum Command {
     RequestStop,
     /// Update terminal title without forcing a render.
     SetTitle(String),
+    RootSet(Vec<ComponentId>),
+    RootPush(ComponentId),
     Terminal(TerminalOp),
 }
 
@@ -415,6 +429,9 @@ impl OverlayHandle {
                 if let Some(pre_focus) = entry.pre_focus {
                     state.pending_pre_focus = Some(pre_focus);
                 }
+                if let Some(pre_focus_root) = entry.pre_focus_root {
+                    state.pending_pre_focus_root = Some(pre_focus_root);
+                }
                 state.dirty = true;
                 self.wake.request_render();
             }
@@ -451,14 +468,17 @@ impl OverlayHandle {
 }
 
 impl<T: Terminal> TuiRuntime<T> {
-    pub fn new(terminal: T, root: ComponentRc) -> Self {
+    pub fn new(terminal: T) -> Self {
         let clear_on_shrink = env_flag("PI_CLEAR_ON_SHRINK");
         let show_hardware_cursor = env_flag("PI_HARDWARE_CURSOR");
         Self {
             terminal,
             output: OutputGate::new(),
             terminal_image_state: Arc::new(TerminalImageState::default()),
-            root,
+            components: ComponentRegistry::new(),
+            root: Vec::new(),
+            root_focus: None,
+            root_focus_active: None,
             renderer: DiffRenderer::new(),
             focus: FocusState::new(),
             overlays: Rc::new(RefCell::new(OverlayState::default())),
@@ -690,12 +710,89 @@ impl<T: Terminal> TuiRuntime<T> {
         Arc::clone(&self.terminal_image_state)
     }
 
+    pub fn register_component(&mut self, component: impl Component + 'static) -> ComponentId {
+        self.register_component_boxed(Box::new(component))
+    }
+
+    pub fn register_component_boxed(&mut self, component: Box<dyn Component>) -> ComponentId {
+        self.components.register_boxed(component)
+    }
+
+    pub fn set_root(&mut self, components: Vec<ComponentId>) {
+        self.root = components;
+        self.request_render();
+    }
+
+    pub fn push_root(&mut self, component: ComponentId) {
+        self.root.push(component);
+        self.request_render();
+    }
+
     pub fn set_focus(&mut self, target: Rc<RefCell<Box<dyn Component>>>) {
+        self.deactivate_root_focus();
         self.focus.set_focus(Some(target));
     }
 
     pub fn clear_focus(&mut self) {
         self.focus.clear();
+        self.set_root_focus(None);
+    }
+
+    pub fn set_focus_component(&mut self, target: ComponentId) {
+        self.focus.clear();
+        self.set_root_focus(Some(target));
+    }
+
+    fn capture_pre_focus(&self) -> (Option<ComponentRc>, Option<ComponentId>) {
+        if let Some(focused) = self.focus.focused() {
+            (Some(focused), None)
+        } else {
+            (None, self.root_focus)
+        }
+    }
+
+    fn set_root_focus(&mut self, target: Option<ComponentId>) {
+        if self.root_focus == target {
+            return;
+        }
+        self.deactivate_root_focus();
+        self.root_focus = target;
+        self.activate_root_focus();
+    }
+
+    fn activate_root_focus(&mut self) {
+        if self.focus.focused().is_some() {
+            return;
+        }
+        let Some(target) = self.root_focus else {
+            return;
+        };
+        if self.root_focus_active == Some(target) {
+            return;
+        }
+        self.deactivate_root_focus();
+        let Some(component) = self.components.get_mut(target) else {
+            debug_assert!(false, "root focus component {:?} missing", target);
+            self.root_focus_active = None;
+            return;
+        };
+        if let Some(focusable) = component.as_focusable() {
+            focusable.set_focused(true);
+        }
+        self.root_focus_active = Some(target);
+    }
+
+    fn deactivate_root_focus(&mut self) {
+        let Some(active) = self.root_focus_active.take() else {
+            return;
+        };
+        let Some(component) = self.components.get_mut(active) else {
+            debug_assert!(false, "root focus component {:?} missing", active);
+            return;
+        };
+        if let Some(focusable) = component.as_focusable() {
+            focusable.set_focused(false);
+        }
     }
 
     pub fn show_overlay(
@@ -703,12 +800,13 @@ impl<T: Terminal> TuiRuntime<T> {
         component: ComponentRc,
         options: Option<OverlayOptions>,
     ) -> OverlayHandle {
-        let pre_focus = self.focus.focused();
+        let (pre_focus, pre_focus_root) = self.capture_pre_focus();
         let entry = OverlayEntry {
             id: 0,
             component: Rc::clone(&component),
             options,
             pre_focus,
+            pre_focus_root,
             hidden: false,
         };
         let visible = self.is_overlay_visible(&entry);
@@ -721,6 +819,7 @@ impl<T: Terminal> TuiRuntime<T> {
         state.dirty = true;
         drop(state);
         if visible {
+            self.deactivate_root_focus();
             self.focus.set_focus(Some(component));
         }
         self.request_render();
@@ -895,13 +994,7 @@ impl<T: Terminal> TuiRuntime<T> {
 
             if self.wake.take_pending_resize() {
                 self.reconcile_focus();
-                if let Some(component) = self.focus.focused() {
-                    let event = InputEvent::Resize {
-                        columns: self.terminal.columns(),
-                        rows: self.terminal.rows(),
-                    };
-                    component.borrow_mut().handle_event(&event);
-                }
+                self.dispatch_resize_event();
                 self.request_render();
                 did_work = true;
             }
@@ -958,13 +1051,7 @@ impl<T: Terminal> TuiRuntime<T> {
 
         if self.wake.take_pending_resize() {
             self.reconcile_focus();
-            if let Some(component) = self.focus.focused() {
-                let event = InputEvent::Resize {
-                    columns: self.terminal.columns(),
-                    rows: self.terminal.rows(),
-                };
-                component.borrow_mut().handle_event(&event);
-            }
+            self.dispatch_resize_event();
             self.request_render();
         }
 
@@ -1007,31 +1094,54 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
 
-        let Some(component) = self.focus.focused() else {
-            return;
-        };
-
-        let mut component = component.borrow_mut();
-
         let mut handled = false;
-        for event in events {
-            if let InputEvent::Key {
-                key_id, event_type, ..
-            } = &event
-            {
-                if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
-                    if let Some(handler) = self.on_debug.as_mut() {
-                        handler();
+        if let Some(component) = self.focus.focused() {
+            let mut component = component.borrow_mut();
+            for event in events {
+                if let InputEvent::Key {
+                    key_id, event_type, ..
+                } = &event
+                {
+                    if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
+                        if let Some(handler) = self.on_debug.as_mut() {
+                            handler();
+                        }
+                        continue;
                     }
-                    continue;
+                    if *event_type == KeyEventType::Release && !component.wants_key_release() {
+                        continue;
+                    }
                 }
-                if *event_type == KeyEventType::Release && !component.wants_key_release() {
-                    continue;
-                }
-            }
 
-            component.handle_event(&event);
-            handled = true;
+                component.handle_event(&event);
+                handled = true;
+            }
+        } else if let Some(root_id) = self.root_focus_active {
+            let Some(component) = self.components.get_mut(root_id) else {
+                debug_assert!(false, "root focus component {:?} missing", root_id);
+                return;
+            };
+            for event in events {
+                if let InputEvent::Key {
+                    key_id, event_type, ..
+                } = &event
+                {
+                    if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
+                        if let Some(handler) = self.on_debug.as_mut() {
+                            handler();
+                        }
+                        continue;
+                    }
+                    if *event_type == KeyEventType::Release && !component.wants_key_release() {
+                        continue;
+                    }
+                }
+
+                component.handle_event(&event);
+                handled = true;
+            }
+        } else {
+            return;
         }
 
         if handled {
@@ -1075,13 +1185,7 @@ impl<T: Terminal> TuiRuntime<T> {
         let width = self.terminal.columns() as usize;
         let height = self.terminal.rows() as usize;
         self.reconcile_focus();
-        let (mut lines, mut cursor_pos) = {
-            let mut root = self.root.borrow_mut();
-            root.set_terminal_rows(height);
-            let lines = root.render(width);
-            let cursor_pos = root.cursor_pos();
-            (lines, cursor_pos)
-        };
+        let (mut lines, mut cursor_pos) = self.render_root(width, height);
 
         if self.has_overlay() {
             let (composited, overlay_cursor) = self.composite_overlay_lines(lines, width, height);
@@ -1137,6 +1241,41 @@ impl<T: Terminal> TuiRuntime<T> {
         self.renderer.set_hardware_cursor_row(updated_row);
     }
 
+    fn render_root(&mut self, width: usize, height: usize) -> (Vec<String>, Option<CursorPos>) {
+        let root_ids = self.root.clone();
+        let mut lines = Vec::new();
+        let mut cursor_pos = None;
+        for id in root_ids {
+            let Some(component) = self.components.get_mut(id) else {
+                debug_assert!(false, "root component {:?} missing", id);
+                continue;
+            };
+            component.set_terminal_rows(height);
+            let start_row = lines.len();
+            let child_lines = component.render(width);
+            let child_cursor = component.cursor_pos();
+            lines.extend(child_lines);
+            if let Some(pos) = child_cursor {
+                cursor_pos = Some(CursorPos {
+                    row: start_row.saturating_add(pos.row),
+                    col: pos.col,
+                });
+            }
+        }
+        (lines, cursor_pos)
+    }
+
+    fn invalidate_root_components(&mut self) {
+        let root_ids = self.root.clone();
+        for id in root_ids {
+            let Some(component) = self.components.get_mut(id) else {
+                debug_assert!(false, "root component {:?} missing", id);
+                continue;
+            };
+            component.invalidate();
+        }
+    }
+
     fn apply_pending_commands(&mut self, commands: VecDeque<Command>) {
         // Commands are applied at a single, explicit stage in the tick to preserve deterministic
         // ordering relative to input handling and render decisions.
@@ -1153,6 +1292,14 @@ impl<T: Terminal> TuiRuntime<T> {
                 }
                 Command::SetTitle(title) => {
                     pending_title = Some(title);
+                }
+                Command::RootSet(components) => {
+                    self.root = components;
+                    render_requested = true;
+                }
+                Command::RootPush(component) => {
+                    self.root.push(component);
+                    render_requested = true;
                 }
                 Command::Terminal(op) => {
                     if self.apply_terminal_op(op) {
@@ -1269,10 +1416,7 @@ impl<T: Terminal> TuiRuntime<T> {
                         height_px,
                     },
                 );
-                {
-                    let mut root = self.root.borrow_mut();
-                    root.invalidate();
-                }
+                self.invalidate_root_components();
                 self.request_render();
             }
             self.input_buffer.replace_range(start..end, "");
@@ -1399,6 +1543,25 @@ impl<T: Terminal> TuiRuntime<T> {
         }
     }
 
+    fn dispatch_resize_event(&mut self) {
+        let event = InputEvent::Resize {
+            columns: self.terminal.columns(),
+            rows: self.terminal.rows(),
+        };
+        if let Some(component) = self.focus.focused() {
+            component.borrow_mut().handle_event(&event);
+            return;
+        }
+        let Some(root_id) = self.root_focus_active else {
+            return;
+        };
+        let Some(component) = self.components.get_mut(root_id) else {
+            debug_assert!(false, "root focus component {:?} missing", root_id);
+            return;
+        };
+        component.handle_event(&event);
+    }
+
     fn reconcile_focus(&mut self) {
         if self.apply_pending_overlay_focus() {
             return;
@@ -1408,13 +1571,24 @@ impl<T: Terminal> TuiRuntime<T> {
         if let Some(focused) = focused {
             if let Some(pre_focus) = self.pre_focus_for_overlay(&focused) {
                 if !self.is_overlay_visible_for_component(&focused) {
-                    let next = self.topmost_visible_overlay().or(pre_focus);
-                    if let Some(next) = next {
+                    if let Some(next) = self.topmost_visible_overlay() {
+                        self.deactivate_root_focus();
                         self.focus.set_focus(Some(next));
                     } else if let Some(restore) = self.take_pending_pre_focus() {
+                        self.deactivate_root_focus();
                         self.focus.set_focus(Some(restore));
+                    } else if let Some(restore) = self.take_pending_pre_focus_root() {
+                        self.focus.clear();
+                        self.set_root_focus(Some(restore));
+                    } else if let OverlayPreFocus::Component(pre_focus) = pre_focus {
+                        self.deactivate_root_focus();
+                        self.focus.set_focus(Some(pre_focus));
+                    } else if let OverlayPreFocus::Root(pre_focus_root) = pre_focus {
+                        self.focus.clear();
+                        self.set_root_focus(Some(pre_focus_root));
                     } else {
                         self.focus.clear();
+                        self.activate_root_focus();
                     }
                 }
                 return;
@@ -1422,14 +1596,21 @@ impl<T: Terminal> TuiRuntime<T> {
         }
 
         if let Some(topmost) = self.topmost_visible_overlay() {
+            self.deactivate_root_focus();
             self.focus.set_focus(Some(topmost));
         } else if let Some(restore) = self.take_pending_pre_focus() {
+            self.deactivate_root_focus();
             self.focus.set_focus(Some(restore));
+        } else if let Some(restore) = self.take_pending_pre_focus_root() {
+            self.focus.clear();
+            self.set_root_focus(Some(restore));
+        } else {
+            self.activate_root_focus();
         }
     }
 
     fn apply_pending_overlay_focus(&mut self) -> bool {
-        let pre_focus = self.focus.focused();
+        let (pre_focus, pre_focus_root) = self.capture_pre_focus();
 
         let target = {
             let mut state = self.overlays.borrow_mut();
@@ -1448,11 +1629,13 @@ impl<T: Terminal> TuiRuntime<T> {
                 .map_or(true, |component| !Rc::ptr_eq(component, &entry.component))
             {
                 entry.pre_focus = pre_focus.clone();
+                entry.pre_focus_root = pre_focus_root;
             }
 
             Rc::clone(&entry.component)
         };
 
+        self.deactivate_root_focus();
         self.focus.set_focus(Some(target));
         true
     }
@@ -1467,13 +1650,21 @@ impl<T: Terminal> TuiRuntime<T> {
         None
     }
 
-    fn pre_focus_for_overlay(&self, component: &ComponentRc) -> Option<Option<ComponentRc>> {
+    fn pre_focus_for_overlay(&self, component: &ComponentRc) -> Option<OverlayPreFocus> {
         let state = self.overlays.borrow();
         state
             .entries
             .iter()
             .find(|entry| Rc::ptr_eq(&entry.component, component))
-            .map(|entry| entry.pre_focus.clone())
+            .map(|entry| {
+                if let Some(pre_focus) = entry.pre_focus.as_ref() {
+                    OverlayPreFocus::Component(Rc::clone(pre_focus))
+                } else if let Some(pre_focus_root) = entry.pre_focus_root {
+                    OverlayPreFocus::Root(pre_focus_root)
+                } else {
+                    OverlayPreFocus::None
+                }
+            })
     }
 
     fn is_overlay_visible_for_component(&self, component: &ComponentRc) -> bool {
@@ -1507,6 +1698,11 @@ impl<T: Terminal> TuiRuntime<T> {
     fn take_pending_pre_focus(&mut self) -> Option<Rc<RefCell<Box<dyn Component>>>> {
         let mut state = self.overlays.borrow_mut();
         state.pending_pre_focus.take()
+    }
+
+    fn take_pending_pre_focus_root(&mut self) -> Option<ComponentId> {
+        let mut state = self.overlays.borrow_mut();
+        state.pending_pre_focus_root.take()
     }
 }
 
@@ -1583,9 +1779,8 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_cell_size_response, CoalesceBudget, Command, CrashCleanup, OverlayOptions,
-        RuntimeHandle, TerminalOp,
-        TuiRuntime,
+        find_cell_size_response, CoalesceBudget, Command, ComponentId, CrashCleanup, OverlayOptions,
+        RuntimeHandle, TerminalOp, TuiRuntime,
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
@@ -1654,6 +1849,16 @@ mod tests {
         fn render(&mut self, _width: usize) -> Vec<String> {
             Vec::new()
         }
+    }
+
+    fn runtime_with_root<T: Terminal, C: Component + 'static>(
+        terminal: T,
+        component: C,
+    ) -> (TuiRuntime<T>, ComponentId) {
+        let mut runtime = TuiRuntime::new(terminal);
+        let root_id = runtime.register_component(component);
+        runtime.set_root(vec![root_id]);
+        (runtime, root_id)
     }
 
     #[derive(Default)]
@@ -1732,6 +1937,42 @@ mod tests {
         }
     }
 
+    struct StaticLinesComponent {
+        lines: Vec<String>,
+        cursor: Option<CursorPos>,
+    }
+
+    impl Component for StaticLinesComponent {
+        fn render(&mut self, _width: usize) -> Vec<String> {
+            self.lines.clone()
+        }
+
+        fn cursor_pos(&self) -> Option<CursorPos> {
+            self.cursor
+        }
+    }
+
+    #[test]
+    fn root_stack_concatenates_children_and_offsets_cursor() {
+        let terminal = TestTerminal::default();
+        let mut runtime = TuiRuntime::new(terminal);
+        let first = StaticLinesComponent {
+            lines: vec!["one".to_string()],
+            cursor: Some(CursorPos { row: 0, col: 0 }),
+        };
+        let second = StaticLinesComponent {
+            lines: vec!["two".to_string(), "three".to_string()],
+            cursor: Some(CursorPos { row: 1, col: 2 }),
+        };
+        let first_id = runtime.register_component(first);
+        let second_id = runtime.register_component(second);
+        runtime.set_root(vec![first_id, second_id]);
+
+        let (lines, cursor) = runtime.render_root(10, 24);
+        assert_eq!(lines, vec!["one", "two", "three"]);
+        assert_eq!(cursor, Some(CursorPos { row: 2, col: 2 }));
+    }
+
     #[test]
     fn crash_cleanup_writes_expected_bytes_and_is_idempotent() {
         let cleanup = CrashCleanup::default();
@@ -1746,8 +1987,7 @@ mod tests {
     #[test]
     fn key_release_filtered_unless_requested() {
         let terminal = TestTerminal::default();
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
         let inputs = Rc::new(RefCell::new(Vec::new()));
         let focused = Rc::new(RefCell::new(false));
@@ -1786,8 +2026,7 @@ mod tests {
         let component = CountingComponent {
             state: Rc::clone(&state),
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
 
         runtime.start().expect("runtime start");
         assert!(runtime.terminal.output.contains("\x1b[16t"));
@@ -1826,9 +2065,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(80, 24);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(CursorPosComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, CursorPosComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -1862,9 +2099,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(10, 24);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(WideCursorComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, WideCursorComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -1904,9 +2139,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(80, 24);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(CursorMarkerComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, CursorMarkerComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -1953,9 +2186,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(80, 24);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(MultiLineCursorMarkerComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, MultiLineCursorMarkerComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2007,9 +2238,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(80, 24);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(CursorMarkerWithMetadataComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, CursorMarkerWithMetadataComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2064,9 +2293,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(20, 3);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(BaseCursorComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, BaseCursorComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2122,9 +2349,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(20, 3);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(BaseCursorComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, BaseCursorComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2172,8 +2397,7 @@ mod tests {
     #[test]
     fn overlay_sets_viewport_size_from_layout_budget() {
         let terminal = TestTerminal::new(20, 10);
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
         runtime.start().expect("runtime start");
         runtime.terminal.output.clear();
@@ -2209,8 +2433,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(20, 2);
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(TwoLineComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, TwoLineComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2269,9 +2492,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(20, 2);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(CursorComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, CursorComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2297,8 +2518,7 @@ mod tests {
         std::env::remove_var("KITTY_WINDOW_ID");
 
         let terminal = TestTerminal::default();
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
         runtime.start().expect("runtime start");
         assert!(!runtime.kitty_protocol_active());
@@ -2318,13 +2538,8 @@ mod tests {
         let terminal_a = TestTerminal::default();
         let terminal_b = TestTerminal::default();
 
-        let root_a: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let root_b: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(DummyComponent)));
-
-        let mut runtime_a = TuiRuntime::new(terminal_a, root_a);
-        let mut runtime_b = TuiRuntime::new(terminal_b, root_b);
+        let (mut runtime_a, _root_a) = runtime_with_root(terminal_a, DummyComponent::default());
+        let (mut runtime_b, _root_b) = runtime_with_root(terminal_b, DummyComponent::default());
 
         runtime_a.cell_size_query_pending = true;
         runtime_b.cell_size_query_pending = true;
@@ -2351,11 +2566,10 @@ mod tests {
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&root_focus),
         );
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
-        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
 
         runtime.start().expect("runtime start");
-        runtime.set_focus(Rc::clone(&root));
+        runtime.set_focus_component(root_id);
         assert!(*root_focus.borrow());
 
         let overlay_focus = Rc::new(RefCell::new(false));
@@ -2384,10 +2598,9 @@ mod tests {
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&root_focus),
         );
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
-        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus(Rc::clone(&root));
+        runtime.set_focus_component(root_id);
 
         let overlay_focus = Rc::new(RefCell::new(false));
         let overlay_component = TestComponent::new(
@@ -2418,12 +2631,11 @@ mod tests {
 
         let root_inputs = Rc::new(RefCell::new(Vec::new()));
         let root_focus = Rc::new(RefCell::new(false));
-        let root_component = TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
-
-        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus(Rc::clone(&root));
+        runtime.set_focus_component(root_id);
 
         let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
         let overlay_focus = Rc::new(RefCell::new(false));
@@ -2457,12 +2669,11 @@ mod tests {
 
         let root_inputs = Rc::new(RefCell::new(Vec::new()));
         let root_focus = Rc::new(RefCell::new(false));
-        let root_component = TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
-
-        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus(Rc::clone(&root));
+        runtime.set_focus_component(root_id);
 
         let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
         let overlay_focus = Rc::new(RefCell::new(false));
@@ -2496,11 +2707,9 @@ mod tests {
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&root_focus),
         );
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(root_component)));
-
-        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus(Rc::clone(&root));
+        runtime.set_focus_component(root_id);
 
         let overlay_a_focus = Rc::new(RefCell::new(false));
         let overlay_a_component = TestComponent::new(
@@ -2543,8 +2752,7 @@ mod tests {
         let component = CountingComponent {
             state: Rc::clone(&state),
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
 
         runtime.start().expect("runtime start");
         runtime.render_if_needed();
@@ -2567,8 +2775,7 @@ mod tests {
         let component = CountingComponent {
             state: Rc::clone(&state),
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
 
         runtime.start().expect("runtime start");
         runtime.render_if_needed();
@@ -2618,8 +2825,7 @@ mod tests {
             handle_slot: Rc::clone(&handle_slot),
             requested: false,
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
         runtime.set_coalesce_budget_for_tests(CoalesceBudget {
             max_duration: Duration::from_secs(10),
             max_iterations: 1,
@@ -2643,15 +2849,14 @@ mod tests {
         let component = CountingComponent {
             state: Rc::clone(&state),
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, Rc::clone(&root));
+        let (mut runtime, root_id) = runtime_with_root(terminal, component);
         runtime.set_coalesce_budget_for_tests(CoalesceBudget {
             max_duration: Duration::from_secs(10),
             max_iterations: 4,
         });
 
         runtime.start().expect("runtime start");
-        runtime.set_focus(Rc::clone(&root));
+        runtime.set_focus_component(root_id);
         runtime.render_if_needed();
         let baseline = state.borrow().renders;
 
@@ -2671,8 +2876,7 @@ mod tests {
         let component = CountingComponent {
             state: Rc::clone(&state),
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
 
         runtime.start().expect("runtime start");
         runtime.render_if_needed();
@@ -2697,8 +2901,7 @@ mod tests {
         let component = CountingComponent {
             state: Rc::clone(&state),
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
 
         runtime.start().expect("runtime start");
         runtime.render_if_needed();
@@ -2728,8 +2931,7 @@ mod tests {
         let component = CountingComponent {
             state: Rc::clone(&state),
         };
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(component)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
 
         runtime.start().expect("runtime start");
         runtime.render_if_needed();
@@ -2752,8 +2954,7 @@ mod tests {
         std::env::remove_var("KITTY_WINDOW_ID");
 
         let terminal = TestTerminal::default();
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
         runtime.start().expect("runtime start");
         runtime.terminal.output.clear();
@@ -2777,8 +2978,7 @@ mod tests {
     #[test]
     fn flush_pending_output_is_noop_when_stopped() {
         let terminal = TestTerminal::default();
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
         runtime.output.push(TerminalCmd::HideCursor);
         runtime.flush_pending_output();
@@ -2802,8 +3002,7 @@ mod tests {
         std::env::remove_var("KITTY_WINDOW_ID");
 
         let terminal = TestTerminal::default();
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
         runtime.start().expect("runtime start");
         runtime.render_if_needed(); // clear initial render request
@@ -2841,8 +3040,7 @@ mod tests {
         std::env::remove_var("KITTY_WINDOW_ID");
 
         let terminal = TestTerminal::default();
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
         runtime.start().expect("runtime start");
         runtime.render_if_needed(); // clear initial render request
@@ -2884,8 +3082,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(80, 24);
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(HelloComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, HelloComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2977,9 +3174,7 @@ mod tests {
     fn drop_stops_terminal_when_started() {
         let state = Arc::new(Mutex::new(TrackingState::default()));
         let terminal = TrackingTerminal::new(Arc::clone(&state));
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
         runtime.start().expect("runtime start");
         drop(runtime);
 
@@ -3000,9 +3195,7 @@ mod tests {
     fn stop_then_drop_does_not_double_teardown() {
         let state = Arc::new(Mutex::new(TrackingState::default()));
         let terminal = TrackingTerminal::new(Arc::clone(&state));
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
         runtime.start().expect("runtime start");
         runtime.stop().expect("runtime stop");
         drop(runtime);
@@ -3024,9 +3217,8 @@ mod tests {
     fn drop_does_nothing_when_never_started() {
         let state = Arc::new(Mutex::new(TrackingState::default()));
         let terminal = TrackingTerminal::new(Arc::clone(&state));
-        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-
-        drop(TuiRuntime::new(terminal, root));
+        let (runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+        drop(runtime);
 
         TrackingTerminal::with_state(&state, |state| {
             assert!(
@@ -3055,9 +3247,7 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(20, 2);
-        let root: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(TwoLineComponent)));
-        let mut runtime = TuiRuntime::new(terminal, root);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, TwoLineComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");

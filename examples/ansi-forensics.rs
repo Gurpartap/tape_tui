@@ -757,9 +757,7 @@ fn main() -> std::io::Result<()> {
     let collector = Arc::new(Mutex::new(Collector::new(64 * 1024)));
     let terminal = ForensicsTerminal::new(ProcessTerminal::new(), Arc::clone(&collector));
 
-    let root: Rc<RefCell<Box<dyn Component>>> =
-        Rc::new(RefCell::new(Box::new(pi_tui::widgets::Spacer::new())));
-    let mut tui = TUI::new(terminal, Rc::clone(&root));
+    let mut tui = TUI::new(terminal);
     let render_handle = tui.runtime_handle();
 
     let state = Rc::new(RefCell::new(ForensicsState::default()));
@@ -797,7 +795,8 @@ fn main() -> std::io::Result<()> {
         Rc::clone(&state),
         start,
     );
-    *root.borrow_mut() = Box::new(app);
+    let app_id = tui.register_component(app);
+    tui.set_root(vec![app_id]);
 
     let exit_flag = Rc::new(RefCell::new(false));
     let editor_wrapper: Rc<RefCell<Box<dyn Component>>> =

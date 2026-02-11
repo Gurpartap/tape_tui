@@ -67,6 +67,7 @@ pub use crate::core::component::{Component, Focusable};
 pub use crate::core::cursor::CURSOR_MARKER;
 pub use crate::render::overlay::{OverlayAnchor, OverlayMargin, OverlayOptions, SizeValue};
 pub use crate::render::{Frame, Line, Span};
+pub use crate::runtime::component_registry::ComponentId;
 pub use crate::runtime::tui::OverlayHandle;
 
 pub type TUI<T> = crate::runtime::tui::TuiRuntime<T>;

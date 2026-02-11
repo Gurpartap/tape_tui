@@ -211,15 +211,6 @@ impl Focusable for EditorWrapper {
     }
 }
 
-#[derive(Default)]
-struct DummyComponent;
-
-impl Component for DummyComponent {
-    fn render(&mut self, _width: usize) -> Vec<String> {
-        Vec::new()
-    }
-}
-
 fn editor_theme() -> EditorTheme {
     EditorTheme {
         border_color: Box::new(dim),
@@ -264,8 +255,7 @@ fn pick_response() -> String {
 
 fn main() -> std::io::Result<()> {
     let terminal = ProcessTerminal::new();
-    let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
-    let mut tui = TUI::new(terminal, Rc::clone(&root));
+    let mut tui = TUI::new(terminal);
     let render_handle = tui.runtime_handle();
 
     let keybindings = default_editor_keybindings_handle();
@@ -369,7 +359,8 @@ fn main() -> std::io::Result<()> {
         state: Rc::clone(&chat_state),
         editor: Rc::clone(&editor),
     };
-    *root.borrow_mut() = Box::new(chat_app);
+    let app_id = tui.register_component(chat_app);
+    tui.set_root(vec![app_id]);
 
     let exit_flag = Rc::new(RefCell::new(false));
     let editor_wrapper: Rc<RefCell<Box<dyn Component>>> =

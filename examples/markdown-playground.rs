@@ -485,8 +485,7 @@ fn main() -> std::io::Result<()> {
     install_playground_keybindings(&keybindings);
 
     let terminal = ProcessTerminal::new();
-    let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(EmptyComponent)));
-    let mut tui = TUI::new(terminal, Rc::clone(&root));
+    let mut tui = TUI::new(terminal);
     let render_handle = tui.runtime_handle();
 
     let draft = Rc::new(RefCell::new(String::new()));
@@ -512,7 +511,8 @@ fn main() -> std::io::Result<()> {
     editor.borrow_mut().set_text(SAMPLE_MARKDOWN);
 
     let app = PlaygroundApp::new(Rc::clone(&editor), Rc::clone(&draft));
-    *root.borrow_mut() = Box::new(app);
+    let app_id = tui.register_component(app);
+    tui.set_root(vec![app_id]);
 
     let exit_flag = Rc::new(RefCell::new(false));
     let palette_state = Rc::new(RefCell::new(PaletteState::default()));
@@ -586,13 +586,4 @@ fn main() -> std::io::Result<()> {
 
     tui.stop()?;
     Ok(())
-}
-
-#[derive(Default)]
-struct EmptyComponent;
-
-impl Component for EmptyComponent {
-    fn render(&mut self, _width: usize) -> Vec<String> {
-        Vec::new()
-    }
 }
