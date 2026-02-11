@@ -1,4 +1,4 @@
-//! Rendering pipeline (Phase 4+).
+//! Rendering pipeline.
 
 pub mod frame;
 pub mod overlay;

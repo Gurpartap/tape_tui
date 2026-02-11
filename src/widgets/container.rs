@@ -1,4 +1,4 @@
-//! Simple container widget (Phase 8).
+//! Simple container widget.
 
 use crate::core::component::Component;
 use crate::core::cursor::CursorPos;

@@ -1,4 +1,4 @@
-//! IME hardware cursor positioning (Phase 5).
+//! IME hardware cursor positioning.
 
 use crate::core::cursor::CursorPos;
 use crate::core::output::TerminalCmd;

@@ -1,4 +1,4 @@
-//! Utility helpers (Phase 10).
+//! Utility helpers.
 
 use unicode_segmentation::UnicodeSegmentation;
 

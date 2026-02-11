@@ -1,4 +1,4 @@
-//! Autocomplete providers and helpers (Phase 14).
+//! Autocomplete providers and helpers.
 
 use std::collections::HashSet;
 use std::fs::{read_dir, symlink_metadata};

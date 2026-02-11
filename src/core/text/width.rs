@@ -1,4 +1,4 @@
-//! Grapheme width and visible width helpers (Phase 3).
+//! Grapheme width and visible width helpers.
 
 use emojis::get as emoji_get;
 use unicode_segmentation::UnicodeSegmentation;

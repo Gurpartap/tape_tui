@@ -1,4 +1,4 @@
-//! Stdin escape-sequence buffering (Phase 2).
+//! Stdin escape-sequence buffering.
 
 use std::time::{Duration, Instant};
 

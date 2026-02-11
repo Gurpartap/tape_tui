@@ -1,4 +1,4 @@
-//! Text widget (Phase 8).
+//! Text widget.
 
 use crate::core::component::Component;
 use crate::core::text::slice::wrap_text_with_ansi;

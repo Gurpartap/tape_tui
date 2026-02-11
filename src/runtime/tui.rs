@@ -141,7 +141,7 @@ pub struct OverlayHandle {
 /// # Self-healing contract
 /// Any raw write can move the cursor, write arbitrary bytes, or otherwise perturb the terminal.
 /// The runtime cannot query terminal state to fully recover, so `Drop` performs the minimal
-/// "self-healing" resync this phase supports:
+/// "self-healing" resync currently supported:
 /// - request a full viewport redraw next render (no scrollback clear), and
 /// - request a render so the next tick repaints the viewport even if content is unchanged.
 ///

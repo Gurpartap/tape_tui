@@ -1,4 +1,4 @@
-//! Editor component interface (Phase 25).
+//! Editor component interface.
 
 use crate::core::autocomplete::AutocompleteProvider;
 use crate::core::component::Component;

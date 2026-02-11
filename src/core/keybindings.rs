@@ -1,4 +1,4 @@
-//! Editor keybindings (Phase 12).
+//! Editor keybindings.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};

@@ -1,4 +1,4 @@
-//! Platform-specific terminal integrations (Phase 1/2).
+//! Platform-specific terminal integrations.
 
 pub mod process_terminal;
 pub mod stdin_buffer;

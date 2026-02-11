@@ -1,4 +1,4 @@
-//! Loader widget (Phase 23).
+//! Loader widget.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};

@@ -1,4 +1,4 @@
-//! Cancellable loader widget (Phase 23).
+//! Cancellable loader widget.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! Terminal trait and lifecycle helpers (Phase 1).
+//! Terminal trait and lifecycle helpers.
 
 /// Minimal terminal interface for the TUI.
 pub trait Terminal {

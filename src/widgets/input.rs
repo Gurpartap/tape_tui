@@ -1,4 +1,4 @@
-//! Input widget (Phase 19).
+//! Input widget.
 
 use crate::core::component::{Component, Focusable};
 use crate::core::cursor::CursorPos;

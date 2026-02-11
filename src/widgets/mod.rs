@@ -1,4 +1,4 @@
-//! Optional higher-level widgets (Phase 8).
+//! Optional higher-level widgets.
 
 pub mod r#box;
 pub mod cancellable_loader;

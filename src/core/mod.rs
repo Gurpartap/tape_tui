@@ -1,4 +1,4 @@
-//! Core interfaces and types (Phase 0 skeleton).
+//! Core interfaces and types.
 
 pub mod autocomplete;
 pub mod component;

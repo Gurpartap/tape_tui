@@ -1,4 +1,4 @@
-//! Key parsing and input types (Phase 2).
+//! Key parsing and input types.
 
 // Intentionally no process-global state.
 

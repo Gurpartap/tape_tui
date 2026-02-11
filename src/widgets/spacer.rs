@@ -1,4 +1,4 @@
-//! Spacer widget (Phase 8).
+//! Spacer widget.
 
 use crate::core::component::Component;
 

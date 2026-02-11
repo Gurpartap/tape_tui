@@ -1,4 +1,4 @@
-//! Editor widget (Phase 25).
+//! Editor widget.
 
 use std::cmp::{max, min};
 use std::collections::HashMap;

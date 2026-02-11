@@ -1,4 +1,4 @@
-//! Process-based terminal implementation (Phase 1).
+//! Process-based terminal implementation.
 
 use std::env;
 use std::fs::OpenOptions;

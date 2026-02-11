@@ -1,4 +1,4 @@
-//! Overlay compositing (Phase 7).
+//! Overlay compositing.
 
 use crate::core::text::slice::{extract_segments, slice_by_column, slice_with_width};
 use crate::core::text::width::visible_width;

@@ -1,4 +1,4 @@
-//! Fuzzy matching utilities (Phase 13).
+//! Fuzzy matching utilities.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FuzzyMatch {

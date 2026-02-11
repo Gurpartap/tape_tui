@@ -1,4 +1,4 @@
-//! Truncated text widget (Phase 18).
+//! Truncated text widget.
 
 use crate::core::component::Component;
 use crate::core::text::utils::truncate_to_width;

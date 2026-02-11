@@ -1,4 +1,4 @@
-//! Diff renderer (Phase 4).
+//! Diff renderer.
 
 use crate::core::output::TerminalCmd;
 use crate::core::text::slice::slice_by_column;

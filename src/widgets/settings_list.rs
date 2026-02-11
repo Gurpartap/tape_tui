@@ -1,4 +1,4 @@
-//! SettingsList widget (Phase 21).
+//! SettingsList widget.
 
 use std::cell::RefCell;
 use std::rc::Rc;

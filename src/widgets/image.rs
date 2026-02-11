@@ -1,4 +1,4 @@
-//! Image widget (Phase 24).
+//! Image widget.
 
 use std::sync::Arc;
 

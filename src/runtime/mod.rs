@@ -1,4 +1,4 @@
-//! Runtime orchestration (Phase 4+).
+//! Runtime orchestration.
 
 pub mod component_registry;
 pub mod ime;

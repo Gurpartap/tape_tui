@@ -1,4 +1,4 @@
-//! SelectList widget (Phase 20).
+//! SelectList widget.
 
 use std::sync::Arc;
 

@@ -1,4 +1,4 @@
-//! Width-aware slicing utilities (Phase 3).
+//! Width-aware slicing utilities.
 
 use unicode_segmentation::UnicodeSegmentation;
 

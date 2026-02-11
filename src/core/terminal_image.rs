@@ -1,4 +1,4 @@
-//! Terminal image capabilities and helpers (Phase 6).
+//! Terminal image capabilities and helpers.
 
 use std::env;
 use std::sync::atomic::{AtomicU32, Ordering};

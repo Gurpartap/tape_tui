@@ -1,4 +1,4 @@
-//! Box widget (Phase 18).
+//! Box widget.
 
 use std::boxed::Box as StdBox;
 

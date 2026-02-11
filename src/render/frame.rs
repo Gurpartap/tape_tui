@@ -1,15 +1,13 @@
-//! Typed render model (Phase 1).
+//! Typed render model.
 //!
-//! This phase introduces `Span`/`Line`/`Frame` as typed containers without changing
-//! rendering behavior. The rest of the pipeline continues to operate on `Vec<String>`
-//! until later phases migrate call sites.
+//! `Span`/`Line`/`Frame` provide typed render containers while preserving
+//! compatibility with existing `Vec<String>` call sites.
 
 use crate::core::cursor::CursorPos;
 
 /// A contiguous run of rendered text.
 ///
-/// Styling (colors, attributes) will be added in later phases. For now, a span is
-/// just raw bytes stored in a UTF-8 `String`.
+/// A span currently stores raw text bytes in a UTF-8 `String`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Span {
     text: String,

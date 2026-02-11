@@ -1,4 +1,4 @@
-//! Markdown widget (Phase 22).
+//! Markdown widget.
 
 use crate::core::component::Component;
 use crate::core::terminal_image::is_image_line;

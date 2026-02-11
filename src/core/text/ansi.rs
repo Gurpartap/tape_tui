@@ -1,4 +1,4 @@
-//! ANSI parsing and style tracking (Phase 3).
+//! ANSI parsing and style tracking.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnsiCodeKind {
