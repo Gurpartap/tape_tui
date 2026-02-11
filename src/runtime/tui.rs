@@ -91,6 +91,7 @@ pub struct TuiRuntime<T: Terminal> {
     renderer: DiffRenderer,
     overlays: OverlayState,
     on_debug: Option<Box<dyn FnMut()>>,
+    on_diagnostic: Option<Box<dyn FnMut(&str)>>,
     clear_on_shrink: bool,
     show_hardware_cursor: bool,
     stopped: bool,
@@ -131,14 +132,14 @@ pub struct OverlayHandle {
     runtime: RuntimeHandle,
 }
 
-/// Explicit escape hatch for *direct* terminal access.
+/// Explicit escape hatch for *direct raw terminal writes*.
 ///
 /// This type is feature-gated behind `unsafe-terminal-access` because it bypasses the runtime's
 /// single write gate (`OutputGate::flush(..)`) and can easily desync the renderer from the actual
 /// terminal state.
 ///
 /// # Self-healing contract
-/// Any raw access can move the cursor, write arbitrary bytes, or otherwise perturb the terminal.
+/// Any raw write can move the cursor, write arbitrary bytes, or otherwise perturb the terminal.
 /// The runtime cannot query terminal state to fully recover, so `Drop` performs the minimal
 /// "self-healing" resync this phase supports:
 /// - request a full viewport redraw next render (no scrollback clear), and
@@ -158,18 +159,13 @@ pub struct TerminalGuard<'a, T: Terminal> {
 }
 
 #[cfg(feature = "unsafe-terminal-access")]
-impl<'a, T: Terminal> std::ops::Deref for TerminalGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime.terminal
-    }
-}
-
-#[cfg(feature = "unsafe-terminal-access")]
-impl<'a, T: Terminal> std::ops::DerefMut for TerminalGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.runtime.terminal
+impl<'a, T: Terminal> TerminalGuard<'a, T> {
+    /// Write raw bytes directly to the underlying terminal.
+    ///
+    /// This bypasses `OutputGate`, so callers are responsible for preserving terminal state
+    /// compatibility with the diff renderer contract.
+    pub fn write_raw(&mut self, data: &str) {
+        self.runtime.terminal.write(data);
     }
 }
 
@@ -207,6 +203,10 @@ impl std::fmt::Display for CustomCommandError {
 }
 
 impl std::error::Error for CustomCommandError {}
+
+fn format_runtime_diagnostic(level: &str, code: &str, message: &str) -> String {
+    format!("[pi_tui][{level}][{code}] {message}")
+}
 
 pub trait CustomCommand: Send + 'static {
     fn name(&self) -> &'static str;
@@ -757,6 +757,7 @@ impl<T: Terminal> TuiRuntime<T> {
             renderer: DiffRenderer::new(),
             overlays: OverlayState::default(),
             on_debug: None,
+            on_diagnostic: None,
             clear_on_shrink,
             show_hardware_cursor,
             stopped: true,
@@ -777,6 +778,14 @@ impl<T: Terminal> TuiRuntime<T> {
         self.on_debug = handler;
     }
 
+    /// Install a diagnostics sink for runtime warnings/errors.
+    ///
+    /// Diagnostics are always emitted in release builds. If no sink is installed, they are written
+    /// to stderr.
+    pub fn set_on_diagnostic(&mut self, handler: Option<Box<dyn FnMut(&str)>>) {
+        self.on_diagnostic = handler;
+    }
+
     #[cfg(test)]
     fn set_coalesce_budget_for_tests(&mut self, budget: CoalesceBudget) {
         self.coalesce_budget = budget;
@@ -791,15 +800,16 @@ impl<T: Terminal> TuiRuntime<T> {
     /// Feature-gated explicit escape hatch for raw terminal operations.
     ///
     /// This is intended for rare extensions that truly need direct access to the underlying
-    /// `Terminal` implementation (e.g. to emit an unsupported control sequence).
+    /// terminal write path (e.g. to emit an unsupported control sequence).
     ///
     /// # Safety and determinism
     /// - This bypasses the runtime's single write gate, so it is only available when the crate is
     ///   compiled with `--features unsafe-terminal-access`.
     /// - The returned guard is *self-healing*: when dropped it requests a full redraw next render
     ///   and requests a render so the viewport is repainted even if content is unchanged.
-    /// - The guard does not flush the runtime output gate; the requested repaint is emitted on the
-    ///   next tick boundary.
+    /// - The guard only exposes raw writes (not terminal lifecycle control).
+    /// - The guard does not flush the runtime output gate; the requested repaint is emitted on
+    ///   the next tick boundary.
     /// - The runtime cannot query terminal state; callers must not scroll/clear/leave cursor state
     ///   incompatible with subsequent diff renders.
     ///
@@ -1321,6 +1331,9 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn render_if_needed(&mut self) {
+        if self.stopped {
+            return;
+        }
         if self.wake.take_render_requested() {
             self.do_render();
         }
@@ -1328,6 +1341,9 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn render_now(&mut self) {
+        if self.stopped {
+            return;
+        }
         let commands = self.wake.drain_commands();
         if !commands.is_empty() {
             self.apply_pending_commands(commands);
@@ -1337,6 +1353,16 @@ impl<T: Terminal> TuiRuntime<T> {
         self.wake.clear_render_requested();
         self.do_render();
         self.flush_output();
+    }
+
+    fn emit_runtime_diagnostic(&mut self, level: &str, code: &str, message: impl Into<String>) {
+        let message = message.into();
+        let formatted = format_runtime_diagnostic(level, code, &message);
+        if let Some(handler) = self.on_diagnostic.as_mut() {
+            handler(&formatted);
+            return;
+        }
+        eprintln!("{formatted}");
     }
 
     /// Flush queued terminal protocol bytes without rendering.
@@ -1466,12 +1492,43 @@ impl<T: Terminal> TuiRuntime<T> {
                     pending_title = Some(title);
                 }
                 Command::RootSet(components) => {
-                    self.root = components;
+                    let mut resolved = Vec::with_capacity(components.len());
+                    let mut had_missing = false;
+                    for component_id in components {
+                        if self.components.get_mut(component_id).is_none() {
+                            self.emit_runtime_diagnostic(
+                                "error",
+                                "command.root_set.missing_component_id",
+                                format!(
+                                    "root set references missing component id {}",
+                                    component_id.raw()
+                                ),
+                            );
+                            had_missing = true;
+                            continue;
+                        }
+                        resolved.push(component_id);
+                    }
+                    if had_missing {
+                        continue;
+                    }
+                    self.root = resolved;
                     render_requested = true;
                 }
                 Command::RootPush(component) => {
-                    self.root.push(component);
-                    render_requested = true;
+                    if self.components.get_mut(component).is_none() {
+                        self.emit_runtime_diagnostic(
+                            "error",
+                            "command.root_push.missing_component_id",
+                            format!(
+                                "root push references missing component id {}",
+                                component.raw()
+                            ),
+                        );
+                    } else {
+                        self.root.push(component);
+                        render_requested = true;
+                    }
                 }
                 Command::FocusSet(component_id) => {
                     self.set_focused(Some(component_id));
@@ -1511,7 +1568,13 @@ impl<T: Terminal> TuiRuntime<T> {
                     let mut ctx =
                         CustomCommandCtx::new(self, &mut pending_title, &mut render_requested);
                     if let Err(error) = custom_command.apply(&mut ctx) {
-                        debug_assert!(false, "custom command {command_name} failed: {error}");
+                        let diagnostic = format!("custom command {command_name} failed: {error}");
+                        self.emit_runtime_diagnostic(
+                            "error",
+                            "command.custom.failed",
+                            diagnostic.clone(),
+                        );
+                        debug_assert!(false, "{diagnostic}");
                     }
                 }
             }
@@ -1649,7 +1712,14 @@ impl<T: Terminal> TuiRuntime<T> {
         hidden: bool,
     ) -> bool {
         if self.components.get_mut(component).is_none() {
-            debug_assert!(false, "overlay component {:?} missing", component);
+            self.emit_runtime_diagnostic(
+                "error",
+                "command.show_overlay.missing_component_id",
+                format!(
+                    "show overlay references missing component id {}",
+                    component.raw()
+                ),
+            );
             return false;
         }
 
@@ -1676,6 +1746,14 @@ impl<T: Terminal> TuiRuntime<T> {
             .iter()
             .position(|entry| entry.id == overlay_id)
         else {
+            self.emit_runtime_diagnostic(
+                "error",
+                "command.hide_overlay.missing_overlay_id",
+                format!(
+                    "hide overlay references missing overlay id {}",
+                    overlay_id.raw()
+                ),
+            );
             return false;
         };
 
@@ -1693,6 +1771,14 @@ impl<T: Terminal> TuiRuntime<T> {
             .iter()
             .position(|entry| entry.id == overlay_id)
         else {
+            self.emit_runtime_diagnostic(
+                "error",
+                "command.set_overlay_hidden.missing_overlay_id",
+                format!(
+                    "set overlay hidden references missing overlay id {}",
+                    overlay_id.raw()
+                ),
+            );
             return false;
         };
 
@@ -1743,7 +1829,11 @@ impl<T: Terminal> TuiRuntime<T> {
 
         if let Some(previous) = self.focused.take() {
             let Some(component) = self.components.get_mut(previous) else {
-                debug_assert!(false, "focused component {:?} missing", previous);
+                self.emit_runtime_diagnostic(
+                    "error",
+                    "focus.missing_previous_component_id",
+                    format!("focused component id {} is missing", previous.raw()),
+                );
                 return;
             };
             if let Some(focusable) = component.as_focusable() {
@@ -1756,7 +1846,11 @@ impl<T: Terminal> TuiRuntime<T> {
         };
 
         let Some(component) = self.components.get_mut(next) else {
-            debug_assert!(false, "focus target {:?} missing", next);
+            self.emit_runtime_diagnostic(
+                "error",
+                "focus.missing_target_component_id",
+                format!("focus target component id {} is missing", next.raw()),
+            );
             return;
         };
         if let Some(focusable) = component.as_focusable() {
@@ -2200,6 +2294,20 @@ mod tests {
         }
     }
 
+    struct FailingCustomCommand;
+
+    impl CustomCommand for FailingCustomCommand {
+        fn name(&self) -> &'static str {
+            "failing_custom_command"
+        }
+
+        fn apply(self: Box<Self>, _ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError> {
+            Err(CustomCommandError::Message(
+                "intentional custom command failure".to_string(),
+            ))
+        }
+    }
+
     struct TestComponent {
         inputs: Rc<RefCell<Vec<String>>>,
         wants_release: bool,
@@ -2350,6 +2458,123 @@ mod tests {
 
         runtime.run_once();
         assert_eq!(runtime.terminal.output, "\x1b[?25l");
+    }
+
+    #[test]
+    fn custom_command_failure_emits_runtime_diagnostic() {
+        let terminal = TestTerminal::default();
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+        let diagnostics = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = Rc::clone(&diagnostics);
+        runtime.set_on_diagnostic(Some(Box::new(move |message| {
+            sink.borrow_mut().push(message.to_string());
+        })));
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Custom(Box::new(FailingCustomCommand)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.run_once();
+        }));
+        if cfg!(debug_assertions) {
+            assert!(
+                result.is_err(),
+                "expected debug_assert panic for failing custom command in debug builds"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "expected no panic when debug assertions are disabled"
+            );
+        }
+
+        let diagnostics = diagnostics.borrow();
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert!(
+            diagnostic.contains("[pi_tui][error][command.custom.failed]"),
+            "expected custom command failure diagnostic, got: {diagnostic:?}"
+        );
+        assert!(
+            diagnostic.contains("failing_custom_command"),
+            "expected command name in diagnostic, got: {diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn raw_command_invalid_ids_emit_runtime_diagnostics_without_panicking() {
+        let mut id_source_runtime = TuiRuntime::new(TestTerminal::default());
+        let _ = id_source_runtime.register_component(DummyComponent::default());
+        let missing_component_id = id_source_runtime.register_component(DummyComponent::default());
+
+        let terminal = TestTerminal::default();
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+        let diagnostics = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = Rc::clone(&diagnostics);
+        runtime.set_on_diagnostic(Some(Box::new(move |message| {
+            sink.borrow_mut().push(message.to_string());
+        })));
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::RootSet(vec![missing_component_id]));
+        handle.dispatch(Command::RootPush(missing_component_id));
+        handle.dispatch(Command::FocusSet(missing_component_id));
+        handle.dispatch(Command::ShowOverlay {
+            overlay_id: crate::runtime::overlay::OverlayId::from_raw(77),
+            component: missing_component_id,
+            options: None,
+            hidden: false,
+        });
+        handle.dispatch(Command::HideOverlay(
+            crate::runtime::overlay::OverlayId::from_raw(42),
+        ));
+        handle.dispatch(Command::SetOverlayHidden {
+            overlay_id: crate::runtime::overlay::OverlayId::from_raw(55),
+            hidden: true,
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.run_once();
+        }));
+        assert!(
+            result.is_ok(),
+            "invalid raw command ids must not panic in any build"
+        );
+
+        let diagnostics = diagnostics.borrow().join("\n");
+        assert!(
+            diagnostics.contains("command.root_set.missing_component_id"),
+            "expected root-set missing component diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.root_push.missing_component_id"),
+            "expected root-push missing component diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("focus.missing_target_component_id"),
+            "expected focus target missing component diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.show_overlay.missing_component_id"),
+            "expected show-overlay missing component diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.hide_overlay.missing_overlay_id"),
+            "expected hide-overlay missing id diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.set_overlay_hidden.missing_overlay_id"),
+            "expected set-overlay-hidden missing id diagnostic, got: {diagnostics:?}"
+        );
+
+        assert_eq!(
+            runtime.root.len(),
+            1,
+            "invalid root ids must not mutate root stack"
+        );
     }
 
     #[test]
@@ -3451,6 +3676,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn render_if_needed_is_noop_when_stopped() {
+        struct LabelComponent;
+
+        impl Component for LabelComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["stopped".to_string()]
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 4);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, LabelComponent);
+        runtime.request_render();
+        runtime.render_if_needed();
+
+        assert!(
+            runtime.terminal.output.is_empty(),
+            "expected no writes when stopped, got: {:?}",
+            runtime.terminal.output
+        );
+    }
+
+    #[test]
+    fn render_now_is_noop_when_stopped() {
+        struct LabelComponent;
+
+        impl Component for LabelComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["stopped".to_string()]
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 4);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, LabelComponent);
+        runtime.render_now();
+
+        assert!(
+            runtime.terminal.output.is_empty(),
+            "expected no writes when stopped, got: {:?}",
+            runtime.terminal.output
+        );
+    }
+
     fn env_test_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -3773,7 +4041,7 @@ mod tests {
 
         {
             let mut guard = runtime.terminal_guard_unsafe();
-            guard.write("\x1b[?25l");
+            guard.write_raw("\x1b[?25l");
         }
 
         runtime.terminal.output.clear();
