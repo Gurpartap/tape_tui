@@ -1328,6 +1328,12 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn render_now(&mut self) {
+        let commands = self.wake.drain_commands();
+        if !commands.is_empty() {
+            self.apply_pending_commands(commands);
+        }
+        self.reconcile_focus();
+
         self.wake.clear_render_requested();
         self.do_render();
         self.flush_output();
@@ -3525,6 +3531,43 @@ mod tests {
         assert!(first_inputs.borrow().is_empty());
         assert!(*second_focus.borrow());
         assert!(!*first_focus.borrow());
+    }
+
+    #[test]
+    fn render_now_applies_queued_commands_before_render() {
+        struct LabelComponent(&'static str);
+
+        impl Component for LabelComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec![self.0.to_string()]
+            }
+        }
+
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        let terminal = TestTerminal::new(40, 4);
+        let (mut runtime, root_a_id) = runtime_with_root(terminal, LabelComponent("root-a"));
+        let root_b_id = runtime.register_component(LabelComponent("root-b"));
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.render_now();
+        runtime.terminal.output.clear();
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::RootSet(vec![root_b_id]));
+
+        runtime.render_now();
+
+        assert_eq!(runtime.root, vec![root_b_id]);
+        assert!(
+            runtime.terminal.output.contains("root-b"),
+            "expected render_now to apply queued RootSet before rendering, got: {:?}",
+            runtime.terminal.output
+        );
+        assert_ne!(runtime.root, vec![root_a_id]);
     }
 
     #[test]

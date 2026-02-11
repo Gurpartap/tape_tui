@@ -12,6 +12,7 @@ signal-hook = "0.4"
 markdown = "1.0.0"
 
 [features]
-# Phase 6: explicit opt-in escape hatch for extensions that must perform raw terminal I/O.
+default = []
+# Explicit opt-in escape hatch for extensions that must perform raw terminal I/O.
 # See `src/runtime/tui.rs` for the contract and self-healing resync behavior.
 unsafe-terminal-access = []
