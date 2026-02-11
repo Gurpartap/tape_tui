@@ -69,7 +69,8 @@ pub use crate::render::{Frame, Line, Span};
 pub use crate::runtime::component_registry::ComponentId;
 pub use crate::runtime::tui::OverlayHandle;
 pub use crate::runtime::{
-    OverlayAnchor, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility, SizeValue,
+    CustomCommand, CustomCommandCtx, CustomCommandError, OverlayAnchor, OverlayId, OverlayMargin,
+    OverlayOptions, OverlayVisibility, SizeValue,
 };
 
 pub type TUI<T> = crate::runtime::tui::TuiRuntime<T>;

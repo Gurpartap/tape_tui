@@ -9,4 +9,6 @@ pub use component_registry::ComponentId;
 pub use overlay::{
     OverlayAnchor, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility, SizeValue,
 };
-pub use tui::{Command, RuntimeHandle, TerminalOp};
+pub use tui::{
+    Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle, TerminalOp,
+};

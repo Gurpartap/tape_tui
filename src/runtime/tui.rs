@@ -183,7 +183,154 @@ impl<'a, T: Terminal> Drop for TerminalGuard<'a, T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomCommandError {
+    MissingComponentId(ComponentId),
+    MissingOverlayId(OverlayId),
+    InvalidState(String),
+    Message(String),
+}
+
+impl std::fmt::Display for CustomCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingComponentId(component_id) => {
+                write!(f, "missing component id {}", component_id.raw())
+            }
+            Self::MissingOverlayId(overlay_id) => {
+                write!(f, "missing overlay id {}", overlay_id.raw())
+            }
+            Self::InvalidState(message) => write!(f, "invalid state: {message}"),
+            Self::Message(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for CustomCommandError {}
+
+pub trait CustomCommand: Send + 'static {
+    fn name(&self) -> &'static str;
+    fn apply(self: Box<Self>, ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError>;
+}
+
+trait CustomCommandRuntimeOps {
+    fn terminal(&mut self, op: TerminalOp) -> bool;
+    fn focus_set(&mut self, target: Option<ComponentId>) -> Result<bool, CustomCommandError>;
+    fn show_overlay(
+        &mut self,
+        overlay_id: OverlayId,
+        component_id: ComponentId,
+        options: Option<OverlayOptions>,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError>;
+    fn hide_overlay(&mut self, overlay_id: OverlayId) -> Result<bool, CustomCommandError>;
+    fn set_overlay_hidden(
+        &mut self,
+        overlay_id: OverlayId,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError>;
+    fn with_component_mut_dyn(
+        &mut self,
+        component_id: ComponentId,
+        f: &mut dyn FnMut(&mut dyn Component),
+    ) -> Result<(), CustomCommandError>;
+}
+
+pub struct CustomCommandCtx<'a> {
+    runtime: &'a mut dyn CustomCommandRuntimeOps,
+    pending_title: &'a mut Option<String>,
+    render_requested: &'a mut bool,
+}
+
+impl<'a> CustomCommandCtx<'a> {
+    fn new(
+        runtime: &'a mut dyn CustomCommandRuntimeOps,
+        pending_title: &'a mut Option<String>,
+        render_requested: &'a mut bool,
+    ) -> Self {
+        Self {
+            runtime,
+            pending_title,
+            render_requested,
+        }
+    }
+
+    pub fn terminal(&mut self, op: TerminalOp) {
+        if self.runtime.terminal(op) {
+            self.request_render();
+        }
+    }
+
+    pub fn request_render(&mut self) {
+        *self.render_requested = true;
+    }
+
+    pub fn set_title(&mut self, title: String) {
+        *self.pending_title = Some(title);
+    }
+
+    pub fn focus_set(&mut self, target: Option<ComponentId>) -> Result<(), CustomCommandError> {
+        if self.runtime.focus_set(target)? {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn show_overlay(
+        &mut self,
+        overlay_id: OverlayId,
+        component_id: ComponentId,
+        options: Option<OverlayOptions>,
+        hidden: bool,
+    ) -> Result<(), CustomCommandError> {
+        if self
+            .runtime
+            .show_overlay(overlay_id, component_id, options, hidden)?
+        {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn hide_overlay(&mut self, overlay_id: OverlayId) -> Result<(), CustomCommandError> {
+        if self.runtime.hide_overlay(overlay_id)? {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn set_overlay_hidden(
+        &mut self,
+        overlay_id: OverlayId,
+        hidden: bool,
+    ) -> Result<(), CustomCommandError> {
+        if self.runtime.set_overlay_hidden(overlay_id, hidden)? {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn with_component_mut<R, F>(
+        &mut self,
+        component_id: ComponentId,
+        f: F,
+    ) -> Result<R, CustomCommandError>
+    where
+        F: FnOnce(&mut dyn Component) -> R,
+    {
+        let mut f = Some(f);
+        let mut result: Option<R> = None;
+        self.runtime
+            .with_component_mut_dyn(component_id, &mut |component| {
+                let f = f
+                    .take()
+                    .expect("custom command with_component_mut closure already consumed");
+                result = Some(f(component));
+            })?;
+        Ok(result.expect("custom command with_component_mut closure did not run"))
+    }
+}
+
 pub enum Command {
     RequestRender,
     RequestStop,
@@ -205,6 +352,43 @@ pub enum Command {
         hidden: bool,
     },
     Terminal(TerminalOp),
+    Custom(Box<dyn CustomCommand>),
+}
+
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestRender => write!(f, "RequestRender"),
+            Self::RequestStop => write!(f, "RequestStop"),
+            Self::SetTitle(title) => f.debug_tuple("SetTitle").field(title).finish(),
+            Self::RootSet(components) => f.debug_tuple("RootSet").field(components).finish(),
+            Self::RootPush(component_id) => f.debug_tuple("RootPush").field(component_id).finish(),
+            Self::FocusSet(component_id) => f.debug_tuple("FocusSet").field(component_id).finish(),
+            Self::FocusClear => write!(f, "FocusClear"),
+            Self::ShowOverlay {
+                overlay_id,
+                component,
+                options,
+                hidden,
+            } => f
+                .debug_struct("ShowOverlay")
+                .field("overlay_id", overlay_id)
+                .field("component", component)
+                .field("options", options)
+                .field("hidden", hidden)
+                .finish(),
+            Self::HideOverlay(overlay_id) => {
+                f.debug_tuple("HideOverlay").field(overlay_id).finish()
+            }
+            Self::SetOverlayHidden { overlay_id, hidden } => f
+                .debug_struct("SetOverlayHidden")
+                .field("overlay_id", overlay_id)
+                .field("hidden", hidden)
+                .finish(),
+            Self::Terminal(op) => f.debug_tuple("Terminal").field(op).finish(),
+            Self::Custom(command) => f.debug_tuple("Custom").field(&command.name()).finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,6 +652,94 @@ impl OverlayHandle {
             overlay_id: self.id,
             hidden,
         });
+    }
+}
+
+impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
+    fn terminal(&mut self, op: TerminalOp) -> bool {
+        self.apply_terminal_op(op)
+    }
+
+    fn focus_set(&mut self, target: Option<ComponentId>) -> Result<bool, CustomCommandError> {
+        if let Some(component_id) = target {
+            if self.components.get_mut(component_id).is_none() {
+                return Err(CustomCommandError::MissingComponentId(component_id));
+            }
+        }
+        self.set_focused(target);
+        Ok(true)
+    }
+
+    fn show_overlay(
+        &mut self,
+        overlay_id: OverlayId,
+        component_id: ComponentId,
+        options: Option<OverlayOptions>,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError> {
+        if self.components.get_mut(component_id).is_none() {
+            return Err(CustomCommandError::MissingComponentId(component_id));
+        }
+        if self.apply_show_overlay(overlay_id, component_id, options, hidden) {
+            Ok(true)
+        } else {
+            Err(CustomCommandError::InvalidState(
+                "failed to show overlay".to_string(),
+            ))
+        }
+    }
+
+    fn hide_overlay(&mut self, overlay_id: OverlayId) -> Result<bool, CustomCommandError> {
+        if !self
+            .overlays
+            .entries
+            .iter()
+            .any(|entry| entry.id == overlay_id)
+        {
+            return Err(CustomCommandError::MissingOverlayId(overlay_id));
+        }
+        if self.apply_hide_overlay(overlay_id) {
+            Ok(true)
+        } else {
+            Err(CustomCommandError::InvalidState(
+                "failed to hide overlay".to_string(),
+            ))
+        }
+    }
+
+    fn set_overlay_hidden(
+        &mut self,
+        overlay_id: OverlayId,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError> {
+        if !self
+            .overlays
+            .entries
+            .iter()
+            .any(|entry| entry.id == overlay_id)
+        {
+            return Err(CustomCommandError::MissingOverlayId(overlay_id));
+        }
+        if self.apply_set_overlay_hidden(overlay_id, hidden) {
+            Ok(true)
+        } else {
+            Err(CustomCommandError::InvalidState(
+                "overlay hidden state unchanged".to_string(),
+            ))
+        }
+    }
+
+    fn with_component_mut_dyn(
+        &mut self,
+        component_id: ComponentId,
+        f: &mut dyn FnMut(&mut dyn Component),
+    ) -> Result<(), CustomCommandError> {
+        let component = self
+            .components
+            .get_mut(component_id)
+            .ok_or(CustomCommandError::MissingComponentId(component_id))?;
+        f(component.as_mut());
+        Ok(())
     }
 }
 
@@ -1228,6 +1500,14 @@ impl<T: Terminal> TuiRuntime<T> {
                         render_requested = true;
                     }
                 }
+                Command::Custom(custom_command) => {
+                    let command_name = custom_command.name();
+                    let mut ctx =
+                        CustomCommandCtx::new(self, &mut pending_title, &mut render_requested);
+                    if let Err(error) = custom_command.apply(&mut ctx) {
+                        debug_assert!(false, "custom command {command_name} failed: {error}");
+                    }
+                }
             }
         }
 
@@ -1747,8 +2027,9 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_cell_size_response, CoalesceBudget, Command, ComponentId, CrashCleanup,
-        OverlayOptions, RuntimeHandle, TerminalOp, TuiRuntime,
+        find_cell_size_response, CoalesceBudget, Command, ComponentId, CrashCleanup, CustomCommand,
+        CustomCommandCtx, CustomCommandError, OverlayOptions, RuntimeHandle, TerminalOp,
+        TuiRuntime,
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
@@ -1850,6 +2131,69 @@ mod tests {
         }
     }
 
+    struct MutableTextComponent {
+        text: Rc<RefCell<String>>,
+        renders: Rc<RefCell<usize>>,
+    }
+
+    impl MutableTextComponent {
+        fn new(text: Rc<RefCell<String>>, renders: Rc<RefCell<usize>>) -> Self {
+            Self { text, renders }
+        }
+    }
+
+    impl Component for MutableTextComponent {
+        fn render(&mut self, _width: usize) -> Vec<String> {
+            *self.renders.borrow_mut() += 1;
+            vec![self.text.borrow().clone()]
+        }
+
+        fn handle_event(&mut self, event: &crate::core::input_event::InputEvent) {
+            if let crate::core::input_event::InputEvent::Text { text, .. } = event {
+                *self.text.borrow_mut() = text.clone();
+            }
+        }
+    }
+
+    struct MutateComponentCustomCommand {
+        component_id: ComponentId,
+        next_text: String,
+    }
+
+    impl CustomCommand for MutateComponentCustomCommand {
+        fn name(&self) -> &'static str {
+            "mutate_component"
+        }
+
+        fn apply(self: Box<Self>, ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError> {
+            let component_id = self.component_id;
+            let next_text = self.next_text;
+            ctx.with_component_mut(component_id, move |component| {
+                let event = crate::core::input_event::InputEvent::Text {
+                    raw: next_text.clone(),
+                    text: next_text.clone(),
+                    event_type: crate::core::input::KeyEventType::Press,
+                };
+                component.handle_event(&event);
+            })?;
+            ctx.request_render();
+            Ok(())
+        }
+    }
+
+    struct HideCursorCustomCommand;
+
+    impl CustomCommand for HideCursorCustomCommand {
+        fn name(&self) -> &'static str {
+            "hide_cursor_terminal_op"
+        }
+
+        fn apply(self: Box<Self>, ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError> {
+            ctx.terminal(TerminalOp::HideCursor);
+            Ok(())
+        }
+    }
+
     struct TestComponent {
         inputs: Rc<RefCell<Vec<String>>>,
         wants_release: bool,
@@ -1939,6 +2283,67 @@ mod tests {
         let (lines, cursor) = runtime.render_root(10, 24);
         assert_eq!(lines, vec!["one", "two", "three"]);
         assert_eq!(cursor, Some(CursorPos { row: 2, col: 2 }));
+    }
+
+    #[test]
+    fn custom_command_mutates_component_and_requests_single_render() {
+        let terminal = TestTerminal::new(20, 5);
+        let text = Rc::new(RefCell::new("before".to_string()));
+        let renders = Rc::new(RefCell::new(0usize));
+        let component = MutableTextComponent::new(Rc::clone(&text), Rc::clone(&renders));
+        let (mut runtime, component_id) = runtime_with_root(terminal, component);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+        let baseline_renders = *renders.borrow();
+        runtime.terminal.output.clear();
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Custom(Box::new(MutateComponentCustomCommand {
+            component_id,
+            next_text: "after".to_string(),
+        })));
+
+        runtime.run_once();
+
+        assert_eq!(text.borrow().as_str(), "after");
+        assert_eq!(*renders.borrow(), baseline_renders + 1);
+        assert!(
+            runtime.terminal.output.contains("after"),
+            "expected updated render output, got: {:?}",
+            runtime.terminal.output
+        );
+    }
+
+    #[test]
+    fn custom_command_terminal_ops_flush_only_at_tick_boundary() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        let terminal = TestTerminal::default();
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+        runtime.terminal.output.clear();
+
+        let mut commands = std::collections::VecDeque::new();
+        commands.push_back(Command::Custom(Box::new(HideCursorCustomCommand)));
+        runtime.apply_pending_commands(commands);
+
+        assert!(
+            runtime.terminal.output.is_empty(),
+            "expected no direct terminal writes during command apply, got: {:?}",
+            runtime.terminal.output
+        );
+        assert!(
+            !runtime.output.is_empty(),
+            "expected terminal op to be queued into OutputGate"
+        );
+
+        runtime.run_once();
+        assert_eq!(runtime.terminal.output, "\x1b[?25l");
     }
 
     #[test]
