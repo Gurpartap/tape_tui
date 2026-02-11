@@ -2716,6 +2716,86 @@ mod tests {
     }
 
     #[test]
+    fn overlay_handle_mutations_apply_only_when_commands_are_drained() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&root_focus),
+        );
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+        assert!(*root_focus.borrow());
+
+        let overlay_focus = Rc::new(RefCell::new(false));
+        let overlay_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&overlay_focus),
+        );
+        let overlay_id = runtime.register_component(overlay_component);
+        let handle = runtime.show_overlay(overlay_id, None);
+        runtime.run_once();
+        assert_eq!(runtime.overlays.entries.len(), 1);
+        assert!(*overlay_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.set_hidden(true);
+
+        // OverlayHandle must enqueue commands instead of mutating runtime state inline.
+        assert_eq!(runtime.overlays.entries.len(), 1);
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*overlay_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        runtime.run_once();
+        assert!(runtime.overlays.entries[0].hidden);
+        assert!(!*overlay_focus.borrow());
+        assert!(*root_focus.borrow());
+
+        handle.hide();
+        assert_eq!(runtime.overlays.entries.len(), 1);
+
+        runtime.run_once();
+        assert!(runtime.overlays.entries.is_empty());
+    }
+
+    #[test]
+    fn command_show_overlay_uses_runtime_overlay_options_type() {
+        let terminal = TestTerminal::default();
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+        let overlay_component_id = runtime.register_component(DummyComponent::default());
+        let overlay_id = crate::runtime::overlay::OverlayId::from_raw(99);
+        let options = OverlayOptions {
+            width: Some(SizeValue::absolute(12)),
+            ..Default::default()
+        };
+
+        let command = Command::ShowOverlay {
+            overlay_id,
+            component: overlay_component_id,
+            options: Some(options),
+            hidden: false,
+        };
+
+        match command {
+            Command::ShowOverlay {
+                overlay_id: seen_id,
+                options: Some(seen_options),
+                ..
+            } => {
+                assert_eq!(seen_id, overlay_id);
+                assert_eq!(seen_options, options);
+            }
+            _ => panic!("expected show-overlay command"),
+        }
+    }
+
+    #[test]
     fn runtime_handle_triggers_render_from_background_task() {
         let terminal = TestTerminal::default();
         let state = Rc::new(RefCell::new(RenderState::default()));
