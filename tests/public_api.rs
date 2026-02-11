@@ -13,10 +13,11 @@ use pi_tui::{
     EditorKeybindingsHandle, EditorKeybindingsManager, EditorOptions, EditorTheme, Focusable,
     FuzzyMatch, Image, ImageDimensions, ImageOptions, ImageProtocol, ImageRenderOptions,
     ImageTheme, Input, InputEvent, Key, KeyEventType, KeyId, Loader, Markdown, MarkdownTheme,
-    OverlayAnchor, OverlayHandle, OverlayMargin, OverlayOptions, ProcessTerminal, SelectItem,
-    SelectList, SelectListTheme, SettingItem, SettingsList, SettingsListTheme, SizeValue,
-    SlashCommand, Spacer, StdinBuffer, StdinBufferEventMap, StdinBufferOptions, Terminal,
-    TerminalCapabilities, Text, TruncatedText, CURSOR_MARKER, DEFAULT_EDITOR_KEYBINDINGS, TUI,
+    OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility,
+    ProcessTerminal, SelectItem, SelectList, SelectListTheme, SettingItem, SettingsList,
+    SettingsListTheme, SizeValue, SlashCommand, Spacer, StdinBuffer, StdinBufferEventMap,
+    StdinBufferOptions, Terminal, TerminalCapabilities, Text, TruncatedText, CURSOR_MARKER,
+    DEFAULT_EDITOR_KEYBINDINGS, TUI,
 };
 
 #[test]

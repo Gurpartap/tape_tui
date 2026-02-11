@@ -1,10 +1,8 @@
 //! TUI runtime.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::env;
 use std::io;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -18,21 +16,19 @@ use crate::core::terminal::Terminal;
 use crate::core::terminal_image::{
     get_capabilities, is_image_line, set_cell_dimensions, CellDimensions, TerminalImageState,
 };
-use crate::render::overlay::{
-    composite_overlays, resolve_overlay_layout, OverlayOptions, RenderedOverlay,
-};
+use crate::render::overlay::{composite_overlays, resolve_overlay_layout, RenderedOverlay};
 use crate::render::renderer::DiffRenderer;
 use crate::render::Frame;
 use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
-use crate::runtime::focus::FocusState;
 use crate::runtime::ime::position_hardware_cursor;
+use crate::runtime::overlay::{
+    is_overlay_visible as overlay_options_visible, OverlayId, OverlayOptions,
+};
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
 const COALESCE_MAX_DURATION_MS: u64 = 2;
 const COALESCE_MAX_ITERATIONS: usize = 8;
-
-type ComponentRc = Rc<RefCell<Box<dyn Component>>>;
 
 #[derive(Clone, Copy, Debug)]
 struct CoalesceBudget {
@@ -91,11 +87,9 @@ pub struct TuiRuntime<T: Terminal> {
     terminal_image_state: Arc<TerminalImageState>,
     components: ComponentRegistry,
     root: Vec<ComponentId>,
-    root_focus: Option<ComponentId>,
-    root_focus_active: Option<ComponentId>,
+    focused: Option<ComponentId>,
     renderer: DiffRenderer,
-    focus: FocusState,
-    overlays: Rc<RefCell<OverlayState>>,
+    overlays: OverlayState,
     on_debug: Option<Box<dyn FnMut()>>,
     clear_on_shrink: bool,
     show_hardware_cursor: bool,
@@ -115,32 +109,26 @@ pub struct TuiRuntime<T: Terminal> {
 #[derive(Default)]
 struct OverlayState {
     entries: Vec<OverlayEntry>,
-    next_id: u64,
-    dirty: bool,
-    pending_pre_focus: Option<ComponentRc>,
-    pending_pre_focus_root: Option<ComponentId>,
-    pending_focus_overlay_id: Option<u64>,
 }
 
+#[derive(Clone, Copy)]
 struct OverlayEntry {
-    id: u64,
-    component: ComponentRc,
+    id: OverlayId,
+    component_id: ComponentId,
     options: Option<OverlayOptions>,
-    pre_focus: Option<ComponentRc>,
-    pre_focus_root: Option<ComponentId>,
+    pre_focus: Option<ComponentId>,
     hidden: bool,
 }
 
-enum OverlayPreFocus {
-    Component(ComponentRc),
-    Root(ComponentId),
-    None,
+#[derive(Clone, Copy)]
+struct OverlayRenderEntry {
+    component_id: ComponentId,
+    options: Option<OverlayOptions>,
 }
 
 pub struct OverlayHandle {
-    id: u64,
-    state: std::rc::Weak<RefCell<OverlayState>>,
-    wake: Arc<RuntimeWake>,
+    id: OverlayId,
+    runtime: RuntimeHandle,
 }
 
 /// Explicit escape hatch for *direct* terminal access.
@@ -195,7 +183,7 @@ impl<'a, T: Terminal> Drop for TerminalGuard<'a, T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     RequestRender,
     RequestStop,
@@ -203,6 +191,19 @@ pub enum Command {
     SetTitle(String),
     RootSet(Vec<ComponentId>),
     RootPush(ComponentId),
+    FocusSet(ComponentId),
+    FocusClear,
+    ShowOverlay {
+        overlay_id: OverlayId,
+        component: ComponentId,
+        options: Option<OverlayOptions>,
+        hidden: bool,
+    },
+    HideOverlay(OverlayId),
+    SetOverlayHidden {
+        overlay_id: OverlayId,
+        hidden: bool,
+    },
     Terminal(TerminalOp),
 }
 
@@ -220,6 +221,7 @@ pub enum TerminalOp {
 
 #[derive(Default)]
 struct RuntimeWakeState {
+    next_overlay_id: u64,
     pending_inputs: Vec<String>,
     pending_resize: bool,
     pending_commands: VecDeque<Command>,
@@ -373,6 +375,19 @@ impl RuntimeWake {
         state.render_requested = false;
     }
 
+    fn alloc_overlay_id(&self) -> OverlayId {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let next = state.next_overlay_id;
+        state.next_overlay_id = state
+            .next_overlay_id
+            .checked_add(1)
+            .expect("overlay id overflowed u64");
+        OverlayId::from_raw(next)
+    }
+
     fn request_stop(&self) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -418,52 +433,41 @@ impl RuntimeHandle {
     pub fn dispatch(&self, command: Command) {
         self.wake.enqueue_command(command);
     }
+
+    pub fn alloc_overlay_id(&self) -> OverlayId {
+        self.wake.alloc_overlay_id()
+    }
+
+    pub fn show_overlay(
+        &self,
+        component_id: ComponentId,
+        options: Option<OverlayOptions>,
+        hidden: bool,
+    ) -> OverlayHandle {
+        let id = self.alloc_overlay_id();
+        self.dispatch(Command::ShowOverlay {
+            overlay_id: id,
+            component: component_id,
+            options,
+            hidden,
+        });
+        OverlayHandle {
+            id,
+            runtime: self.clone(),
+        }
+    }
 }
 
 impl OverlayHandle {
     pub fn hide(&self) {
-        if let Some(state) = self.state.upgrade() {
-            let mut state = state.borrow_mut();
-            if let Some(index) = state.entries.iter().position(|entry| entry.id == self.id) {
-                let entry = state.entries.remove(index);
-                if let Some(pre_focus) = entry.pre_focus {
-                    state.pending_pre_focus = Some(pre_focus);
-                }
-                if let Some(pre_focus_root) = entry.pre_focus_root {
-                    state.pending_pre_focus_root = Some(pre_focus_root);
-                }
-                state.dirty = true;
-                self.wake.request_render();
-            }
-        }
+        self.runtime.dispatch(Command::HideOverlay(self.id));
     }
 
     pub fn set_hidden(&self, hidden: bool) {
-        if let Some(state) = self.state.upgrade() {
-            let mut state = state.borrow_mut();
-            if let Some(entry) = state.entries.iter_mut().find(|entry| entry.id == self.id) {
-                if entry.hidden != hidden {
-                    entry.hidden = hidden;
-                    if !hidden {
-                        state.pending_focus_overlay_id = Some(self.id);
-                    } else if state.pending_focus_overlay_id == Some(self.id) {
-                        state.pending_focus_overlay_id = None;
-                    }
-                    state.dirty = true;
-                    self.wake.request_render();
-                }
-            }
-        }
-    }
-
-    pub fn is_hidden(&self) -> bool {
-        if let Some(state) = self.state.upgrade() {
-            let state = state.borrow();
-            if let Some(entry) = state.entries.iter().find(|entry| entry.id == self.id) {
-                return entry.hidden;
-            }
-        }
-        false
+        self.runtime.dispatch(Command::SetOverlayHidden {
+            overlay_id: self.id,
+            hidden,
+        });
     }
 }
 
@@ -477,11 +481,9 @@ impl<T: Terminal> TuiRuntime<T> {
             terminal_image_state: Arc::new(TerminalImageState::default()),
             components: ComponentRegistry::new(),
             root: Vec::new(),
-            root_focus: None,
-            root_focus_active: None,
+            focused: None,
             renderer: DiffRenderer::new(),
-            focus: FocusState::new(),
-            overlays: Rc::new(RefCell::new(OverlayState::default())),
+            overlays: OverlayState::default(),
             on_debug: None,
             clear_on_shrink,
             show_hardware_cursor,
@@ -557,7 +559,8 @@ impl<T: Terminal> TuiRuntime<T> {
             output.flush(&mut self.terminal);
             return;
         }
-        self.output.push(TerminalCmd::Bytes(osc_title_sequence(&title)));
+        self.output
+            .push(TerminalCmd::Bytes(osc_title_sequence(&title)));
     }
 
     /// Enqueue a show-cursor command.
@@ -728,127 +731,53 @@ impl<T: Terminal> TuiRuntime<T> {
         self.request_render();
     }
 
-    pub fn set_focus(&mut self, target: Rc<RefCell<Box<dyn Component>>>) {
-        self.deactivate_root_focus();
-        self.focus.set_focus(Some(target));
+    pub fn set_focus(&mut self, target: ComponentId) {
+        self.dispatch_focus_overlay_command(Command::FocusSet(target));
     }
 
     pub fn clear_focus(&mut self) {
-        self.focus.clear();
-        self.set_root_focus(None);
-    }
-
-    pub fn set_focus_component(&mut self, target: ComponentId) {
-        self.focus.clear();
-        self.set_root_focus(Some(target));
-    }
-
-    fn capture_pre_focus(&self) -> (Option<ComponentRc>, Option<ComponentId>) {
-        if let Some(focused) = self.focus.focused() {
-            (Some(focused), None)
-        } else {
-            (None, self.root_focus)
-        }
-    }
-
-    fn set_root_focus(&mut self, target: Option<ComponentId>) {
-        if self.root_focus == target {
-            return;
-        }
-        self.deactivate_root_focus();
-        self.root_focus = target;
-        self.activate_root_focus();
-    }
-
-    fn activate_root_focus(&mut self) {
-        if self.focus.focused().is_some() {
-            return;
-        }
-        let Some(target) = self.root_focus else {
-            return;
-        };
-        if self.root_focus_active == Some(target) {
-            return;
-        }
-        self.deactivate_root_focus();
-        let Some(component) = self.components.get_mut(target) else {
-            debug_assert!(false, "root focus component {:?} missing", target);
-            self.root_focus_active = None;
-            return;
-        };
-        if let Some(focusable) = component.as_focusable() {
-            focusable.set_focused(true);
-        }
-        self.root_focus_active = Some(target);
-    }
-
-    fn deactivate_root_focus(&mut self) {
-        let Some(active) = self.root_focus_active.take() else {
-            return;
-        };
-        let Some(component) = self.components.get_mut(active) else {
-            debug_assert!(false, "root focus component {:?} missing", active);
-            return;
-        };
-        if let Some(focusable) = component.as_focusable() {
-            focusable.set_focused(false);
-        }
+        self.dispatch_focus_overlay_command(Command::FocusClear);
     }
 
     pub fn show_overlay(
         &mut self,
-        component: ComponentRc,
+        component: ComponentId,
         options: Option<OverlayOptions>,
     ) -> OverlayHandle {
-        let (pre_focus, pre_focus_root) = self.capture_pre_focus();
-        let entry = OverlayEntry {
-            id: 0,
-            component: Rc::clone(&component),
+        let id = self.wake.alloc_overlay_id();
+        self.dispatch_focus_overlay_command(Command::ShowOverlay {
+            overlay_id: id,
+            component,
             options,
-            pre_focus,
-            pre_focus_root,
             hidden: false,
-        };
-        let visible = self.is_overlay_visible(&entry);
-        let mut state = self.overlays.borrow_mut();
-        let id = state.next_id;
-        state.next_id = state.next_id.wrapping_add(1);
-        let mut entry = entry;
-        entry.id = id;
-        state.entries.push(entry);
-        state.dirty = true;
-        drop(state);
-        if visible {
-            self.deactivate_root_focus();
-            self.focus.set_focus(Some(component));
-        }
-        self.request_render();
+        });
         OverlayHandle {
             id,
-            state: Rc::downgrade(&self.overlays),
-            wake: Arc::clone(&self.wake),
+            runtime: self.runtime_handle(),
         }
     }
 
     pub fn hide_overlay(&mut self) {
-        let mut state = self.overlays.borrow_mut();
-        let entry = state.entries.pop();
-        if entry.is_some() {
-            state.dirty = true;
-        }
-        drop(state);
-        if entry.is_some() {
-            self.reconcile_focus();
-            self.request_render();
+        if let Some(overlay) = self.overlays.entries.last().copied() {
+            self.dispatch_focus_overlay_command(Command::HideOverlay(overlay.id));
         }
     }
 
     pub fn has_overlay(&self) -> bool {
-        let state = self.overlays.borrow();
-        state
+        self.overlays
             .entries
             .iter()
             .any(|entry| self.is_overlay_visible(entry))
+    }
+
+    fn dispatch_focus_overlay_command(&mut self, command: Command) {
+        if self.stopped {
+            let mut queue = VecDeque::new();
+            queue.push_back(command);
+            self.apply_pending_commands(queue);
+            return;
+        }
+        self.wake.enqueue_command(command);
     }
 
     pub fn start(&mut self) -> io::Result<()> {
@@ -985,15 +914,9 @@ impl<T: Terminal> TuiRuntime<T> {
                 self.apply_pending_commands(commands);
                 did_work = true;
             }
-
-            if self.take_overlay_dirty() {
-                self.reconcile_focus();
-                self.request_render();
-                did_work = true;
-            }
+            self.reconcile_focus();
 
             if self.wake.take_pending_resize() {
-                self.reconcile_focus();
                 self.dispatch_resize_event();
                 self.request_render();
                 did_work = true;
@@ -1043,14 +966,9 @@ impl<T: Terminal> TuiRuntime<T> {
         if !commands.is_empty() {
             self.apply_pending_commands(commands);
         }
-
-        if self.take_overlay_dirty() {
-            self.reconcile_focus();
-            self.request_render();
-        }
+        self.reconcile_focus();
 
         if self.wake.take_pending_resize() {
-            self.reconcile_focus();
             self.dispatch_resize_event();
             self.request_render();
         }
@@ -1065,8 +983,6 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     pub fn handle_input(&mut self, data: &str) {
-        self.reconcile_focus();
-
         let mut data = data;
         let owned;
         if self.cell_size_query_pending {
@@ -1095,53 +1011,32 @@ impl<T: Terminal> TuiRuntime<T> {
         }
 
         let mut handled = false;
-        if let Some(component) = self.focus.focused() {
-            let mut component = component.borrow_mut();
-            for event in events {
-                if let InputEvent::Key {
-                    key_id, event_type, ..
-                } = &event
-                {
-                    if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
-                        if let Some(handler) = self.on_debug.as_mut() {
-                            handler();
-                        }
-                        continue;
-                    }
-                    if *event_type == KeyEventType::Release && !component.wants_key_release() {
-                        continue;
-                    }
-                }
-
-                component.handle_event(&event);
-                handled = true;
-            }
-        } else if let Some(root_id) = self.root_focus_active {
-            let Some(component) = self.components.get_mut(root_id) else {
-                debug_assert!(false, "root focus component {:?} missing", root_id);
-                return;
-            };
-            for event in events {
-                if let InputEvent::Key {
-                    key_id, event_type, ..
-                } = &event
-                {
-                    if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
-                        if let Some(handler) = self.on_debug.as_mut() {
-                            handler();
-                        }
-                        continue;
-                    }
-                    if *event_type == KeyEventType::Release && !component.wants_key_release() {
-                        continue;
-                    }
-                }
-
-                component.handle_event(&event);
-                handled = true;
-            }
-        } else {
+        let Some(focused_id) = self.focused else {
             return;
+        };
+        let Some(component) = self.components.get_mut(focused_id) else {
+            debug_assert!(false, "focused component {:?} missing", focused_id);
+            self.focused = None;
+            return;
+        };
+        for event in events {
+            if let InputEvent::Key {
+                key_id, event_type, ..
+            } = &event
+            {
+                if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
+                    if let Some(handler) = self.on_debug.as_mut() {
+                        handler();
+                    }
+                    continue;
+                }
+                if *event_type == KeyEventType::Release && !component.wants_key_release() {
+                    continue;
+                }
+            }
+
+            component.handle_event(&event);
+            handled = true;
         }
 
         if handled {
@@ -1184,7 +1079,6 @@ impl<T: Terminal> TuiRuntime<T> {
     fn do_render(&mut self) {
         let width = self.terminal.columns() as usize;
         let height = self.terminal.rows() as usize;
-        self.reconcile_focus();
         let (mut lines, mut cursor_pos) = self.render_root(width, height);
 
         if self.has_overlay() {
@@ -1300,6 +1194,34 @@ impl<T: Terminal> TuiRuntime<T> {
                 Command::RootPush(component) => {
                     self.root.push(component);
                     render_requested = true;
+                }
+                Command::FocusSet(component_id) => {
+                    self.set_focused(Some(component_id));
+                    render_requested = true;
+                }
+                Command::FocusClear => {
+                    self.set_focused(None);
+                    render_requested = true;
+                }
+                Command::ShowOverlay {
+                    overlay_id,
+                    component,
+                    options,
+                    hidden,
+                } => {
+                    if self.apply_show_overlay(overlay_id, component, options, hidden) {
+                        render_requested = true;
+                    }
+                }
+                Command::HideOverlay(overlay_id) => {
+                    if self.apply_hide_overlay(overlay_id) {
+                        render_requested = true;
+                    }
+                }
+                Command::SetOverlayHidden { overlay_id, hidden } => {
+                    if self.apply_set_overlay_hidden(overlay_id, hidden) {
+                        render_requested = true;
+                    }
                 }
                 Command::Terminal(op) => {
                     if self.apply_terminal_op(op) {
@@ -1433,91 +1355,244 @@ impl<T: Terminal> TuiRuntime<T> {
         Some(result)
     }
 
+    fn apply_show_overlay(
+        &mut self,
+        overlay_id: OverlayId,
+        component: ComponentId,
+        options: Option<OverlayOptions>,
+        hidden: bool,
+    ) -> bool {
+        if self.components.get_mut(component).is_none() {
+            debug_assert!(false, "overlay component {:?} missing", component);
+            return false;
+        }
+
+        let pre_focus = self.focused.filter(|focused| *focused != component);
+        self.overlays.entries.push(OverlayEntry {
+            id: overlay_id,
+            component_id: component,
+            options,
+            pre_focus,
+            hidden,
+        });
+
+        if !hidden && self.is_overlay_visible(self.overlays.entries.last().expect("entry exists")) {
+            self.set_focused(Some(component));
+        }
+
+        true
+    }
+
+    fn apply_hide_overlay(&mut self, overlay_id: OverlayId) -> bool {
+        let Some(index) = self
+            .overlays
+            .entries
+            .iter()
+            .position(|entry| entry.id == overlay_id)
+        else {
+            return false;
+        };
+
+        let removed = self.overlays.entries.remove(index);
+        if self.focused == Some(removed.component_id) {
+            self.restore_focus_after_overlay_loss(removed.pre_focus);
+        }
+        true
+    }
+
+    fn apply_set_overlay_hidden(&mut self, overlay_id: OverlayId, hidden: bool) -> bool {
+        let Some(index) = self
+            .overlays
+            .entries
+            .iter()
+            .position(|entry| entry.id == overlay_id)
+        else {
+            return false;
+        };
+
+        if hidden {
+            let (component_id, pre_focus) = {
+                let entry = &mut self.overlays.entries[index];
+                if entry.hidden {
+                    return false;
+                }
+                entry.hidden = true;
+                (entry.component_id, entry.pre_focus)
+            };
+            if self.focused == Some(component_id) {
+                self.restore_focus_after_overlay_loss(pre_focus);
+            }
+            return true;
+        }
+
+        if !self.overlays.entries[index].hidden {
+            return false;
+        }
+
+        let current_focus = self.focused;
+        {
+            let entry = &mut self.overlays.entries[index];
+            entry.hidden = false;
+            if current_focus != Some(entry.component_id) {
+                entry.pre_focus = current_focus;
+            }
+        }
+
+        // Unhiding should make this overlay topmost for deterministic focus handoff.
+        let entry = self.overlays.entries.remove(index);
+        let component_id = entry.component_id;
+        self.overlays.entries.push(entry);
+
+        if self.is_overlay_visible(self.overlays.entries.last().expect("entry exists")) {
+            self.set_focused(Some(component_id));
+        }
+
+        true
+    }
+
+    fn set_focused(&mut self, target: Option<ComponentId>) {
+        if self.focused == target {
+            return;
+        }
+
+        if let Some(previous) = self.focused.take() {
+            let Some(component) = self.components.get_mut(previous) else {
+                debug_assert!(false, "focused component {:?} missing", previous);
+                return;
+            };
+            if let Some(focusable) = component.as_focusable() {
+                focusable.set_focused(false);
+            }
+        }
+
+        let Some(next) = target else {
+            return;
+        };
+
+        let Some(component) = self.components.get_mut(next) else {
+            debug_assert!(false, "focus target {:?} missing", next);
+            return;
+        };
+        if let Some(focusable) = component.as_focusable() {
+            focusable.set_focused(true);
+        }
+        self.focused = Some(next);
+    }
+
+    fn restore_focus_after_overlay_loss(&mut self, pre_focus: Option<ComponentId>) {
+        if let Some(pre_focus) = pre_focus {
+            if self.components.get_mut(pre_focus).is_some() {
+                self.set_focused(Some(pre_focus));
+                return;
+            }
+        }
+
+        if let Some(next_overlay) = self.topmost_visible_overlay() {
+            self.set_focused(Some(next_overlay));
+            return;
+        }
+
+        self.set_focused(None);
+    }
+
+    fn visible_overlay_snapshot(&self) -> Vec<OverlayRenderEntry> {
+        self.overlays
+            .entries
+            .iter()
+            .filter(|entry| self.is_overlay_visible(entry))
+            .map(|entry| OverlayRenderEntry {
+                component_id: entry.component_id,
+                options: entry.options,
+            })
+            .collect()
+    }
+
     fn composite_overlay_lines(
         &mut self,
         lines: Vec<String>,
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
-        let (overlays, overlay_cursor) = {
-            let state = self.overlays.borrow();
-            let mut rendered: Vec<(RenderedOverlay, Option<CursorPos>)> = Vec::new();
-            for entry in state.entries.iter() {
-                if !self.is_overlay_visible(entry) {
-                    continue;
-                }
-                let layout = resolve_overlay_layout(entry.options.as_ref(), 0, width, height);
-                let mut component = entry.component.borrow_mut();
-                component.set_terminal_rows(height);
-                let viewport_rows = layout.max_height.unwrap_or(height);
-                component.set_viewport_size(layout.width, viewport_rows);
-                let mut overlay_lines = component.render(layout.width);
-                let mut cursor_pos = component.cursor_pos();
-                if let Some(max_height) = layout.max_height {
-                    if overlay_lines.len() > max_height {
-                        overlay_lines.truncate(max_height);
-                    }
-                }
-                if let Some(pos) = cursor_pos {
-                    if pos.row >= overlay_lines.len() {
-                        cursor_pos = None;
-                    }
-                }
-                let final_layout = resolve_overlay_layout(
-                    entry.options.as_ref(),
-                    overlay_lines.len(),
-                    width,
-                    height,
+        let overlay_entries = self.visible_overlay_snapshot();
+        let mut rendered: Vec<(RenderedOverlay, Option<CursorPos>)> = Vec::new();
+
+        for entry in overlay_entries {
+            let render_options = entry
+                .options
+                .as_ref()
+                .map(crate::render::overlay::OverlayOptions::from);
+            let layout = resolve_overlay_layout(render_options.as_ref(), 0, width, height);
+            let Some(component) = self.components.get_mut(entry.component_id) else {
+                debug_assert!(
+                    false,
+                    "overlay component {:?} missing during render",
+                    entry.component_id
                 );
-                rendered.push((
-                    RenderedOverlay {
-                        lines: overlay_lines,
-                        row: final_layout.row,
-                        col: final_layout.col,
-                        width: final_layout.width,
-                    },
-                    cursor_pos,
-                ));
-            }
+                continue;
+            };
 
-            let mut min_lines_needed = lines.len();
-            for (overlay, _) in rendered.iter() {
-                min_lines_needed = min_lines_needed.max(overlay.row + overlay.lines.len());
-            }
-            let working_height = self.renderer.max_lines_rendered().max(min_lines_needed);
-            let viewport_start = working_height.saturating_sub(height);
-
-            let mut overlay_cursor: Option<CursorPos> = None;
-            for (overlay, cursor_pos) in rendered.iter() {
-                let Some(cursor_pos) = cursor_pos else {
-                    continue;
-                };
-                if cursor_pos.row >= overlay.lines.len() || cursor_pos.col >= overlay.width {
-                    continue;
+            component.set_terminal_rows(height);
+            let viewport_rows = layout.max_height.unwrap_or(height);
+            component.set_viewport_size(layout.width, viewport_rows);
+            let mut overlay_lines = component.render(layout.width);
+            let mut cursor_pos = component.cursor_pos();
+            if let Some(max_height) = layout.max_height {
+                if overlay_lines.len() > max_height {
+                    overlay_lines.truncate(max_height);
                 }
-                // Never place the hardware cursor onto an image line.
-                if is_image_line(&overlay.lines[cursor_pos.row]) {
-                    continue;
-                }
-                let abs_row = viewport_start
-                    .saturating_add(overlay.row)
-                    .saturating_add(cursor_pos.row);
-                if abs_row < lines.len() && is_image_line(&lines[abs_row]) {
-                    continue;
-                }
-                overlay_cursor = Some(CursorPos {
-                    row: abs_row,
-                    col: overlay.col.saturating_add(cursor_pos.col),
-                });
             }
+            if let Some(pos) = cursor_pos {
+                if pos.row >= overlay_lines.len() {
+                    cursor_pos = None;
+                }
+            }
+            let final_layout =
+                resolve_overlay_layout(render_options.as_ref(), overlay_lines.len(), width, height);
+            rendered.push((
+                RenderedOverlay {
+                    lines: overlay_lines,
+                    row: final_layout.row,
+                    col: final_layout.col,
+                    width: final_layout.width,
+                },
+                cursor_pos,
+            ));
+        }
 
-            let overlays = rendered
-                .into_iter()
-                .map(|(overlay, _)| overlay)
-                .collect::<Vec<_>>();
-            (overlays, overlay_cursor)
-        };
+        let mut min_lines_needed = lines.len();
+        for (overlay, _) in rendered.iter() {
+            min_lines_needed = min_lines_needed.max(overlay.row + overlay.lines.len());
+        }
+        let working_height = self.renderer.max_lines_rendered().max(min_lines_needed);
+        let viewport_start = working_height.saturating_sub(height);
 
+        let mut overlay_cursor: Option<CursorPos> = None;
+        for (overlay, cursor_pos) in rendered.iter() {
+            let Some(cursor_pos) = cursor_pos else {
+                continue;
+            };
+            if cursor_pos.row >= overlay.lines.len() || cursor_pos.col >= overlay.width {
+                continue;
+            }
+            if is_image_line(&overlay.lines[cursor_pos.row]) {
+                continue;
+            }
+            let abs_row = viewport_start
+                .saturating_add(overlay.row)
+                .saturating_add(cursor_pos.row);
+            if abs_row < lines.len() && is_image_line(&lines[abs_row]) {
+                continue;
+            }
+            overlay_cursor = Some(CursorPos {
+                row: abs_row,
+                col: overlay.col.saturating_add(cursor_pos.col),
+            });
+        }
+
+        let overlays = rendered
+            .into_iter()
+            .map(|(overlay, _)| overlay)
+            .collect::<Vec<_>>();
         let composited = composite_overlays(
             lines,
             &overlays,
@@ -1534,13 +1609,20 @@ impl<T: Terminal> TuiRuntime<T> {
         if entry.hidden {
             return false;
         }
-        match entry.options.as_ref().and_then(|opt| opt.visible.as_ref()) {
-            Some(visible) => visible(
-                self.terminal.columns() as usize,
-                self.terminal.rows() as usize,
-            ),
-            None => true,
-        }
+        overlay_options_visible(
+            entry.options.as_ref(),
+            self.terminal.columns() as usize,
+            self.terminal.rows() as usize,
+        )
+    }
+
+    fn topmost_visible_overlay(&self) -> Option<ComponentId> {
+        self.overlays
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| self.is_overlay_visible(entry))
+            .map(|entry| entry.component_id)
     }
 
     fn dispatch_resize_event(&mut self) {
@@ -1548,161 +1630,47 @@ impl<T: Terminal> TuiRuntime<T> {
             columns: self.terminal.columns(),
             rows: self.terminal.rows(),
         };
-        if let Some(component) = self.focus.focused() {
-            component.borrow_mut().handle_event(&event);
-            return;
-        }
-        let Some(root_id) = self.root_focus_active else {
+        let Some(focused_id) = self.focused else {
             return;
         };
-        let Some(component) = self.components.get_mut(root_id) else {
-            debug_assert!(false, "root focus component {:?} missing", root_id);
+        let Some(component) = self.components.get_mut(focused_id) else {
+            debug_assert!(false, "focused component {:?} missing", focused_id);
+            self.focused = None;
             return;
         };
         component.handle_event(&event);
     }
 
     fn reconcile_focus(&mut self) {
-        if self.apply_pending_overlay_focus() {
+        if let Some(topmost) = self.topmost_visible_overlay() {
+            self.set_focused(Some(topmost));
             return;
         }
 
-        let focused = self.focus.focused();
-        if let Some(focused) = focused {
-            if let Some(pre_focus) = self.pre_focus_for_overlay(&focused) {
-                if !self.is_overlay_visible_for_component(&focused) {
-                    if let Some(next) = self.topmost_visible_overlay() {
-                        self.deactivate_root_focus();
-                        self.focus.set_focus(Some(next));
-                    } else if let Some(restore) = self.take_pending_pre_focus() {
-                        self.deactivate_root_focus();
-                        self.focus.set_focus(Some(restore));
-                    } else if let Some(restore) = self.take_pending_pre_focus_root() {
-                        self.focus.clear();
-                        self.set_root_focus(Some(restore));
-                    } else if let OverlayPreFocus::Component(pre_focus) = pre_focus {
-                        self.deactivate_root_focus();
-                        self.focus.set_focus(Some(pre_focus));
-                    } else if let OverlayPreFocus::Root(pre_focus_root) = pre_focus {
-                        self.focus.clear();
-                        self.set_root_focus(Some(pre_focus_root));
-                    } else {
-                        self.focus.clear();
-                        self.activate_root_focus();
-                    }
-                }
-                return;
-            }
-        }
-
-        if let Some(topmost) = self.topmost_visible_overlay() {
-            self.deactivate_root_focus();
-            self.focus.set_focus(Some(topmost));
-        } else if let Some(restore) = self.take_pending_pre_focus() {
-            self.deactivate_root_focus();
-            self.focus.set_focus(Some(restore));
-        } else if let Some(restore) = self.take_pending_pre_focus_root() {
-            self.focus.clear();
-            self.set_root_focus(Some(restore));
-        } else {
-            self.activate_root_focus();
-        }
-    }
-
-    fn apply_pending_overlay_focus(&mut self) -> bool {
-        let (pre_focus, pre_focus_root) = self.capture_pre_focus();
-
-        let target = {
-            let mut state = self.overlays.borrow_mut();
-            let Some(id) = state.pending_focus_overlay_id.take() else {
-                return false;
-            };
-            let Some(entry) = state.entries.iter_mut().find(|entry| entry.id == id) else {
-                return false;
-            };
-            if !self.is_overlay_visible(entry) {
-                return false;
-            }
-
-            if pre_focus
-                .as_ref()
-                .map_or(true, |component| !Rc::ptr_eq(component, &entry.component))
-            {
-                entry.pre_focus = pre_focus.clone();
-                entry.pre_focus_root = pre_focus_root;
-            }
-
-            Rc::clone(&entry.component)
+        let Some(focused) = self.focused else {
+            return;
         };
 
-        self.deactivate_root_focus();
-        self.focus.set_focus(Some(target));
-        true
-    }
-
-    fn topmost_visible_overlay(&self) -> Option<Rc<RefCell<Box<dyn Component>>>> {
-        let state = self.overlays.borrow();
-        for entry in state.entries.iter().rev() {
-            if self.is_overlay_visible(entry) {
-                return Some(Rc::clone(&entry.component));
-            }
-        }
-        None
-    }
-
-    fn pre_focus_for_overlay(&self, component: &ComponentRc) -> Option<OverlayPreFocus> {
-        let state = self.overlays.borrow();
-        state
+        if let Some(entry) = self
+            .overlays
             .entries
             .iter()
-            .find(|entry| Rc::ptr_eq(&entry.component, component))
-            .map(|entry| {
-                if let Some(pre_focus) = entry.pre_focus.as_ref() {
-                    OverlayPreFocus::Component(Rc::clone(pre_focus))
-                } else if let Some(pre_focus_root) = entry.pre_focus_root {
-                    OverlayPreFocus::Root(pre_focus_root)
-                } else {
-                    OverlayPreFocus::None
-                }
-            })
-    }
-
-    fn is_overlay_visible_for_component(&self, component: &ComponentRc) -> bool {
-        let state = self.overlays.borrow();
-        if let Some(entry) = state
-            .entries
-            .iter()
-            .find(|entry| Rc::ptr_eq(&entry.component, component))
+            .rev()
+            .find(|entry| entry.component_id == focused)
+            .copied()
         {
-            return self.is_overlay_visible(entry);
+            self.restore_focus_after_overlay_loss(entry.pre_focus);
+            return;
         }
-        false
-    }
 
-    fn take_overlay_dirty(&mut self) -> bool {
-        let mut state = self.overlays.borrow_mut();
-        let dirty = state.dirty;
-        state.dirty = false;
-        dirty
-    }
-
-    fn peek_overlay_dirty(&self) -> bool {
-        let state = self.overlays.borrow();
-        state.dirty
+        if self.components.get_mut(focused).is_none() {
+            debug_assert!(false, "focused component {:?} missing", focused);
+            self.focused = None;
+        }
     }
 
     fn has_pending_non_render(&self) -> bool {
-        self.peek_overlay_dirty() || self.wake.has_pending_non_render()
-    }
-
-    fn take_pending_pre_focus(&mut self) -> Option<Rc<RefCell<Box<dyn Component>>>> {
-        let mut state = self.overlays.borrow_mut();
-        state.pending_pre_focus.take()
-    }
-
-    fn take_pending_pre_focus_root(&mut self) -> Option<ComponentId> {
-        let mut state = self.overlays.borrow_mut();
-        state.pending_pre_focus_root.take()
+        self.wake.has_pending_non_render()
     }
 }
 
@@ -1779,15 +1747,15 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_cell_size_response, CoalesceBudget, Command, ComponentId, CrashCleanup, OverlayOptions,
-        RuntimeHandle, TerminalOp, TuiRuntime,
+        find_cell_size_response, CoalesceBudget, Command, ComponentId, CrashCleanup,
+        OverlayOptions, RuntimeHandle, TerminalOp, TuiRuntime,
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
     use crate::core::output::TerminalCmd;
     use crate::core::terminal::Terminal;
     use crate::core::terminal_image::get_cell_dimensions;
-    use crate::render::overlay::SizeValue;
+    use crate::runtime::overlay::{OverlayVisibility, SizeValue};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -1992,9 +1960,8 @@ mod tests {
         let inputs = Rc::new(RefCell::new(Vec::new()));
         let focused = Rc::new(RefCell::new(false));
         let component = TestComponent::new(false, Rc::clone(&inputs), focused);
-        let component_handle: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(component)));
-        runtime.set_focus(component_handle);
+        let component_id = runtime.register_component(component);
+        runtime.set_focus(component_id);
         runtime.handle_input("\x1b[32;1:3u");
         assert!(inputs.borrow().is_empty());
 
@@ -2002,9 +1969,8 @@ mod tests {
         let focused_release = Rc::new(RefCell::new(false));
         let component_release =
             TestComponent::new(true, Rc::clone(&inputs_release), focused_release);
-        let component_release_handle: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(component_release)));
-        runtime.set_focus(component_release_handle);
+        let component_release_id = runtime.register_component(component_release);
+        runtime.set_focus(component_release_id);
         runtime.handle_input("\x1b[32;1:3u");
         assert_eq!(inputs_release.borrow().len(), 1);
     }
@@ -2238,7 +2204,8 @@ mod tests {
         }
 
         let terminal = TestTerminal::new(80, 24);
-        let (mut runtime, _root_id) = runtime_with_root(terminal, CursorMarkerWithMetadataComponent);
+        let (mut runtime, _root_id) =
+            runtime_with_root(terminal, CursorMarkerWithMetadataComponent);
         runtime.show_hardware_cursor = false;
 
         runtime.start().expect("runtime start");
@@ -2299,17 +2266,16 @@ mod tests {
         runtime.start().expect("runtime start");
         runtime.terminal.output.clear();
 
-        let overlay: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(OverlayImageCursorComponent)));
+        let overlay_id = runtime.register_component(OverlayImageCursorComponent);
         let options = OverlayOptions {
             width: Some(SizeValue::absolute(10)),
             row: Some(SizeValue::absolute(1)),
             col: Some(SizeValue::absolute(2)),
             ..Default::default()
         };
-        runtime.show_overlay(overlay, Some(options));
+        runtime.show_overlay(overlay_id, Some(options));
 
-        runtime.render_now();
+        runtime.run_once();
 
         let output = runtime.terminal.output.as_str();
         assert!(
@@ -2355,17 +2321,16 @@ mod tests {
         runtime.start().expect("runtime start");
         runtime.terminal.output.clear();
 
-        let overlay: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(OverlayCursorComponent)));
+        let overlay_id = runtime.register_component(OverlayCursorComponent);
         let options = OverlayOptions {
             width: Some(SizeValue::absolute(10)),
             row: Some(SizeValue::absolute(1)),
             col: Some(SizeValue::absolute(2)),
             ..Default::default()
         };
-        runtime.show_overlay(overlay, Some(options));
+        runtime.show_overlay(overlay_id, Some(options));
 
-        runtime.render_now();
+        runtime.run_once();
 
         let output = runtime.terminal.output.as_str();
         assert!(
@@ -2403,17 +2368,16 @@ mod tests {
         runtime.terminal.output.clear();
 
         let last = Rc::new(RefCell::new(None));
-        let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(
-            ViewportRecordingComponent::new(Rc::clone(&last)),
-        )));
+        let overlay_id =
+            runtime.register_component(ViewportRecordingComponent::new(Rc::clone(&last)));
         let options = OverlayOptions {
             width: Some(SizeValue::absolute(10)),
             max_height: Some(SizeValue::absolute(3)),
             ..Default::default()
         };
 
-        runtime.show_overlay(overlay, Some(options));
-        runtime.render_now();
+        runtime.show_overlay(overlay_id, Some(options));
+        runtime.run_once();
 
         assert_eq!(*last.borrow(), Some((10, 3)));
     }
@@ -2456,8 +2420,14 @@ mod tests {
         runtime.render_now();
 
         let output = runtime.terminal.output.as_str();
-        assert!(output.contains("line-a"), "expected line-a in output: {output:?}");
-        assert!(output.contains("line-b"), "expected line-b in output: {output:?}");
+        assert!(
+            output.contains("line-a"),
+            "expected line-a in output: {output:?}"
+        );
+        assert!(
+            output.contains("line-b"),
+            "expected line-b in output: {output:?}"
+        );
         assert_eq!(
             output.matches("\x1b[2K").count(),
             2,
@@ -2524,7 +2494,10 @@ mod tests {
         assert!(!runtime.kitty_protocol_active());
 
         runtime.handle_input("\x1b[?1u");
-        assert!(runtime.kitty_protocol_active(), "expected kitty pending after query response");
+        assert!(
+            runtime.kitty_protocol_active(),
+            "expected kitty pending after query response"
+        );
 
         runtime.run_once(); // flush pending enable
         assert!(
@@ -2569,7 +2542,8 @@ mod tests {
         let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
 
         runtime.start().expect("runtime start");
-        runtime.set_focus_component(root_id);
+        runtime.set_focus(root_id);
+        runtime.run_once();
         assert!(*root_focus.borrow());
 
         let overlay_focus = Rc::new(RefCell::new(false));
@@ -2578,9 +2552,8 @@ mod tests {
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&overlay_focus),
         );
-        let overlay: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(overlay_component)));
-        let handle = runtime.show_overlay(Rc::clone(&overlay), None);
+        let overlay_id = runtime.register_component(overlay_component);
+        let handle = runtime.show_overlay(overlay_id, None);
         runtime.run_once();
         assert!(*overlay_focus.borrow());
 
@@ -2600,7 +2573,7 @@ mod tests {
         );
         let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus_component(root_id);
+        runtime.set_focus(root_id);
 
         let overlay_focus = Rc::new(RefCell::new(false));
         let overlay_component = TestComponent::new(
@@ -2608,14 +2581,13 @@ mod tests {
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&overlay_focus),
         );
-        let overlay: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(overlay_component)));
+        let overlay_id = runtime.register_component(overlay_component);
         let options = OverlayOptions {
-            visible: Some(Box::new(|w, _| w >= 10)),
+            visibility: OverlayVisibility::MinCols(10),
             ..Default::default()
         };
 
-        runtime.show_overlay(Rc::clone(&overlay), Some(options));
+        runtime.show_overlay(overlay_id, Some(options));
         runtime.run_once();
         assert!(!*overlay_focus.borrow());
 
@@ -2635,15 +2607,15 @@ mod tests {
             TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
         let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus_component(root_id);
+        runtime.set_focus(root_id);
 
         let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
         let overlay_focus = Rc::new(RefCell::new(false));
         let overlay_component =
             TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
-        let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(overlay_component)));
+        let overlay_id = runtime.register_component(overlay_component);
 
-        let handle = runtime.show_overlay(Rc::clone(&overlay), None);
+        let handle = runtime.show_overlay(overlay_id, None);
         runtime.run_once();
 
         handle.set_hidden(true);
@@ -2673,15 +2645,15 @@ mod tests {
             TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
         let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus_component(root_id);
+        runtime.set_focus(root_id);
 
         let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
         let overlay_focus = Rc::new(RefCell::new(false));
         let overlay_component =
             TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
-        let overlay: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(overlay_component)));
+        let overlay_id = runtime.register_component(overlay_component);
 
-        let handle = runtime.show_overlay(Rc::clone(&overlay), None);
+        let handle = runtime.show_overlay(overlay_id, None);
         runtime.run_once();
         assert!(*overlay_focus.borrow());
 
@@ -2709,7 +2681,7 @@ mod tests {
         );
         let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
         runtime.start().expect("runtime start");
-        runtime.set_focus_component(root_id);
+        runtime.set_focus(root_id);
 
         let overlay_a_focus = Rc::new(RefCell::new(false));
         let overlay_a_component = TestComponent::new(
@@ -2717,9 +2689,8 @@ mod tests {
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&overlay_a_focus),
         );
-        let overlay_a: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(overlay_a_component)));
-        runtime.show_overlay(Rc::clone(&overlay_a), None);
+        let overlay_a_id = runtime.register_component(overlay_a_component);
+        runtime.show_overlay(overlay_a_id, None);
         runtime.run_once();
         assert!(*overlay_a_focus.borrow());
 
@@ -2729,9 +2700,8 @@ mod tests {
             Rc::new(RefCell::new(Vec::new())),
             Rc::clone(&overlay_b_focus),
         );
-        let overlay_b: Rc<RefCell<Box<dyn Component>>> =
-            Rc::new(RefCell::new(Box::new(overlay_b_component)));
-        let overlay_b_handle = runtime.show_overlay(Rc::clone(&overlay_b), None);
+        let overlay_b_id = runtime.register_component(overlay_b_component);
+        let overlay_b_handle = runtime.show_overlay(overlay_b_id, None);
         runtime.run_once();
         assert!(*overlay_b_focus.borrow());
 
@@ -2856,7 +2826,7 @@ mod tests {
         });
 
         runtime.start().expect("runtime start");
-        runtime.set_focus_component(root_id);
+        runtime.set_focus(root_id);
         runtime.render_if_needed();
         let baseline = state.borrow().renders;
 
@@ -3035,36 +3005,41 @@ mod tests {
 
     #[test]
     fn commands_apply_before_input_in_same_tick() {
-        let _guard = env_test_lock().lock().expect("test lock poisoned");
-        std::env::remove_var("TERM_PROGRAM");
-        std::env::remove_var("KITTY_WINDOW_ID");
-
         let terminal = TestTerminal::default();
         let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
 
+        let first_inputs = Rc::new(RefCell::new(Vec::new()));
+        let first_focus = Rc::new(RefCell::new(false));
+        let first_id = runtime.register_component(TestComponent::new(
+            false,
+            Rc::clone(&first_inputs),
+            Rc::clone(&first_focus),
+        ));
+
+        let second_inputs = Rc::new(RefCell::new(Vec::new()));
+        let second_focus = Rc::new(RefCell::new(false));
+        let second_id = runtime.register_component(TestComponent::new(
+            false,
+            Rc::clone(&second_inputs),
+            Rc::clone(&second_focus),
+        ));
+
         runtime.start().expect("runtime start");
         runtime.render_if_needed(); // clear initial render request
-        runtime.terminal.output.clear();
+        runtime.set_focus(first_id);
+        runtime.run_once();
+        assert!(*first_focus.borrow());
 
         let handle = runtime.runtime_handle();
-        handle.dispatch(Command::Terminal(TerminalOp::HideCursor));
-
-        // \x1b[?1u is the expected Kitty keyboard query response to our \x1b[?u query.
-        runtime.wake.enqueue_input("\x1b[?1u".to_string());
+        handle.dispatch(Command::FocusSet(second_id));
+        runtime.wake.enqueue_input("x".to_string());
 
         runtime.run_once();
 
-        let output = runtime.terminal.output.as_str();
-        let hide_idx = output
-            .find("\x1b[?25l")
-            .expect("expected hide cursor bytes");
-        let kitty_idx = output
-            .find("\x1b[>7u")
-            .expect("expected kitty enable bytes from input handling");
-        assert!(
-            hide_idx < kitty_idx,
-            "expected command bytes before input-driven bytes, got: {output:?}"
-        );
+        assert_eq!(second_inputs.borrow().as_slice(), &["x".to_string()]);
+        assert!(first_inputs.borrow().is_empty());
+        assert!(*second_focus.borrow());
+        assert!(!*first_focus.borrow());
     }
 
     #[test]
@@ -3098,7 +3073,9 @@ mod tests {
         let clear_idx = output
             .find("\x1b[2J\x1b[H")
             .expect("expected clear screen bytes (ESC[2J ESC[H)");
-        let hello_idx = output.find("hello").expect("expected frame content after clear");
+        let hello_idx = output
+            .find("hello")
+            .expect("expected frame content after clear");
         assert!(
             clear_idx < hello_idx,
             "expected clear screen bytes before frame content, got: {output:?}"
@@ -3275,9 +3252,16 @@ mod tests {
         runtime.render_if_needed();
 
         let output = runtime.terminal.output.as_str();
-        let line_a_idx = output.find("line-a").expect("expected frame repaint after guard drop");
-        let line_b_idx = output.find("line-b").expect("expected frame repaint after guard drop");
-        assert!(line_a_idx < line_b_idx, "expected line-a before line-b, got: {output:?}");
+        let line_a_idx = output
+            .find("line-a")
+            .expect("expected frame repaint after guard drop");
+        let line_b_idx = output
+            .find("line-b")
+            .expect("expected frame repaint after guard drop");
+        assert!(
+            line_a_idx < line_b_idx,
+            "expected line-a before line-b, got: {output:?}"
+        );
         assert_eq!(
             output.matches("\x1b[2K").count(),
             2,

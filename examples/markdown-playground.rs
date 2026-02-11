@@ -517,13 +517,12 @@ fn main() -> std::io::Result<()> {
     let exit_flag = Rc::new(RefCell::new(false));
     let palette_state = Rc::new(RefCell::new(PaletteState::default()));
 
-    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> =
-        Rc::new(RefCell::new(Box::new(EditorWrapper::new(
-            Rc::clone(&editor),
-            Rc::clone(&palette_state),
-            Rc::clone(&exit_flag),
-        ))));
-    tui.set_focus(Rc::clone(&editor_wrapper));
+    let editor_focus_id = tui.register_component(EditorWrapper::new(
+        Rc::clone(&editor),
+        Rc::clone(&palette_state),
+        Rc::clone(&exit_flag),
+    ));
+    tui.set_focus(editor_focus_id);
 
     let mut palette_handle: Option<OverlayHandle> = None;
 
@@ -550,13 +549,13 @@ fn main() -> std::io::Result<()> {
                 handle.hide();
                 tui.request_render();
             } else {
-                let overlay: Rc<RefCell<Box<dyn Component>>> =
-                    Rc::new(RefCell::new(Box::new(PaletteOverlay::new(
-                        Rc::clone(&palette_state),
-                        Rc::clone(&exit_flag),
-                        keybindings.clone(),
-                    ))));
-                let handle = tui.show_overlay(Rc::clone(&overlay), Some(overlay_options()));
+                let overlay = PaletteOverlay::new(
+                    Rc::clone(&palette_state),
+                    Rc::clone(&exit_flag),
+                    keybindings.clone(),
+                );
+                let overlay_id = tui.register_component(overlay);
+                let handle = render_handle.show_overlay(overlay_id, Some(overlay_options()), false);
                 palette_handle = Some(handle);
             }
         }

@@ -1,9 +1,12 @@
 //! Runtime orchestration (Phase 4+).
 
-pub mod focus;
-pub mod ime;
 pub mod component_registry;
+pub mod ime;
+pub mod overlay;
 pub mod tui;
 
 pub use component_registry::ComponentId;
+pub use overlay::{
+    OverlayAnchor, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility, SizeValue,
+};
 pub use tui::{Command, RuntimeHandle, TerminalOp};

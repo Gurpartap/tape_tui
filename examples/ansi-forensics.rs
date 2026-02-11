@@ -799,14 +799,13 @@ fn main() -> std::io::Result<()> {
     tui.set_root(vec![app_id]);
 
     let exit_flag = Rc::new(RefCell::new(false));
-    let editor_wrapper: Rc<RefCell<Box<dyn Component>>> =
-        Rc::new(RefCell::new(Box::new(EditorWrapper::new(
-            Rc::clone(&editor),
-            Rc::clone(&state),
-            Rc::clone(&exit_flag),
-            Arc::clone(&auto_tick),
-        ))));
-    tui.set_focus(Rc::clone(&editor_wrapper));
+    let editor_focus_id = tui.register_component(EditorWrapper::new(
+        Rc::clone(&editor),
+        Rc::clone(&state),
+        Rc::clone(&exit_flag),
+        Arc::clone(&auto_tick),
+    ));
+    tui.set_focus(editor_focus_id);
 
     tui.start()?;
     render_handle.dispatch(RuntimeCommand::RequestRender);
