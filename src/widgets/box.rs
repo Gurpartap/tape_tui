@@ -1,8 +1,6 @@
 //! Box widget (Phase 18).
 
 use std::boxed::Box as StdBox;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 use crate::core::component::Component;
 use crate::core::cursor::CursorPos;
@@ -19,7 +17,7 @@ struct RenderCache {
 }
 
 pub struct Box {
-    children: Vec<Rc<RefCell<StdBox<dyn Component>>>>,
+    children: Vec<StdBox<dyn Component>>,
     padding_x: usize,
     padding_y: usize,
     last_cursor_pos: Option<CursorPos>,
@@ -39,23 +37,18 @@ impl Box {
         }
     }
 
-    pub fn add_child(&mut self, component: Rc<RefCell<StdBox<dyn Component>>>) {
+    pub fn add_child(&mut self, component: StdBox<dyn Component>) {
         self.children.push(component);
         self.invalidate_cache();
     }
 
-    pub fn remove_child(&mut self, component: &Rc<RefCell<StdBox<dyn Component>>>) -> bool {
-        if let Some(index) = self
-            .children
-            .iter()
-            .position(|child| Rc::ptr_eq(child, component))
-        {
-            self.children.remove(index);
-            self.invalidate_cache();
-            true
-        } else {
-            false
+    pub fn remove_child(&mut self, index: usize) -> bool {
+        if index >= self.children.len() {
+            return false;
         }
+        self.children.remove(index);
+        self.invalidate_cache();
+        true
     }
 
     pub fn clear(&mut self) {
@@ -125,12 +118,10 @@ impl Component for Box {
 
         let mut child_lines = Vec::new();
         let mut last_cursor_pos: Option<CursorPos> = None;
-        for child in self.children.iter() {
+        for child in self.children.iter_mut() {
             let start_row = child_lines.len();
-            let mut child = child.borrow_mut();
             let lines = child.render(content_width);
             let cursor_pos = child.cursor_pos();
-            drop(child);
 
             if let Some(pos) = cursor_pos {
                 last_cursor_pos = Some(CursorPos {
@@ -185,8 +176,8 @@ impl Component for Box {
 
     fn invalidate(&mut self) {
         self.invalidate_cache();
-        for child in self.children.iter() {
-            child.borrow_mut().invalidate();
+        for child in self.children.iter_mut() {
+            child.invalidate();
         }
     }
 }
@@ -198,8 +189,6 @@ mod tests {
     use crate::core::cursor::CursorPos;
     use crate::core::text::width::visible_width;
     use std::boxed::Box as StdBox;
-    use std::cell::RefCell;
-    use std::rc::Rc;
 
     struct StaticComponent {
         lines: Vec<String>,
@@ -229,10 +218,9 @@ mod tests {
     #[test]
     fn box_pads_children_to_width() {
         let mut boxed = BoxWidget::new(1, 1, None);
-        let child: Rc<RefCell<StdBox<dyn Component>>> =
-            Rc::new(RefCell::new(StdBox::new(StaticComponent {
-                lines: vec!["hi".to_string()],
-            })));
+        let child: StdBox<dyn Component> = StdBox::new(StaticComponent {
+            lines: vec!["hi".to_string()],
+        });
         boxed.add_child(child);
 
         let lines = boxed.render(6);
@@ -246,16 +234,14 @@ mod tests {
     #[test]
     fn box_offsets_child_cursor_for_padding_and_prefers_last_child() {
         let mut boxed = BoxWidget::new(1, 2, None);
-        let first: Rc<RefCell<StdBox<dyn Component>>> =
-            Rc::new(RefCell::new(StdBox::new(CursorComponent {
-                lines: vec!["one".to_string()],
-                cursor: Some(CursorPos { row: 0, col: 0 }),
-            })));
-        let second: Rc<RefCell<StdBox<dyn Component>>> =
-            Rc::new(RefCell::new(StdBox::new(CursorComponent {
-                lines: vec!["two".to_string(), "three".to_string()],
-                cursor: Some(CursorPos { row: 1, col: 2 }),
-            })));
+        let first: StdBox<dyn Component> = StdBox::new(CursorComponent {
+            lines: vec!["one".to_string()],
+            cursor: Some(CursorPos { row: 0, col: 0 }),
+        });
+        let second: StdBox<dyn Component> = StdBox::new(CursorComponent {
+            lines: vec!["two".to_string(), "three".to_string()],
+            cursor: Some(CursorPos { row: 1, col: 2 }),
+        });
         boxed.add_child(first);
         boxed.add_child(second);
 
@@ -265,5 +251,22 @@ mod tests {
             Some(CursorPos { row: 4, col: 3 }),
             "expected row=padding_y(2)+first_child_lines(1)+child_row(1)=4; col=padding_x(1)+2=3"
         );
+    }
+
+    #[test]
+    fn box_remove_child_by_index_updates_render() {
+        let mut boxed = BoxWidget::new(0, 0, None);
+        let first: StdBox<dyn Component> = StdBox::new(StaticComponent {
+            lines: vec!["one".to_string()],
+        });
+        let second: StdBox<dyn Component> = StdBox::new(StaticComponent {
+            lines: vec!["two".to_string()],
+        });
+        boxed.add_child(first);
+        boxed.add_child(second);
+
+        assert!(boxed.remove_child(0));
+        assert_eq!(boxed.render(10), vec!["two       "]);
+        assert!(!boxed.remove_child(1));
     }
 }
