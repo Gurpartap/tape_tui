@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pi_tui::core::autocomplete::CommandEntry;
 use pi_tui::core::component::{Component, Focusable};
+use pi_tui::runtime::tui::Command as RuntimeCommand;
 use pi_tui::widgets::select_list::SelectListTheme;
 use pi_tui::{
     default_editor_keybindings_handle, CombinedAutocompleteProvider, Editor, EditorOptions,
@@ -265,7 +266,7 @@ fn main() -> std::io::Result<()> {
     let terminal = ProcessTerminal::new();
     let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
     let mut tui = TUI::new(terminal, Rc::clone(&root));
-    let render_handle = tui.render_handle();
+    let render_handle = tui.runtime_handle();
 
     let keybindings = default_editor_keybindings_handle();
     let editor = Rc::new(RefCell::new(Editor::new(
@@ -312,7 +313,7 @@ fn main() -> std::io::Result<()> {
                 if state.messages.len() > 1 {
                     state.messages.pop();
                 }
-                render_for_submit.request_render();
+                render_for_submit.dispatch(RuntimeCommand::RequestRender);
                 return;
             }
 
@@ -320,7 +321,7 @@ fn main() -> std::io::Result<()> {
                 if state.messages.len() > 1 {
                     state.messages.truncate(1);
                 }
-                render_for_submit.request_render();
+                render_for_submit.dispatch(RuntimeCommand::RequestRender);
                 return;
             }
 
@@ -356,10 +357,10 @@ fn main() -> std::io::Result<()> {
                     if due > now {
                         thread::sleep(due - now);
                     }
-                    render_for_timer.request_render();
+                    render_for_timer.dispatch(RuntimeCommand::RequestRender);
                 });
             }
-            render_for_submit.request_render();
+            render_for_submit.dispatch(RuntimeCommand::RequestRender);
         })));
 
     let welcome = Text::new(WELCOME_TEXT);

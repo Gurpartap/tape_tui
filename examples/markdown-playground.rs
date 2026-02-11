@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use pi_tui::core::component::{Component, Focusable};
 use pi_tui::core::text::slice::slice_by_column;
+use pi_tui::runtime::tui::Command as RuntimeCommand;
 use pi_tui::{
     default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
     EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions,
@@ -486,7 +487,7 @@ fn main() -> std::io::Result<()> {
     let terminal = ProcessTerminal::new();
     let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(EmptyComponent)));
     let mut tui = TUI::new(terminal, Rc::clone(&root));
-    let render_handle = tui.render_handle();
+    let render_handle = tui.runtime_handle();
 
     let draft = Rc::new(RefCell::new(String::new()));
     let draft_for_change = Rc::clone(&draft);
@@ -506,7 +507,7 @@ fn main() -> std::io::Result<()> {
         .borrow_mut()
         .set_on_change(Some(Box::new(move |text| {
             *draft_for_change.borrow_mut() = text;
-            render_for_change.request_render();
+            render_for_change.dispatch(RuntimeCommand::RequestRender);
         })));
     editor.borrow_mut().set_text(SAMPLE_MARKDOWN);
 

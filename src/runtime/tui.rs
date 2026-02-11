@@ -1,6 +1,7 @@
 //! TUI runtime.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::env;
 use std::io;
 use std::rc::Rc;
@@ -182,16 +183,24 @@ impl<'a, T: Terminal> Drop for TerminalGuard<'a, T> {
     }
 }
 
-// Cross-thread terminal ops requested by extensions. These ops are applied by the
-// runtime tick to preserve a single, deterministic output gate (`OutputGate::flush`).
-#[derive(Debug, Clone, Copy)]
-enum TerminalOp {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    RequestRender,
+    RequestStop,
+    /// Update terminal title without forcing a render.
+    SetTitle(String),
+    Terminal(TerminalOp),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalOp {
     ShowCursor,
     HideCursor,
     ClearLine,
     ClearFromCursor,
     ClearScreen,
     MoveBy(i32),
+    /// Request that the next render redraw the full viewport.
     RequestFullRedraw,
 }
 
@@ -199,9 +208,8 @@ enum TerminalOp {
 struct RuntimeWakeState {
     pending_inputs: Vec<String>,
     pending_resize: bool,
+    pending_commands: VecDeque<Command>,
     render_requested: bool,
-    pending_title: Option<String>,
-    pending_terminal_ops: Vec<TerminalOp>,
     stop_requested: bool,
 }
 
@@ -221,9 +229,8 @@ impl RuntimeWake {
         while !state.stop_requested
             && state.pending_inputs.is_empty()
             && !state.pending_resize
+            && state.pending_commands.is_empty()
             && !state.render_requested
-            && state.pending_title.is_none()
-            && state.pending_terminal_ops.is_empty()
         {
             state = self
                 .cvar
@@ -261,22 +268,12 @@ impl RuntimeWake {
         self.cvar.notify_one();
     }
 
-    fn set_title(&self, title: String) {
+    fn set_render_requested(&self) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        state.pending_title = Some(title);
-        self.cvar.notify_one();
-    }
-
-    fn enqueue_terminal_op(&self, op: TerminalOp) {
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        state.pending_terminal_ops.push(op);
-        self.cvar.notify_one();
+        state.render_requested = true;
     }
 
     fn take_pending_resize(&self) -> bool {
@@ -289,12 +286,13 @@ impl RuntimeWake {
         pending
     }
 
-    fn take_pending_title(&self) -> Option<String> {
+    fn enqueue_command(&self, command: Command) {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        state.pending_title.take()
+        state.pending_commands.push_back(command);
+        self.cvar.notify_one();
     }
 
     fn drain_inputs(&self) -> Vec<String> {
@@ -305,12 +303,12 @@ impl RuntimeWake {
         std::mem::take(&mut state.pending_inputs)
     }
 
-    fn drain_terminal_ops(&self) -> Vec<TerminalOp> {
+    fn drain_commands(&self) -> VecDeque<Command> {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        std::mem::take(&mut state.pending_terminal_ops)
+        std::mem::take(&mut state.pending_commands)
     }
 
     fn take_render_requested(&self) -> bool {
@@ -346,8 +344,7 @@ impl RuntimeWake {
         };
         state.pending_resize
             || !state.pending_inputs.is_empty()
-            || state.pending_title.is_some()
-            || !state.pending_terminal_ops.is_empty()
+            || !state.pending_commands.is_empty()
     }
 
     fn reset_for_start(&self) {
@@ -358,9 +355,8 @@ impl RuntimeWake {
         state.stop_requested = false;
         state.pending_resize = false;
         state.pending_inputs.clear();
+        state.pending_commands.clear();
         state.render_requested = false;
-        state.pending_title = None;
-        state.pending_terminal_ops.clear();
     }
 
     fn request_stop(&self) {
@@ -383,9 +379,8 @@ impl RuntimeWake {
         while !state.stop_requested
             && state.pending_inputs.is_empty()
             && !state.pending_resize
+            && state.pending_commands.is_empty()
             && !state.render_requested
-            && state.pending_title.is_none()
-            && state.pending_terminal_ops.is_empty()
         {
             if let Some(before_wait) = before_wait.take() {
                 before_wait();
@@ -401,48 +396,13 @@ impl RuntimeWake {
 }
 
 #[derive(Clone)]
-pub struct RenderHandle {
+pub struct RuntimeHandle {
     wake: Arc<RuntimeWake>,
 }
 
-impl RenderHandle {
-    pub fn request_render(&self) {
-        self.wake.request_render();
-    }
-
-    pub fn set_title(&self, title: impl Into<String>) {
-        self.wake.set_title(title.into());
-    }
-
-    pub fn show_cursor(&self) {
-        self.wake.enqueue_terminal_op(TerminalOp::ShowCursor);
-    }
-
-    pub fn hide_cursor(&self) {
-        self.wake.enqueue_terminal_op(TerminalOp::HideCursor);
-    }
-
-    pub fn clear_line(&self) {
-        self.wake.enqueue_terminal_op(TerminalOp::ClearLine);
-    }
-
-    pub fn clear_from_cursor(&self) {
-        self.wake.enqueue_terminal_op(TerminalOp::ClearFromCursor);
-    }
-
-    pub fn clear_screen(&self) {
-        self.wake.enqueue_terminal_op(TerminalOp::ClearScreen);
-    }
-
-    pub fn move_by(&self, lines: i32) {
-        if lines == 0 {
-            return;
-        }
-        self.wake.enqueue_terminal_op(TerminalOp::MoveBy(lines));
-    }
-
-    pub fn request_full_redraw(&self) {
-        self.wake.enqueue_terminal_op(TerminalOp::RequestFullRedraw);
+impl RuntimeHandle {
+    pub fn dispatch(&self, command: Command) {
+        self.wake.enqueue_command(command);
     }
 }
 
@@ -528,8 +488,8 @@ impl<T: Terminal> TuiRuntime<T> {
         self.coalesce_budget = budget;
     }
 
-    pub fn render_handle(&self) -> RenderHandle {
-        RenderHandle {
+    pub fn runtime_handle(&self) -> RuntimeHandle {
+        RuntimeHandle {
             wake: Arc::clone(&self.wake),
         }
     }
@@ -577,7 +537,7 @@ impl<T: Terminal> TuiRuntime<T> {
             output.flush(&mut self.terminal);
             return;
         }
-        self.wake.set_title(title);
+        self.output.push(TerminalCmd::Bytes(osc_title_sequence(&title)));
     }
 
     /// Enqueue a show-cursor command.
@@ -921,9 +881,9 @@ impl<T: Terminal> TuiRuntime<T> {
         loop {
             let mut did_work = false;
 
-            let ops = self.wake.drain_terminal_ops();
-            if !ops.is_empty() {
-                self.apply_terminal_ops(ops);
+            let commands = self.wake.drain_commands();
+            if !commands.is_empty() {
+                self.apply_pending_commands(commands);
                 did_work = true;
             }
 
@@ -951,12 +911,6 @@ impl<T: Terminal> TuiRuntime<T> {
                 for data in inputs {
                     self.handle_input(&data);
                 }
-                did_work = true;
-            }
-
-            if let Some(title) = self.wake.take_pending_title() {
-                self.output
-                    .push(TerminalCmd::Bytes(osc_title_sequence(&title)));
                 did_work = true;
             }
 
@@ -992,9 +946,9 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
 
-        let ops = self.wake.drain_terminal_ops();
-        if !ops.is_empty() {
-            self.apply_terminal_ops(ops);
+        let commands = self.wake.drain_commands();
+        if !commands.is_empty() {
+            self.apply_pending_commands(commands);
         }
 
         if self.take_overlay_dirty() {
@@ -1018,11 +972,6 @@ impl<T: Terminal> TuiRuntime<T> {
 
         for data in inputs {
             self.handle_input(&data);
-        }
-
-        if let Some(title) = self.wake.take_pending_title() {
-            self.output
-                .push(TerminalCmd::Bytes(osc_title_sequence(&title)));
         }
 
         self.render_if_needed();
@@ -1188,16 +1137,82 @@ impl<T: Terminal> TuiRuntime<T> {
         self.renderer.set_hardware_cursor_row(updated_row);
     }
 
-    fn apply_terminal_ops(&mut self, ops: Vec<TerminalOp>) {
-        for op in ops {
-            match op {
-                TerminalOp::ShowCursor => self.show_cursor(),
-                TerminalOp::HideCursor => self.hide_cursor(),
-                TerminalOp::ClearLine => self.clear_line(),
-                TerminalOp::ClearFromCursor => self.clear_from_cursor(),
-                TerminalOp::ClearScreen => self.clear_screen(),
-                TerminalOp::MoveBy(lines) => self.move_by(lines),
-                TerminalOp::RequestFullRedraw => self.request_full_redraw(),
+    fn apply_pending_commands(&mut self, commands: VecDeque<Command>) {
+        // Commands are applied at a single, explicit stage in the tick to preserve deterministic
+        // ordering relative to input handling and render decisions.
+        let mut pending_title: Option<String> = None;
+        let mut render_requested = false;
+
+        for command in commands {
+            match command {
+                Command::RequestRender => {
+                    render_requested = true;
+                }
+                Command::RequestStop => {
+                    self.wake.request_stop();
+                }
+                Command::SetTitle(title) => {
+                    pending_title = Some(title);
+                }
+                Command::Terminal(op) => {
+                    if self.apply_terminal_op(op) {
+                        render_requested = true;
+                    }
+                }
+            }
+        }
+
+        if let Some(title) = pending_title {
+            self.output
+                .push(TerminalCmd::Bytes(osc_title_sequence(&title)));
+        }
+
+        if render_requested {
+            self.wake.set_render_requested();
+        }
+    }
+
+    fn apply_terminal_op(&mut self, op: TerminalOp) -> bool {
+        match op {
+            TerminalOp::ShowCursor => {
+                self.output.push(TerminalCmd::ShowCursor);
+                false
+            }
+            TerminalOp::HideCursor => {
+                self.output.push(TerminalCmd::HideCursor);
+                false
+            }
+            TerminalOp::ClearLine => {
+                self.output.push(TerminalCmd::ClearLine);
+                self.renderer.request_full_redraw_next();
+                true
+            }
+            TerminalOp::ClearFromCursor => {
+                self.output.push(TerminalCmd::ClearFromCursor);
+                self.renderer.request_full_redraw_next();
+                true
+            }
+            TerminalOp::ClearScreen => {
+                self.output.push(TerminalCmd::ClearScreen);
+                self.renderer.reset_for_external_clear_screen();
+                true
+            }
+            TerminalOp::MoveBy(lines) => {
+                if lines == 0 {
+                    return false;
+                }
+                if lines > 0 {
+                    self.output.push(TerminalCmd::MoveDown(lines as usize));
+                } else {
+                    self.output.push(TerminalCmd::MoveUp((-lines) as usize));
+                }
+                self.renderer
+                    .apply_out_of_band_move_by(lines, self.terminal.rows() as usize);
+                false
+            }
+            TerminalOp::RequestFullRedraw => {
+                self.renderer.request_full_redraw_next();
+                true
             }
         }
     }
@@ -1568,7 +1583,8 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_cell_size_response, CoalesceBudget, CrashCleanup, OverlayOptions, RenderHandle,
+        find_cell_size_response, CoalesceBudget, Command, CrashCleanup, OverlayOptions,
+        RuntimeHandle, TerminalOp,
         TuiRuntime,
     };
     use crate::core::component::Component;
@@ -2521,7 +2537,7 @@ mod tests {
     }
 
     #[test]
-    fn render_handle_triggers_render_from_background_task() {
+    fn runtime_handle_triggers_render_from_background_task() {
         let terminal = TestTerminal::default();
         let state = Rc::new(RefCell::new(RenderState::default()));
         let component = CountingComponent {
@@ -2534,9 +2550,9 @@ mod tests {
         runtime.render_if_needed();
         let baseline = state.borrow().renders;
 
-        let handle = runtime.render_handle();
+        let handle = runtime.runtime_handle();
         let join = thread::spawn(move || {
-            handle.request_render();
+            handle.dispatch(Command::RequestRender);
         });
         join.join().expect("join render thread");
 
@@ -2545,7 +2561,7 @@ mod tests {
     }
 
     #[test]
-    fn render_handle_wakes_blocking_run() {
+    fn runtime_handle_wakes_blocking_run() {
         let terminal = TestTerminal::default();
         let state = Rc::new(RefCell::new(RenderState::default()));
         let component = CountingComponent {
@@ -2558,11 +2574,11 @@ mod tests {
         runtime.render_if_needed();
         let baseline = state.borrow().renders;
 
-        let handle = runtime.render_handle();
+        let handle = runtime.runtime_handle();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let join = thread::spawn(move || {
             ready_rx.recv().expect("wait for runtime to block");
-            handle.request_render();
+            handle.dispatch(Command::RequestRender);
         });
 
         runtime.run_with_before_wait(|| {
@@ -2577,7 +2593,7 @@ mod tests {
     fn render_request_during_render_is_preserved_for_next_tick() {
         struct RenderDuringRender {
             state: Rc<RefCell<RenderState>>,
-            handle_slot: Rc<RefCell<Option<RenderHandle>>>,
+            handle_slot: Rc<RefCell<Option<RuntimeHandle>>>,
             requested: bool,
         }
 
@@ -2587,7 +2603,7 @@ mod tests {
                 if !self.requested {
                     self.requested = true;
                     if let Some(handle) = self.handle_slot.borrow().as_ref() {
-                        handle.request_render();
+                        handle.dispatch(Command::RequestRender);
                     }
                 }
                 Vec::new()
@@ -2596,7 +2612,7 @@ mod tests {
 
         let terminal = TestTerminal::default();
         let state = Rc::new(RefCell::new(RenderState::default()));
-        let handle_slot: Rc<RefCell<Option<RenderHandle>>> = Rc::new(RefCell::new(None));
+        let handle_slot: Rc<RefCell<Option<RuntimeHandle>>> = Rc::new(RefCell::new(None));
         let component = RenderDuringRender {
             state: Rc::clone(&state),
             handle_slot: Rc::clone(&handle_slot),
@@ -2610,7 +2626,7 @@ mod tests {
         });
 
         runtime.start().expect("runtime start");
-        *handle_slot.borrow_mut() = Some(runtime.render_handle());
+        *handle_slot.borrow_mut() = Some(runtime.runtime_handle());
 
         runtime.request_render();
         runtime.run_blocking_once();
@@ -2663,9 +2679,9 @@ mod tests {
         let baseline = state.borrow().renders;
         runtime.terminal.output.clear();
 
-        let handle = runtime.render_handle();
+        let handle = runtime.runtime_handle();
         let join = thread::spawn(move || {
-            handle.set_title("pi");
+            handle.dispatch(Command::SetTitle("pi".to_string()));
         });
         join.join().expect("join title thread");
 
@@ -2689,11 +2705,11 @@ mod tests {
         let baseline = state.borrow().renders;
         runtime.terminal.output.clear();
 
-        let handle = runtime.render_handle();
+        let handle = runtime.runtime_handle();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let join = thread::spawn(move || {
             ready_rx.recv().expect("wait for runtime to block");
-            handle.set_title("pi");
+            handle.dispatch(Command::SetTitle("pi".to_string()));
         });
 
         runtime.run_with_before_wait(|| {
@@ -2720,9 +2736,9 @@ mod tests {
         let baseline = state.borrow().renders;
         runtime.terminal.output.clear();
 
-        let handle = runtime.render_handle();
-        handle.set_title("a");
-        handle.set_title("b");
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::SetTitle("a".to_string()));
+        handle.dispatch(Command::SetTitle("b".to_string()));
 
         runtime.run_once();
         assert_eq!(state.borrow().renders, baseline);
@@ -2780,7 +2796,7 @@ mod tests {
     }
 
     #[test]
-    fn render_handle_hide_cursor_wakes_and_flushes_without_render() {
+    fn runtime_handle_hide_cursor_wakes_and_flushes_without_render() {
         let _guard = env_test_lock().lock().expect("test lock poisoned");
         std::env::remove_var("TERM_PROGRAM");
         std::env::remove_var("KITTY_WINDOW_ID");
@@ -2793,11 +2809,11 @@ mod tests {
         runtime.render_if_needed(); // clear initial render request
         runtime.terminal.output.clear();
 
-        let handle = runtime.render_handle();
+        let handle = runtime.runtime_handle();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let join = thread::spawn(move || {
             ready_rx.recv().expect("wait for runtime to block");
-            handle.hide_cursor();
+            handle.dispatch(Command::Terminal(TerminalOp::HideCursor));
         });
 
         runtime.run_with_before_wait(|| {
@@ -2815,6 +2831,41 @@ mod tests {
             !runtime.terminal.output.contains("\x1b[?2026h"),
             "expected no render sync start bytes, got: {:?}",
             runtime.terminal.output
+        );
+    }
+
+    #[test]
+    fn commands_apply_before_input_in_same_tick() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        let terminal = TestTerminal::default();
+        let root: Rc<RefCell<Box<dyn Component>>> = Rc::new(RefCell::new(Box::new(DummyComponent)));
+        let mut runtime = TuiRuntime::new(terminal, root);
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed(); // clear initial render request
+        runtime.terminal.output.clear();
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Terminal(TerminalOp::HideCursor));
+
+        // \x1b[?1u is the expected Kitty keyboard query response to our \x1b[?u query.
+        runtime.wake.enqueue_input("\x1b[?1u".to_string());
+
+        runtime.run_once();
+
+        let output = runtime.terminal.output.as_str();
+        let hide_idx = output
+            .find("\x1b[?25l")
+            .expect("expected hide cursor bytes");
+        let kitty_idx = output
+            .find("\x1b[>7u")
+            .expect("expected kitty enable bytes from input handling");
+        assert!(
+            hide_idx < kitty_idx,
+            "expected command bytes before input-driven bytes, got: {output:?}"
         );
     }
 
@@ -2841,8 +2892,8 @@ mod tests {
         runtime.render_if_needed(); // establish baseline
         runtime.terminal.output.clear();
 
-        let handle = runtime.render_handle();
-        handle.clear_screen();
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Terminal(TerminalOp::ClearScreen));
 
         runtime.run_once();
 

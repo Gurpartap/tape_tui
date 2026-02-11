@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::core::component::Component;
-use crate::runtime::tui::RenderHandle;
+use crate::runtime::tui::{Command, RuntimeHandle};
 use crate::widgets::text::Text;
 
 type RenderRequester = Arc<dyn Fn() + Send + Sync>;
@@ -68,13 +68,13 @@ pub struct Loader {
 
 impl Loader {
     pub fn new(
-        render_handle: RenderHandle,
+        runtime_handle: RuntimeHandle,
         spinner_color_fn: Box<dyn Fn(&str) -> String>,
         message_color_fn: Box<dyn Fn(&str) -> String>,
         message: Option<String>,
     ) -> Self {
         let requester = Arc::new(move || {
-            render_handle.request_render();
+            runtime_handle.dispatch(Command::RequestRender);
         });
         Self::with_requester(Some(requester), spinner_color_fn, message_color_fn, message)
     }

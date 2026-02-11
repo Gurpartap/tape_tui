@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use pi_tui::core::component::{Component, Focusable};
 use pi_tui::core::text::slice::slice_by_column;
+use pi_tui::runtime::tui::Command as RuntimeCommand;
 use pi_tui::{
     default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
     EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions,
@@ -759,7 +760,7 @@ fn main() -> std::io::Result<()> {
     let root: Rc<RefCell<Box<dyn Component>>> =
         Rc::new(RefCell::new(Box::new(pi_tui::widgets::Spacer::new())));
     let mut tui = TUI::new(terminal, Rc::clone(&root));
-    let render_handle = tui.render_handle();
+    let render_handle = tui.runtime_handle();
 
     let state = Rc::new(RefCell::new(ForensicsState::default()));
     let auto_tick = Arc::new(AtomicBool::new(false));
@@ -783,7 +784,7 @@ fn main() -> std::io::Result<()> {
         .borrow_mut()
         .set_on_change(Some(Box::new(move |text| {
             *draft_for_change.borrow_mut() = text;
-            render_for_change.request_render();
+            render_for_change.dispatch(RuntimeCommand::RequestRender);
         })));
 
     editor.borrow_mut().set_text(SAMPLE_MARKDOWN);
@@ -809,7 +810,7 @@ fn main() -> std::io::Result<()> {
     tui.set_focus(Rc::clone(&editor_wrapper));
 
     tui.start()?;
-    render_handle.request_render();
+    render_handle.dispatch(RuntimeCommand::RequestRender);
 
     {
         let auto_tick = Arc::clone(&auto_tick);
@@ -817,7 +818,7 @@ fn main() -> std::io::Result<()> {
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(250));
             if auto_tick.load(Ordering::SeqCst) {
-                render_handle.request_render();
+                render_handle.dispatch(RuntimeCommand::RequestRender);
             }
         });
     }

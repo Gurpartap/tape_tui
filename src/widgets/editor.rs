@@ -17,7 +17,7 @@ use crate::core::input_event::InputEvent;
 use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
 use crate::core::text::utils::{grapheme_segments, is_punctuation_char, is_whitespace_char};
 use crate::core::text::width::visible_width;
-use crate::runtime::tui::RenderHandle;
+use crate::runtime::tui::{Command, RuntimeHandle};
 use crate::widgets::select_list::{SelectItem, SelectList, SelectListTheme};
 
 const MAX_PASTE_LINES: usize = 10;
@@ -152,7 +152,7 @@ pub struct EditorOptions {
     pub autocomplete_max_visible: Option<usize>,
     pub height_mode: Option<EditorHeightMode>,
     pub paste_mode: Option<EditorPasteMode>,
-    pub render_handle: Option<RenderHandle>,
+    pub render_handle: Option<RuntimeHandle>,
 }
 
 enum JumpMode {
@@ -180,7 +180,7 @@ pub struct Editor {
     select_list_theme: SelectListTheme,
     padding_x: usize,
     autocomplete_max_visible: usize,
-    render_handle: Option<RenderHandle>,
+    render_handle: Option<RuntimeHandle>,
     keybindings: EditorKeybindingsHandle,
     autocomplete_provider: Option<Box<dyn AutocompleteProvider>>,
     autocomplete_list: Option<SelectList>,
@@ -366,7 +366,7 @@ impl Editor {
 
     fn request_render(&self) {
         if let Some(handle) = self.render_handle.as_ref() {
-            handle.request_render();
+            handle.dispatch(Command::RequestRender);
         }
     }
 
@@ -533,7 +533,7 @@ impl Editor {
                     slot.push(suggestions);
                 }
                 if let Some(handle) = render_handle.as_ref() {
-                    handle.request_render();
+                    handle.dispatch(Command::RequestRender);
                 }
             })),
         );

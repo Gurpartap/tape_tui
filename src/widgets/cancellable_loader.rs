@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::core::component::Component;
 use crate::core::input_event::InputEvent;
 use crate::core::keybindings::{EditorAction, EditorKeybindingsHandle};
-use crate::runtime::tui::RenderHandle;
+use crate::runtime::tui::RuntimeHandle;
 use crate::widgets::loader::Loader;
 
 #[derive(Clone)]
@@ -29,13 +29,13 @@ pub struct CancellableLoader {
 
 impl CancellableLoader {
     pub fn new(
-        render_handle: RenderHandle,
+        runtime_handle: RuntimeHandle,
         spinner_color_fn: Box<dyn Fn(&str) -> String>,
         message_color_fn: Box<dyn Fn(&str) -> String>,
         message: Option<String>,
         keybindings: EditorKeybindingsHandle,
     ) -> Self {
-        let loader = Loader::new(render_handle, spinner_color_fn, message_color_fn, message);
+        let loader = Loader::new(runtime_handle, spinner_color_fn, message_color_fn, message);
         let aborted = Arc::new(AtomicBool::new(false));
         Self {
             loader,
