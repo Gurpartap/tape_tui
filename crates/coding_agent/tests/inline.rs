@@ -40,6 +40,34 @@ impl ModelBackend for BlockingBackend {
     }
 }
 
+#[derive(Default)]
+struct OrderedChunkBackend;
+
+impl ModelBackend for OrderedChunkBackend {
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: Arc<AtomicBool>,
+        emit: &mut dyn FnMut(RunEvent),
+        _tools: &mut dyn ToolExecutor,
+    ) -> Result<(), String> {
+        let run_id = req.run_id;
+
+        emit(RunEvent::Started { run_id });
+        emit(RunEvent::Chunk {
+            run_id,
+            text: "hello ".to_string(),
+        });
+        emit(RunEvent::Chunk {
+            run_id,
+            text: "world".to_string(),
+        });
+        emit(RunEvent::Finished { run_id });
+
+        Ok(())
+    }
+}
+
 fn setup_runtime_with_model(
     model: Arc<dyn ModelBackend>,
 ) -> (
@@ -204,6 +232,40 @@ fn escape_key_stops_streaming_immediately() {
         stopped,
         "escape key did not immediately stop streaming assistant text"
     );
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn run_event_queue_applies_in_order() {
+    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(OrderedChunkBackend));
+
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "queue ordering");
+    support::inject_input(&terminal_trace, "\r");
+
+    let completed = run_until(&mut tui, Duration::from_secs(2), || {
+        let app = support::lock_unpoisoned(&app);
+        matches!(app.mode, Mode::Idle)
+            && app
+                .transcript
+                .iter()
+                .any(|message| message.role == Role::Assistant && !message.streaming)
+    });
+    assert!(completed, "ordered queue events did not reach a completed assistant message");
+
+    let app = support::lock_unpoisoned(&app);
+    let assistant_messages: Vec<_> = app
+        .transcript
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .collect();
+
+    assert_eq!(assistant_messages.len(), 1);
+    assert_eq!(assistant_messages[0].content, "hello world");
+    assert!(!assistant_messages[0].streaming);
 
     tui.stop().expect("runtime stop");
 }

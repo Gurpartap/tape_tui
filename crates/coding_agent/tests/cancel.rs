@@ -66,9 +66,110 @@ impl ModelBackend for BlockingCancelBackend {
     }
 }
 
-fn runtime_handle() -> tape_tui::runtime::tui::RuntimeHandle {
-    let runtime = TUI::new(NullTerminal);
-    runtime.runtime_handle()
+#[derive(Default)]
+struct RacingCancelBackend;
+
+impl ModelBackend for RacingCancelBackend {
+    fn run(
+        &self,
+        req: RunRequest,
+        cancel: Arc<AtomicBool>,
+        emit: &mut dyn FnMut(RunEvent),
+        _tools: &mut dyn ToolExecutor,
+    ) -> Result<(), String> {
+        let run_id = req.run_id;
+
+        emit(RunEvent::Started { run_id });
+        emit(RunEvent::Chunk {
+            run_id,
+            text: "first".to_string(),
+        });
+        thread::sleep(Duration::from_millis(3));
+        emit(RunEvent::Chunk {
+            run_id,
+            text: " second".to_string(),
+        });
+
+        while !cancel.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        emit(RunEvent::Cancelled { run_id });
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FlushFallbackBackend;
+
+impl ModelBackend for FlushFallbackBackend {
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: Arc<AtomicBool>,
+        emit: &mut dyn FnMut(RunEvent),
+        _tools: &mut dyn ToolExecutor,
+    ) -> Result<(), String> {
+        let run_id = req.run_id;
+
+        emit(RunEvent::Started { run_id });
+        emit(RunEvent::Chunk {
+            run_id,
+            text: "deferred ".to_string(),
+        });
+        emit(RunEvent::Chunk {
+            run_id,
+            text: "flush".to_string(),
+        });
+        emit(RunEvent::Finished { run_id });
+
+        Ok(())
+    }
+}
+
+struct RuntimeLoopHandle {
+    runtime_handle: tape_tui::runtime::tui::RuntimeHandle,
+    running: Arc<AtomicBool>,
+    loop_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl RuntimeLoopHandle {
+    fn new() -> Self {
+        let mut runtime = TUI::new(NullTerminal);
+        runtime.start().expect("runtime start");
+
+        let runtime_handle = runtime.runtime_handle();
+        let running = Arc::new(AtomicBool::new(true));
+        let loop_running = Arc::clone(&running);
+
+        let loop_handle = thread::spawn(move || {
+            while loop_running.load(Ordering::SeqCst) {
+                runtime.run_once();
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            let _ = runtime.stop();
+        });
+
+        Self {
+            runtime_handle,
+            running,
+            loop_handle: Some(loop_handle),
+        }
+    }
+
+    fn runtime_handle(&self) -> tape_tui::runtime::tui::RuntimeHandle {
+        self.runtime_handle.clone()
+    }
+}
+
+impl Drop for RuntimeLoopHandle {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(loop_handle) = self.loop_handle.take() {
+            let _ = loop_handle.join();
+        }
+    }
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -104,7 +205,8 @@ fn cancel_while_running_results_in_cancelled_state() {
     let app = Arc::new(Mutex::new(App::new()));
     let model: Arc<dyn ModelBackend> = Arc::new(BlockingCancelBackend);
     let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-    let mut host = RuntimeController::new(app.clone(), runtime_handle(), model, tools);
+    let runtime_loop = RuntimeLoopHandle::new();
+    let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
 
     {
         let mut app = lock_unpoisoned(&app);
@@ -140,7 +242,8 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
     let app = Arc::new(Mutex::new(App::new()));
     let model: Arc<dyn ModelBackend> = Arc::new(BlockingCancelBackend);
     let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-    let mut host = RuntimeController::new(app.clone(), runtime_handle(), model, tools);
+    let runtime_loop = RuntimeLoopHandle::new();
+    let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
 
     let run_id = {
         let mut app = lock_unpoisoned(&app);
@@ -179,4 +282,114 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
     };
 
     assert_eq!(cancelled_count_after_extra_cancel, 1);
+}
+
+#[test]
+fn cancel_race_merges_chunks_into_single_assistant_message() {
+    let app = Arc::new(Mutex::new(App::new()));
+    let model: Arc<dyn ModelBackend> = Arc::new(RacingCancelBackend);
+    let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
+    let runtime_loop = RuntimeLoopHandle::new();
+    let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
+
+    let run_id = {
+        let mut app = lock_unpoisoned(&app);
+        app.on_input_replace("cancel race".to_string());
+        app.on_submit(&mut host);
+        running_run_id(&app.mode)
+    };
+
+    // Try to cancel in the middle of streaming output.
+    let streaming_started = wait_until(Duration::from_secs(1), || {
+        let app = lock_unpoisoned(&app);
+        app.transcript
+            .iter()
+            .any(|message| {
+                message.role == Role::Assistant
+                    && message.run_id == Some(run_id)
+                    && message.content.contains("first")
+            })
+    });
+    assert!(streaming_started, "run did not start streaming before cancellation");
+
+    host.cancel_run(run_id);
+
+    let settled = wait_until(Duration::from_secs(3), || {
+        let app = lock_unpoisoned(&app);
+        matches!(app.mode, Mode::Idle)
+            && app
+                .transcript
+                .iter()
+                .any(|message| message.role == Role::System && message.content == "Run cancelled")
+    });
+    assert!(settled, "cancel race did not settle");
+
+    let app = lock_unpoisoned(&app);
+    let assistant_messages: Vec<_> = app
+        .transcript
+        .iter()
+        .filter(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
+        .collect();
+
+    assert_eq!(assistant_messages.len(), 1);
+    assert_eq!(assistant_messages[0].content, "first second");
+    assert!(!assistant_messages[0].streaming);
+}
+
+#[test]
+fn flush_pending_events_in_headless_usage() {
+    let app = Arc::new(Mutex::new(App::new()));
+    let model: Arc<dyn ModelBackend> = Arc::new(FlushFallbackBackend);
+    let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
+
+    // This test intentionally avoids running the TUI loop to emulate a headless caller
+    // that must drive event application explicitly via flush_pending_run_events.
+    let mut runtime = TUI::new(NullTerminal);
+    runtime.start().expect("runtime start");
+    let runtime_handle = runtime.runtime_handle();
+    let mut host = RuntimeController::new(app.clone(), runtime_handle, model, tools);
+
+    let run_id = {
+        let mut app = lock_unpoisoned(&app);
+        app.on_input_replace("flush fallback".to_string());
+        app.on_submit(&mut host);
+        match app.mode {
+            Mode::Running { run_id } => run_id,
+            _ => unreachable!(),
+        }
+    };
+
+    let before_flush = wait_until(Duration::from_millis(100), || {
+        let app = lock_unpoisoned(&app);
+        app.transcript
+            .iter()
+            .all(|message| message.role != Role::Assistant || message.content != "deferred flush")
+    });
+    assert!(before_flush, "assistant content should remain unmerged before draining");
+
+    let drained = host.flush_pending_run_events();
+    assert!(drained >= 4, "expected at least 4 queued run events, got {drained}");
+
+    let settled = wait_until(Duration::from_secs(1), || {
+        let app = lock_unpoisoned(&app);
+        matches!(app.mode, Mode::Idle)
+            && app
+                .transcript
+                .iter()
+                .any(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
+    });
+    assert!(settled, "headless flush did not apply queued events");
+
+    let app = lock_unpoisoned(&app);
+    let assistant_messages: Vec<_> = app
+        .transcript
+        .iter()
+        .filter(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
+        .collect();
+
+    assert_eq!(assistant_messages.len(), 1);
+    assert_eq!(assistant_messages[0].content, "deferred flush");
+    assert!(!assistant_messages[0].streaming);
+
+    runtime.stop().expect("runtime stop");
 }
