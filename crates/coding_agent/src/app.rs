@@ -1,3 +1,5 @@
+use crate::commands::{parse_slash_command, SlashCommand};
+
 pub type RunId = u64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +48,8 @@ pub trait HostOps {
     fn request_stop(&mut self);
 }
 
+const HELP_TEXT: &str = "Commands: /help, /clear, /cancel, /quit";
+
 impl App {
     pub fn new() -> Self {
         Self {
@@ -70,10 +74,29 @@ impl App {
             return;
         }
 
-        if prompt.starts_with('/') {
-            let command = prompt.split_whitespace().next().unwrap_or(&prompt).to_string();
-            self.push_system(format!("Unknown command: {command}"));
-            host.request_render();
+        if let Some(command) = parse_slash_command(&prompt) {
+            match command {
+                SlashCommand::Help => {
+                    self.push_system(HELP_TEXT.to_string());
+                    host.request_render();
+                }
+                SlashCommand::Clear => {
+                    self.transcript.clear();
+                    self.push_system("Transcript cleared".to_string());
+                    host.request_render();
+                }
+                SlashCommand::Cancel => {
+                    self.on_cancel(host);
+                }
+                SlashCommand::Quit => {
+                    self.on_quit(host);
+                }
+                SlashCommand::Unknown(command) => {
+                    self.push_system(format!("Unknown command: {command}"));
+                    host.request_render();
+                }
+            }
+
             return;
         }
 
