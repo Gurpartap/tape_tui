@@ -2,21 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::app::RunId;
+use crate::runtime::RunEvent;
 use crate::tools::ToolExecutor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
     pub run_id: RunId,
     pub prompt: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunEvent {
-    Started { run_id: RunId },
-    Chunk { run_id: RunId, text: String },
-    Finished { run_id: RunId },
-    Failed { run_id: RunId, error: String },
-    Cancelled { run_id: RunId },
 }
 
 pub trait ModelBackend: Send + Sync + 'static {

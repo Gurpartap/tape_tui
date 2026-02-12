@@ -1,11 +1,12 @@
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
 use tape_tui::runtime::tui::{Command, RuntimeHandle};
 
-use crate::app::{App, HostOps, RunId};
-use crate::model::ModelBackend;
+use crate::app::{App, HostOps, Mode, RunId};
+use crate::model::{ModelBackend, RunRequest};
 use crate::tools::BuiltinToolExecutor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,21 @@ pub enum RunEvent {
     Finished { run_id: RunId },
     Failed { run_id: RunId, error: String },
     Cancelled { run_id: RunId },
+}
+
+impl RunEvent {
+    fn run_id(&self) -> RunId {
+        match self {
+            Self::Started { run_id }
+            | Self::Finished { run_id }
+            | Self::Cancelled { run_id } => *run_id,
+            Self::Chunk { run_id, .. } | Self::Failed { run_id, .. } => *run_id,
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        matches!(self, Self::Finished { .. } | Self::Failed { .. } | Self::Cancelled { .. })
+    }
 }
 
 struct ActiveRun {
@@ -57,7 +73,8 @@ impl RuntimeController {
 
         let run_id = self.next_run_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
-        let join_handle = self.spawn_worker_placeholder(run_id, prompt, Arc::clone(&cancel))?;
+        let request = RunRequest { run_id, prompt };
+        let join_handle = self.spawn_worker(request, Arc::clone(&cancel))?;
 
         *active_run = Some(ActiveRun {
             run_id,
@@ -68,21 +85,109 @@ impl RuntimeController {
         Ok(run_id)
     }
 
-    fn spawn_worker_placeholder(
+    fn spawn_worker(
         self: &Arc<Self>,
-        run_id: RunId,
-        prompt: String,
+        request: RunRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>, String> {
+        let run_id = request.run_id;
         let controller = Arc::clone(self);
         thread::Builder::new()
             .name(format!("coding-agent-run-{run_id}"))
-            .spawn(move || controller.run_worker_placeholder(run_id, prompt, cancel))
+            .spawn(move || controller.run_worker(request, cancel))
             .map_err(|error| format!("Failed to spawn run worker: {error}"))
     }
 
-    fn run_worker_placeholder(self: Arc<Self>, _run_id: RunId, _prompt: String, _cancel: Arc<AtomicBool>) {
-        let _ = self;
+    fn run_worker(self: Arc<Self>, request: RunRequest, cancel: Arc<AtomicBool>) {
+        let run_id = request.run_id;
+        self.wait_for_app_run_visibility(run_id);
+
+        let mut emit = |event: RunEvent| self.apply_run_event(event);
+        let run_outcome = catch_unwind(AssertUnwindSafe(|| {
+            let mut tools = lock_unpoisoned(&self.tools);
+            self.model
+                .run(request, Arc::clone(&cancel), &mut emit, &mut *tools)
+        }));
+
+        match run_outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => emit(RunEvent::Failed { run_id, error }),
+            Err(_) => emit(RunEvent::Failed {
+                run_id,
+                error: "Model backend panicked".to_string(),
+            }),
+        }
+
+        if self.is_active_run_id(run_id) {
+            emit(RunEvent::Failed {
+                run_id,
+                error: "Model backend exited without terminal event".to_string(),
+            });
+        }
+    }
+
+    fn wait_for_app_run_visibility(&self, run_id: RunId) {
+        for _ in 0..256 {
+            let run_visible = {
+                let app = lock_unpoisoned(&self.app);
+                matches!(app.mode, Mode::Running { run_id: current } if current == run_id)
+            };
+
+            if run_visible {
+                return;
+            }
+
+            thread::yield_now();
+        }
+    }
+
+    fn apply_run_event(&self, event: RunEvent) {
+        let run_id = event.run_id();
+        let terminal = event.is_terminal();
+
+        {
+            let mut app = lock_unpoisoned(&self.app);
+            match event {
+                RunEvent::Started { run_id } => app.on_run_started(run_id),
+                RunEvent::Chunk { run_id, text } => app.on_run_chunk(run_id, &text),
+                RunEvent::Finished { run_id } => app.on_run_finished(run_id),
+                RunEvent::Failed { run_id, error } => app.on_run_failed(run_id, &error),
+                RunEvent::Cancelled { run_id } => app.on_run_cancelled(run_id),
+            }
+        }
+
+        if terminal {
+            self.clear_active_run_if_matching(run_id);
+        }
+
+        self.runtime_handle.dispatch(Command::RequestRender);
+    }
+
+    fn clear_active_run_if_matching(&self, run_id: RunId) {
+        let mut active_run = self.lock_active_run();
+        let matches = active_run.as_ref().map(|active| active.run_id) == Some(run_id);
+        if !matches {
+            return;
+        }
+
+        let mut completed = match active_run.take() {
+            Some(completed) => completed,
+            None => return,
+        };
+
+        if let Some(join_handle) = completed.join_handle.take() {
+            let is_current_thread = join_handle.thread().id() == thread::current().id();
+            if !is_current_thread && join_handle.is_finished() {
+                let _ = join_handle.join();
+            }
+        }
+    }
+
+    fn is_active_run_id(&self, run_id: RunId) -> bool {
+        self.lock_active_run()
+            .as_ref()
+            .map(|active| active.run_id)
+            == Some(run_id)
     }
 
     fn cancel_run_internal(&self, run_id: RunId) {
