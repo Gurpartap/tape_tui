@@ -24,6 +24,14 @@ pub struct DiffRenderer {
     force_full_redraw_next: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InsertBeforeFastPathPlan {
+    insertion_at: usize,
+    inserted_count: usize,
+    previous_viewport_top: usize,
+    new_viewport_top: usize,
+}
+
 impl DiffRenderer {
     pub fn new() -> Self {
         Self::default()
@@ -152,6 +160,18 @@ impl DiffRenderer {
         let force_full_redraw_next = std::mem::take(&mut self.force_full_redraw_next);
 
         let width_changed = self.previous_width != 0 && self.previous_width != width;
+        let _insert_before_fast_path_plan = compute_insert_before_fast_path_eligibility(
+            &self.previous_lines,
+            &lines,
+            &is_image,
+            width,
+            self.previous_width,
+            height,
+            self.previous_viewport_top,
+            self.max_lines_rendered,
+            self.hardware_cursor_row,
+            has_surfaces,
+        );
 
         if self.previous_lines.is_empty() && !width_changed {
             if debug_redraw_enabled() {
@@ -484,6 +504,84 @@ impl DiffRenderer {
     }
 }
 
+fn compute_insert_before_fast_path_eligibility(
+    previous_lines: &[String],
+    new_lines: &[String],
+    new_line_is_image: &[bool],
+    width: usize,
+    previous_width: usize,
+    height: usize,
+    previous_viewport_top: usize,
+    previous_max_lines_rendered: usize,
+    hardware_cursor_row: usize,
+    has_surfaces: bool,
+) -> Option<InsertBeforeFastPathPlan> {
+    if previous_lines.is_empty() || new_lines.len() <= previous_lines.len() {
+        return None;
+    }
+    if width == 0 || height == 0 || previous_width == 0 || previous_width != width {
+        return None;
+    }
+    if has_surfaces {
+        return None;
+    }
+
+    let inserted_count = new_lines.len().saturating_sub(previous_lines.len());
+    if inserted_count == 0 || inserted_count > height {
+        return None;
+    }
+
+    if previous_max_lines_rendered != previous_lines.len() {
+        return None;
+    }
+
+    let previous_content_viewport_top = previous_lines.len().saturating_sub(height);
+    if previous_viewport_top != previous_content_viewport_top || previous_viewport_top == 0 {
+        return None;
+    }
+
+    if new_line_is_image.iter().copied().any(|is_image| is_image)
+        || previous_lines
+            .iter()
+            .any(|line| crate::core::terminal_image::is_image_line(line))
+    {
+        return None;
+    }
+
+    let previous_viewport_bottom = previous_viewport_top + height.saturating_sub(1);
+    if hardware_cursor_row < previous_viewport_top || hardware_cursor_row > previous_viewport_bottom
+    {
+        return None;
+    }
+
+    let insertion_at = (0..previous_lines.len())
+        .find(|idx| previous_lines[*idx] != new_lines[*idx])
+        .unwrap_or(previous_lines.len());
+
+    if insertion_at >= previous_viewport_top {
+        return None;
+    }
+
+    for idx in insertion_at..previous_lines.len() {
+        let shifted_idx = idx + inserted_count;
+        if new_lines.get(shifted_idx) != previous_lines.get(idx) {
+            return None;
+        }
+    }
+
+    let new_viewport_top = new_lines.len().saturating_sub(height);
+    if new_viewport_top != previous_viewport_top.saturating_add(inserted_count) {
+        return None;
+    }
+
+    Some(InsertBeforeFastPathPlan {
+        insertion_at,
+        inserted_count,
+        previous_viewport_top,
+        new_viewport_top,
+    })
+}
+
 fn apply_line_resets(lines: &mut [String], is_image: &[bool]) {
     debug_assert_eq!(lines.len(), is_image.len());
     for (line, is_image) in lines.iter_mut().zip(is_image.iter().copied()) {
@@ -583,6 +681,202 @@ mod tests {
             }
         }
         out
+    }
+
+    fn non_image_lines(lines: &[&str]) -> Vec<String> {
+        let mut rendered = lines
+            .iter()
+            .map(|line| (*line).to_string())
+            .collect::<Vec<_>>();
+        let is_image = vec![false; rendered.len()];
+        super::apply_line_resets(&mut rendered, &is_image);
+        rendered
+    }
+
+    #[test]
+    fn eligibility_accepts_pure_insert_before_previous_viewport() {
+        let previous_lines =
+            non_image_lines(&["line-0", "line-1", "line-2", "line-3", "line-4", "line-5"]);
+        let new_lines = non_image_lines(&[
+            "history-a",
+            "history-b",
+            "line-0",
+            "line-1",
+            "line-2",
+            "line-3",
+            "line-4",
+            "line-5",
+        ]);
+        let new_line_is_image = vec![false; new_lines.len()];
+
+        let plan = super::compute_insert_before_fast_path_eligibility(
+            &previous_lines,
+            &new_lines,
+            &new_line_is_image,
+            20,
+            20,
+            3,
+            3,
+            previous_lines.len(),
+            5,
+            false,
+        )
+        .expect("expected eligibility to activate");
+
+        assert_eq!(plan.insertion_at, 0);
+        assert_eq!(plan.inserted_count, 2);
+        assert_eq!(plan.previous_viewport_top, 3);
+        assert_eq!(plan.new_viewport_top, 5);
+    }
+
+    #[test]
+    fn eligibility_rejects_when_state_constraints_are_not_safe() {
+        let previous_lines =
+            non_image_lines(&["line-0", "line-1", "line-2", "line-3", "line-4", "line-5"]);
+        let new_lines = non_image_lines(&[
+            "history-a",
+            "history-b",
+            "line-0",
+            "line-1",
+            "line-2",
+            "line-3",
+            "line-4",
+            "line-5",
+        ]);
+        let new_line_is_image = vec![false; new_lines.len()];
+
+        assert!(
+            super::compute_insert_before_fast_path_eligibility(
+                &previous_lines,
+                &new_lines,
+                &new_line_is_image,
+                20,
+                19,
+                3,
+                3,
+                previous_lines.len(),
+                5,
+                false,
+            )
+            .is_none(),
+            "width changes must force fallback"
+        );
+
+        assert!(
+            super::compute_insert_before_fast_path_eligibility(
+                &previous_lines,
+                &new_lines,
+                &new_line_is_image,
+                20,
+                20,
+                3,
+                3,
+                previous_lines.len(),
+                1,
+                false,
+            )
+            .is_none(),
+            "cursor rows outside prior viewport must force fallback"
+        );
+
+        assert!(
+            super::compute_insert_before_fast_path_eligibility(
+                &previous_lines,
+                &new_lines,
+                &new_line_is_image,
+                20,
+                20,
+                3,
+                3,
+                previous_lines.len().saturating_sub(1),
+                5,
+                false,
+            )
+            .is_none(),
+            "stale max-lines bookkeeping must force fallback"
+        );
+
+        let insertion_touches_viewport = non_image_lines(&[
+            "line-0",
+            "line-1",
+            "line-2",
+            "history-a",
+            "line-3",
+            "line-4",
+            "line-5",
+        ]);
+        let insertion_touches_viewport_is_image = vec![false; insertion_touches_viewport.len()];
+        assert!(
+            super::compute_insert_before_fast_path_eligibility(
+                &previous_lines,
+                &insertion_touches_viewport,
+                &insertion_touches_viewport_is_image,
+                20,
+                20,
+                3,
+                3,
+                previous_lines.len(),
+                5,
+                false,
+            )
+            .is_none(),
+            "insertions at or below the previous viewport top must force fallback"
+        );
+
+        let mut not_pure_insertion = new_lines.clone();
+        not_pure_insertion[4] = format!("line-2-mutated{}", super::SEGMENT_RESET);
+        assert!(
+            super::compute_insert_before_fast_path_eligibility(
+                &previous_lines,
+                &not_pure_insertion,
+                &new_line_is_image,
+                20,
+                20,
+                3,
+                3,
+                previous_lines.len(),
+                5,
+                false,
+            )
+            .is_none(),
+            "non-insertion diffs must force fallback"
+        );
+
+        let mut new_line_is_image = vec![false; new_lines.len()];
+        new_line_is_image[0] = true;
+        assert!(
+            super::compute_insert_before_fast_path_eligibility(
+                &previous_lines,
+                &new_lines,
+                &new_line_is_image,
+                20,
+                20,
+                3,
+                3,
+                previous_lines.len(),
+                5,
+                false,
+            )
+            .is_none(),
+            "image lines must force fallback"
+        );
+
+        assert!(
+            super::compute_insert_before_fast_path_eligibility(
+                &previous_lines,
+                &new_lines,
+                &vec![false; new_lines.len()],
+                20,
+                20,
+                3,
+                3,
+                previous_lines.len(),
+                5,
+                true,
+            )
+            .is_none(),
+            "surface compositing must force fallback"
+        );
     }
 
     #[test]
