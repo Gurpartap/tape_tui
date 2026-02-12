@@ -12,6 +12,8 @@ This crate started as a Rust port of the TypeScript `pi-tui` library and has sin
 - **Deterministic output** via a single terminal output gate (`OutputGate::flush(..)`)
 - ANSI **diff renderer** (fast repaints without clearing the whole screen)
 - **Surface stack** (drawers/modals/toasts/etc.) with explicit input routing policies
+- Deterministic capture-first bubbling (`Consumed`/`Ignored`) with focused/root fallback
+- Runtime-owned inline viewport state (tail anchor + resize clamp)
 - Structured input events (Kitty keyboard protocol + legacy fallbacks)
 - IME/hardware cursor placement via `cursor_pos()` or `CURSOR_MARKER`
 - Crash-safe teardown on Unix (signal + panic cleanup)
@@ -35,6 +37,8 @@ The runtime is explicitly driven by your code:
 - `run_blocking_once()` waits for work (input/resize/commands), then renders **at most once**
 - `render_now()` is an explicit immediate repaint escape hatch
 
+Inline viewport anchoring/clamp state is runtime-owned (tail-follow by default). Resize events recompute the viewport window deterministically before the next render pass.
+
 ### Components (retained mode)
 
 Implement `Component` to create custom UI elements. Components:
@@ -51,7 +55,7 @@ Surfaces are managed layers shown above the root component (drawers/modals/toast
 - a `SurfaceInputPolicy` (`Capture` or `Passthrough`) for deterministic routing
 - a `SurfaceHandle` used to hide/show/close/update options
 
-Legacy overlay APIs (`show_overlay`) remain for compatibility.
+Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root). Legacy overlay APIs (`show_overlay`) remain for compatibility.
 
 ### Single output gate (invariant)
 
