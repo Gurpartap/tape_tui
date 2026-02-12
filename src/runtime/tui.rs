@@ -53,6 +53,12 @@ impl CoalesceBudget {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchResult {
+    Consumed,
+    Ignored,
+}
+
 #[derive(Debug, Default)]
 struct CrashCleanup {
     ran: AtomicBool,
@@ -1396,7 +1402,6 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
 
-        let mut handled = false;
         let Some(target_id) = self.active_input_target() else {
             return;
         };
@@ -1407,8 +1412,10 @@ impl<T: Terminal> TuiRuntime<T> {
             }
             return;
         };
+
+        let mut dispatch_result = DispatchResult::Ignored;
         for event in events {
-            if let InputEvent::Key {
+            let event_result = if let InputEvent::Key {
                 key_id, event_type, ..
             } = &event
             {
@@ -1416,18 +1423,24 @@ impl<T: Terminal> TuiRuntime<T> {
                     if let Some(handler) = self.on_debug.as_mut() {
                         handler();
                     }
-                    continue;
+                    DispatchResult::Ignored
+                } else if *event_type == KeyEventType::Release && !component.wants_key_release() {
+                    DispatchResult::Ignored
+                } else {
+                    component.handle_event(&event);
+                    DispatchResult::Consumed
                 }
-                if *event_type == KeyEventType::Release && !component.wants_key_release() {
-                    continue;
-                }
-            }
+            } else {
+                component.handle_event(&event);
+                DispatchResult::Consumed
+            };
 
-            component.handle_event(&event);
-            handled = true;
+            if event_result == DispatchResult::Consumed {
+                dispatch_result = DispatchResult::Consumed;
+            }
         }
 
-        if handled {
+        if dispatch_result == DispatchResult::Consumed {
             self.request_render();
         }
     }
