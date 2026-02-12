@@ -23,8 +23,8 @@ use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::ime::position_hardware_cursor;
 use crate::runtime::inline_viewport::InlineViewportState;
 use crate::runtime::surface::{
-    SurfaceEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions, SurfaceRenderEntry,
-    SurfaceState,
+    SurfaceEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceMutation, SurfaceOptions,
+    SurfaceRenderEntry, SurfaceState,
 };
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
@@ -728,7 +728,12 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
         if self.components.get_mut(component_id).is_none() {
             return Err(CustomCommandError::MissingComponentId(component_id));
         }
-        if self.apply_show_surface(surface_id, component_id, options, hidden) {
+        if self.apply_surface_mutation(SurfaceMutation::Show {
+            surface_id,
+            component_id,
+            options,
+            hidden,
+        }) {
             Ok(true)
         } else {
             Err(CustomCommandError::InvalidState(
@@ -741,7 +746,7 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
         if !self.surfaces.contains(surface_id) {
             return Err(CustomCommandError::MissingSurfaceId(surface_id));
         }
-        if self.apply_hide_surface(surface_id) {
+        if self.apply_surface_mutation(SurfaceMutation::Hide { surface_id }) {
             Ok(true)
         } else {
             Err(CustomCommandError::InvalidState(
@@ -758,7 +763,7 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
         if !self.surfaces.contains(surface_id) {
             return Err(CustomCommandError::MissingSurfaceId(surface_id));
         }
-        if self.apply_set_surface_hidden(surface_id, hidden) {
+        if self.apply_surface_mutation(SurfaceMutation::SetHidden { surface_id, hidden }) {
             Ok(true)
         } else {
             Err(CustomCommandError::InvalidState(
@@ -775,7 +780,10 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
         if !self.surfaces.contains(surface_id) {
             return Err(CustomCommandError::MissingSurfaceId(surface_id));
         }
-        if self.apply_update_surface_options(surface_id, options) {
+        if self.apply_surface_mutation(SurfaceMutation::UpdateOptions {
+            surface_id,
+            options,
+        }) {
             Ok(true)
         } else {
             Err(CustomCommandError::InvalidState(
@@ -1697,17 +1705,24 @@ impl<T: Terminal> TuiRuntime<T> {
                     options,
                     hidden,
                 } => {
-                    if self.apply_show_surface(surface_id, component, options, hidden) {
+                    if self.apply_surface_mutation(SurfaceMutation::Show {
+                        surface_id,
+                        component_id: component,
+                        options,
+                        hidden,
+                    }) {
                         render_requested = true;
                     }
                 }
                 Command::HideSurface(surface_id) => {
-                    if self.apply_hide_surface(surface_id) {
+                    if self.apply_surface_mutation(SurfaceMutation::Hide { surface_id }) {
                         render_requested = true;
                     }
                 }
                 Command::SetSurfaceHidden { surface_id, hidden } => {
-                    if self.apply_set_surface_hidden(surface_id, hidden) {
+                    if self
+                        .apply_surface_mutation(SurfaceMutation::SetHidden { surface_id, hidden })
+                    {
                         render_requested = true;
                     }
                 }
@@ -1715,7 +1730,10 @@ impl<T: Terminal> TuiRuntime<T> {
                     surface_id,
                     options,
                 } => {
-                    if self.apply_update_surface_options(surface_id, options) {
+                    if self.apply_surface_mutation(SurfaceMutation::UpdateOptions {
+                        surface_id,
+                        options,
+                    }) {
                         render_requested = true;
                     }
                 }
@@ -1863,6 +1881,25 @@ impl<T: Terminal> TuiRuntime<T> {
         self.input_buffer.clear();
         self.cell_size_query_pending = false;
         Some(result)
+    }
+
+    fn apply_surface_mutation(&mut self, mutation: SurfaceMutation) -> bool {
+        match mutation {
+            SurfaceMutation::Show {
+                surface_id,
+                component_id,
+                options,
+                hidden,
+            } => self.apply_show_surface(surface_id, component_id, options, hidden),
+            SurfaceMutation::Hide { surface_id } => self.apply_hide_surface(surface_id),
+            SurfaceMutation::SetHidden { surface_id, hidden } => {
+                self.apply_set_surface_hidden(surface_id, hidden)
+            }
+            SurfaceMutation::UpdateOptions {
+                surface_id,
+                options,
+            } => self.apply_update_surface_options(surface_id, options),
+        }
     }
 
     fn apply_show_surface(

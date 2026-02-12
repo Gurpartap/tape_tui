@@ -369,6 +369,28 @@ impl From<&SurfaceOptions> for SurfaceLayoutOptions {
     }
 }
 
+/// Internal ordered lifecycle mutation applied to runtime-managed surfaces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SurfaceMutation {
+    Show {
+        surface_id: SurfaceId,
+        component_id: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    },
+    Hide {
+        surface_id: SurfaceId,
+    },
+    SetHidden {
+        surface_id: SurfaceId,
+        hidden: bool,
+    },
+    UpdateOptions {
+        surface_id: SurfaceId,
+        options: Option<SurfaceOptions>,
+    },
+}
+
 /// Runtime-owned surface entry.
 #[derive(Clone, Copy)]
 pub(crate) struct SurfaceEntry {
