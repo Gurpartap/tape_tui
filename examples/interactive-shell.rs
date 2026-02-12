@@ -793,7 +793,6 @@ struct SessionSnapshot {
 #[derive(Default)]
 struct DashboardState {
     action: Option<DashboardAction>,
-    overlay_active: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -908,11 +907,6 @@ impl Component for SessionDashboard {
             .iter()
             .filter(|task| task.state == TaskState::Done)
             .count();
-        let active_overlay = if self.state.borrow().overlay_active {
-            green("overlay on")
-        } else {
-            dim("overlay off")
-        };
 
         let title = bold(&cyan("Interactive Shell Lab"));
         let stats = format!(
@@ -922,7 +916,7 @@ impl Component for SessionDashboard {
             dim(&format!("running: {running}")),
             dim(&format!("done: {done}"))
         );
-        let header = format!("{title}  {stats}  {active_overlay}");
+        let header = format!("{title}  {stats}");
         lines.push(pad_to_width(&header, width));
         lines.push(dim(&line_rule(width, '─')));
         lines.push(pad_to_width(
@@ -1063,10 +1057,6 @@ impl Component for SessionDashboard {
     }
 
     fn handle_event(&mut self, event: &InputEvent) {
-        if self.state.borrow().overlay_active {
-            return;
-        }
-
         let snapshot = {
             let store = self.store.lock().expect("session store lock poisoned");
             store.snapshot()
@@ -1156,7 +1146,7 @@ struct InteractiveOverlay {
     autoscroll: bool,
     last_output_len: usize,
     focused: bool,
-    terminal_rows: usize,
+    viewport_rows: usize,
     show_menu: bool,
 }
 
@@ -1175,7 +1165,7 @@ impl InteractiveOverlay {
             autoscroll: true,
             last_output_len: 0,
             focused: false,
-            terminal_rows: 0,
+            viewport_rows: 0,
             show_menu: false,
         }
     }
@@ -1338,8 +1328,7 @@ impl Component for InteractiveOverlay {
             }
         }
 
-        let overlay_rows =
-            ((self.terminal_rows as f32) * OVERLAY_HEIGHT_PERCENT / 100.0).floor() as usize;
+        let overlay_rows = self.viewport_rows.max(8);
         let border_lines = 2usize;
         let header_lines = 4usize;
         let footer_lines = if self.show_menu { 4 } else { 3 };
@@ -1546,9 +1535,11 @@ impl Component for InteractiveOverlay {
         None
     }
 
-    fn set_terminal_rows(&mut self, rows: usize) {
-        self.terminal_rows = rows;
+    fn set_viewport_size(&mut self, _cols: usize, rows: usize) {
+        self.viewport_rows = rows;
     }
+
+    fn set_terminal_rows(&mut self, _rows: usize) {}
 
     fn as_focusable(&mut self) -> Option<&mut dyn Focusable> {
         Some(self)
@@ -1782,7 +1773,6 @@ fn main() -> std::io::Result<()> {
                     handle.hide();
                 }
                 overlay_signals = None;
-                dashboard_state.borrow_mut().overlay_active = false;
                 tui.request_render();
             }
         }
@@ -1813,9 +1803,6 @@ fn main() -> std::io::Result<()> {
                         let handle = tui.show_surface(surface_id, Some(overlay_surface_options()));
                         overlay_handle = Some(handle);
                         overlay_signals = Some(signals);
-                        dashboard_state.borrow_mut().overlay_active = true;
-                    } else {
-                        dashboard_state.borrow_mut().overlay_active = false;
                     }
                     tui.request_render();
                 }
@@ -1839,7 +1826,6 @@ fn main() -> std::io::Result<()> {
                         let handle = tui.show_surface(surface_id, Some(overlay_surface_options()));
                         overlay_handle = Some(handle);
                         overlay_signals = Some(signals);
-                        dashboard_state.borrow_mut().overlay_active = true;
                         tui.request_render();
                     }
                 }
@@ -1987,16 +1973,15 @@ mod tests {
         let mut overlay =
             InteractiveOverlay::new(Arc::clone(&store), session_id, Rc::clone(&signals));
 
-        let body_height_for_rows = |rows: usize| {
-            let overlay_rows = ((rows as f32) * OVERLAY_HEIGHT_PERCENT / 100.0).floor() as usize;
+        let body_height_for_viewport = |rows: usize| {
             let border_lines = 2usize;
             let header_lines = 4usize;
             let footer_lines = 3usize;
             let chrome = border_lines + header_lines + footer_lines + 1;
-            overlay_rows.saturating_sub(chrome).max(4)
+            rows.saturating_sub(chrome).max(4)
         };
 
-        overlay.set_terminal_rows(24);
+        overlay.set_viewport_size(80, 24);
         overlay.render(80);
         for _ in 0..8 {
             assert!(overlay.handle_control("shift+up"));
@@ -2004,7 +1989,7 @@ mod tests {
         overlay.render(80);
         assert!(overlay.scroll_offset > 0);
 
-        overlay.set_terminal_rows(80);
+        overlay.set_viewport_size(80, 80);
         overlay.render(80);
         let max_offset_large = {
             let locked = store.lock().expect("session store lock poisoned");
@@ -2013,11 +1998,11 @@ mod tests {
                 .expect("session should exist")
                 .output
                 .len();
-            output_len.saturating_sub(body_height_for_rows(80))
+            output_len.saturating_sub(body_height_for_viewport(80))
         };
         assert!(overlay.scroll_offset <= max_offset_large);
 
-        overlay.set_terminal_rows(8);
+        overlay.set_viewport_size(80, 8);
         overlay.render(80);
         let max_offset_small = {
             let locked = store.lock().expect("session store lock poisoned");
@@ -2026,7 +2011,7 @@ mod tests {
                 .expect("session should exist")
                 .output
                 .len();
-            output_len.saturating_sub(body_height_for_rows(8))
+            output_len.saturating_sub(body_height_for_viewport(8))
         };
         assert!(overlay.scroll_offset <= max_offset_small);
         assert_eq!(signals.borrow_mut().take_reason(), None);
@@ -2068,31 +2053,33 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_does_not_leak_attach_input_when_overlay_active() {
+    fn dashboard_shortcuts_work_without_overlay_flag_state() {
         let store = Arc::new(Mutex::new(SessionStore::new()));
         {
             let mut locked = store.lock().expect("session store lock poisoned");
             locked.create_session(SessionMode::Interactive);
         }
 
-        let state = Rc::new(RefCell::new(DashboardState {
-            action: None,
-            overlay_active: true,
-        }));
+        let state = Rc::new(RefCell::new(DashboardState::default()));
         let exit_flag = Rc::new(RefCell::new(false));
         let mut dashboard = SessionDashboard::new(Arc::clone(&store), Rc::clone(&state), exit_flag);
 
-        dashboard.handle_event(&InputEvent::Key {
-            raw: "\r".to_string(),
-            key_id: "enter".to_string(),
-            event_type: KeyEventType::Press,
-        });
         dashboard.handle_event(&InputEvent::Text {
             raw: "n".to_string(),
             text: "n".to_string(),
             event_type: KeyEventType::Press,
         });
+        assert_eq!(
+            state.borrow().action,
+            Some(DashboardAction::NewSession(SessionMode::Interactive))
+        );
 
-        assert_eq!(state.borrow().action, None);
+        state.borrow_mut().action = None;
+        dashboard.handle_event(&InputEvent::Text {
+            raw: "t".to_string(),
+            text: "t".to_string(),
+            event_type: KeyEventType::Press,
+        });
+        assert_eq!(state.borrow().action, Some(DashboardAction::NewTask));
     }
 }
