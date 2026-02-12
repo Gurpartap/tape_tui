@@ -142,7 +142,7 @@ fn toast_options() -> SurfaceOptions {
 }
 
 #[test]
-fn small_terminal_lane_budget_baseline_matches_current_single_pass_behavior() {
+fn small_terminal_two_pass_allocation_clamps_late_lanes_to_zero_budget() {
     let terminal = HarnessTerminal::new(9, 3);
     let probe_terminal = terminal.clone();
     let mut runtime = TUI::new(terminal);
@@ -190,8 +190,8 @@ fn small_terminal_lane_budget_baseline_matches_current_single_pass_behavior() {
     runtime.stop().expect("runtime stop");
 
     assert_eq!(current_calls(&toast_a_calls), vec![(8, 3)]);
-    assert_eq!(current_calls(&toast_b_calls), vec![(8, 2)]);
-    assert_eq!(current_calls(&drawer_calls), vec![(8, 1)]);
+    assert_eq!(current_calls(&toast_b_calls), vec![(8, 0)]);
+    assert_eq!(current_calls(&drawer_calls), vec![(8, 0)]);
 }
 
 #[test]
@@ -231,7 +231,8 @@ fn hidden_surfaces_are_excluded_from_budget_until_shown_again() {
     runtime.run_once();
     runtime.stop().expect("runtime stop");
 
-    assert_eq!(current_calls(&hidden_calls), vec![(8, 3)]);
+    assert_eq!(current_calls(&hidden_calls), vec![(8, 0)]);
+    assert_eq!(current_calls(&visible_calls), vec![(8, 4), (8, 4)]);
 }
 
 #[test]

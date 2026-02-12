@@ -24,9 +24,11 @@ use crate::runtime::ime::position_hardware_cursor;
 use crate::runtime::inline_viewport::InlineViewportState;
 use crate::runtime::surface::{
     allocate_surface_budgets, measure_visible_surfaces, SurfaceAllocation, SurfaceEntry,
-    SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceMeasurement, SurfaceMutation,
-    SurfaceOptions, SurfaceRenderEntry, SurfaceState,
+    SurfaceId, SurfaceInputPolicy, SurfaceMeasurement, SurfaceMutation, SurfaceOptions,
+    SurfaceRenderEntry, SurfaceState,
 };
+#[cfg(test)]
+use crate::runtime::surface::SurfaceKind;
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
@@ -2522,18 +2524,25 @@ impl<T: Terminal> TuiRuntime<T> {
         let measured_entries = self.measured_visible_surface_snapshot(width, height);
         let mut rendered: Vec<(RenderedSurface, Option<CursorPos>)> = Vec::new();
 
-        let mut reserved_top = 0usize;
-        let mut reserved_bottom = 0usize;
+        for (entry, measurement, allocation) in measured_entries {
+            debug_assert_eq!(measurement.kind, allocation.kind);
+            debug_assert_eq!(measurement.lane, allocation.lane);
+            debug_assert_eq!(measurement.stack_index, allocation.stack_index);
 
-        for (entry, measurement, _allocation) in measured_entries {
             let surface_options = entry.options.unwrap_or_default();
-            let layout_options =
-                surface_options.with_lane_reservations(reserved_top, reserved_bottom);
+            let mut layout_options =
+                surface_options.with_lane_reservations(allocation.reserved_top, allocation.reserved_bottom);
+            layout_options.width = Some(crate::runtime::surface::SurfaceSizeValue::absolute(
+                allocation.allocated_width,
+            ));
+            layout_options.max_height = Some(crate::runtime::surface::SurfaceSizeValue::absolute(
+                allocation.allocated_rows,
+            ));
+
             let render_options = Some(crate::render::surface::SurfaceOptions::from(
                 &layout_options,
             ));
 
-            let layout = resolve_surface_layout(render_options.as_ref(), 0, width, height);
             let Some(component) = self.components.get_mut(entry.component_id) else {
                 debug_assert!(
                     false,
@@ -2544,31 +2553,26 @@ impl<T: Terminal> TuiRuntime<T> {
             };
 
             component.set_terminal_rows(height);
-            let viewport_rows = layout.max_height.unwrap_or(height);
-            component.set_viewport_size(layout.width, viewport_rows);
-            let mut surface_lines = component.render(layout.width);
+            component.set_viewport_size(allocation.allocated_width, allocation.allocated_rows);
+
+            let mut surface_lines = if allocation.allocated_rows == 0 {
+                Vec::new()
+            } else {
+                component.render(allocation.allocated_width)
+            };
             let mut cursor_pos = component.cursor_pos();
-            if let Some(max_height) = layout.max_height {
-                if surface_lines.len() > max_height {
-                    surface_lines.truncate(max_height);
-                }
+
+            if surface_lines.len() > allocation.allocated_rows {
+                surface_lines.truncate(allocation.allocated_rows);
             }
             if let Some(pos) = cursor_pos {
-                if pos.row >= surface_lines.len() {
+                if pos.row >= surface_lines.len() || pos.col >= allocation.allocated_width {
                     cursor_pos = None;
                 }
             }
+
             let final_layout =
                 resolve_surface_layout(render_options.as_ref(), surface_lines.len(), width, height);
-
-            let lane_height = surface_lines.len();
-            apply_lane_reservations(
-                measurement.kind,
-                lane_height,
-                height,
-                &mut reserved_top,
-                &mut reserved_bottom,
-            );
 
             rendered.push((
                 RenderedSurface {
@@ -2681,6 +2685,7 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 }
 
+#[cfg(test)]
 fn apply_lane_reservations(
     kind: SurfaceKind,
     lane_height: usize,
@@ -6108,7 +6113,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_terminal_toast_lane_compositing_preserves_transcript_prefix_order() {
+    fn tiny_terminal_toast_lane_compositing_clamps_second_toast_when_budget_is_exhausted() {
         let terminal = TestTerminal::new(12, 2);
         let root_component = StaticLinesComponent {
             lines: vec![
@@ -6149,7 +6154,11 @@ mod tests {
         assert_eq!(composited[0], "root-0");
         assert_eq!(composited[1], "root-1");
         assert!(composited[2].contains("toast-a"), "{composited:?}");
-        assert!(composited[3].contains("toast-b"), "{composited:?}");
+        assert_eq!(composited[3], "root-3");
+        assert!(
+            !composited.iter().any(|line| line.contains("toast-b")),
+            "expected second toast to receive zero budget in constrained terminal, got: {composited:?}"
+        );
     }
 
     #[test]
@@ -6239,7 +6248,7 @@ mod tests {
     }
 
     #[test]
-    fn surface_toast_lane_stacks_from_top_without_mutating_transcript_order() {
+    fn surface_toast_lane_clamps_late_toasts_when_first_toast_consumes_lane_budget() {
         let terminal = TestTerminal::new(40, 6);
         let root_component = StaticLinesComponent {
             lines: vec![
@@ -6281,12 +6290,14 @@ mod tests {
             composited[0]
         );
         assert!(
-            composited[1].contains("toast-b"),
-            "expected second toast stacked below first, got: {:?}",
-            composited[1]
+            !composited.iter().any(|line| line.contains("toast-b")),
+            "expected later toast to receive zero lane budget, got: {:?}",
+            composited
         );
         assert!(
-            composited[2].contains("root-2") || composited[2].contains("root-0"),
+            composited.iter().any(|line| line.contains("root-0")
+                || line.contains("root-1")
+                || line.contains("root-2")),
             "expected transcript content to remain present after toast compositing, got: {:?}",
             composited
         );
