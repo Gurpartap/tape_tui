@@ -61,7 +61,7 @@ via `SurfaceHandle`. Background threads can enqueue equivalent mutations through
 
 Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root).
 
-Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers).
+Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers). Internally, geometry resolution and compositing are surface-native (`render::surface`) with no overlay compatibility layer.
 
 ### Single output gate (invariant)
 
