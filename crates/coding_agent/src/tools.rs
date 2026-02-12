@@ -352,8 +352,12 @@ fn truncate_to_byte_limit(content: String, max_bytes: usize) -> String {
         return content;
     }
 
-    let mut truncated = content;
-    truncated.truncate(max_bytes);
+    let mut cutoff = max_bytes.min(content.len());
+    while cutoff > 0 && !content.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+
+    let mut truncated = content[..cutoff].to_string();
     truncated.push_str("\n[truncated]");
     truncated
 }
