@@ -5237,8 +5237,185 @@ mod tests {
         };
 
         let baseline = snapshot();
-        let rerun = snapshot();
-        assert_eq!(rerun, baseline);
+        for _ in 1..20 {
+            let rerun = snapshot();
+            assert_eq!(rerun, baseline);
+        }
+    }
+
+    #[test]
+    fn surface_transaction_hidden_visible_capture_transitions_remain_deterministic_on_small_terminal(
+    ) {
+        let terminal = TestTerminal::new(8, 4);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_component_id = runtime.register_component(surface_component);
+
+        let surface_id = runtime.runtime_handle().alloc_surface_id();
+        runtime.surface_transaction(vec![
+            SurfaceTransactionMutation::Show {
+                surface_id,
+                component: surface_component_id,
+                options: Some(SurfaceOptions {
+                    input_policy: SurfaceInputPolicy::Capture,
+                    kind: SurfaceKind::Modal,
+                    layout: SurfaceLayoutOptions {
+                        visibility: SurfaceVisibility::MinCols(6),
+                        ..Default::default()
+                    },
+                }),
+                hidden: false,
+            },
+            SurfaceTransactionMutation::UpdateOptions {
+                surface_id,
+                options: Some(SurfaceOptions {
+                    input_policy: SurfaceInputPolicy::Capture,
+                    kind: SurfaceKind::Modal,
+                    layout: SurfaceLayoutOptions {
+                        visibility: SurfaceVisibility::MinCols(20),
+                        ..Default::default()
+                    },
+                }),
+            },
+            SurfaceTransactionMutation::UpdateOptions {
+                surface_id,
+                options: Some(SurfaceOptions {
+                    input_policy: SurfaceInputPolicy::Capture,
+                    kind: SurfaceKind::Modal,
+                    layout: SurfaceLayoutOptions {
+                        visibility: SurfaceVisibility::MinCols(6),
+                        ..Default::default()
+                    },
+                }),
+            },
+            SurfaceTransactionMutation::SetHidden {
+                surface_id,
+                hidden: true,
+            },
+            SurfaceTransactionMutation::SetHidden {
+                surface_id,
+                hidden: false,
+            },
+            SurfaceTransactionMutation::UpdateOptions {
+                surface_id,
+                options: Some(SurfaceOptions {
+                    input_policy: SurfaceInputPolicy::Passthrough,
+                    kind: SurfaceKind::Corner,
+                    layout: SurfaceLayoutOptions {
+                        visibility: SurfaceVisibility::MinCols(6),
+                        ..Default::default()
+                    },
+                }),
+            },
+        ]);
+        runtime.run_once();
+
+        assert_eq!(runtime.surfaces.entries.len(), 1);
+        assert!(!runtime.surfaces.entries[0].hidden);
+        assert_eq!(
+            runtime.surfaces.entries[0].input_policy(),
+            SurfaceInputPolicy::Passthrough
+        );
+        assert!(*root_focus.borrow());
+        assert!(!*surface_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        runtime.handle_input("k");
+
+        assert_eq!(root_inputs.borrow().as_slice(), &["k".to_string()]);
+        assert!(surface_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn surface_transaction_mixed_valid_invalid_diagnostics_stay_stable_over_replay() {
+        let snapshot = || {
+            let mut id_source_runtime = TuiRuntime::new(TestTerminal::default());
+            let _ = id_source_runtime.register_component(DummyComponent::default());
+            let _ = id_source_runtime.register_component(DummyComponent::default());
+            let missing_component_id =
+                id_source_runtime.register_component(DummyComponent::default());
+
+            let terminal = TestTerminal::new(9, 3);
+            let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+
+            let diagnostics = Rc::new(RefCell::new(Vec::<String>::new()));
+            let sink = Rc::clone(&diagnostics);
+            runtime.set_on_diagnostic(Some(Box::new(move |message| {
+                sink.borrow_mut().push(message.to_string());
+            })));
+
+            runtime.start().expect("runtime start");
+            runtime.render_if_needed();
+
+            let valid_component = runtime.register_component(DummyComponent::default());
+            let valid_surface_id = SurfaceId::from_raw(701);
+            let missing_surface_id = SurfaceId::from_raw(4999);
+
+            runtime.surface_transaction(vec![
+                SurfaceTransactionMutation::Show {
+                    surface_id: valid_surface_id,
+                    component: missing_component_id,
+                    options: None,
+                    hidden: false,
+                },
+                SurfaceTransactionMutation::Hide {
+                    surface_id: missing_surface_id,
+                },
+                SurfaceTransactionMutation::Show {
+                    surface_id: valid_surface_id,
+                    component: valid_component,
+                    options: None,
+                    hidden: false,
+                },
+                SurfaceTransactionMutation::UpdateOptions {
+                    surface_id: missing_surface_id,
+                    options: None,
+                },
+            ]);
+            runtime.run_once();
+
+            let diagnostics = diagnostics.borrow().clone();
+            let surfaces = runtime
+                .surfaces
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.id.raw(),
+                        entry.component_id.raw(),
+                        entry.hidden,
+                        entry.input_policy(),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            (diagnostics, surfaces)
+        };
+
+        let baseline = snapshot();
+        assert_eq!(baseline.0.len(), 3);
+        assert_eq!(baseline.1.len(), 1);
+        assert!(baseline.0[0].contains("mutation[0]"));
+        assert!(baseline.0[1].contains("mutation[1]"));
+        assert!(baseline.0[2].contains("mutation[3]"));
+
+        for _ in 1..20 {
+            let rerun = snapshot();
+            assert_eq!(rerun, baseline);
+        }
     }
 
     #[test]
