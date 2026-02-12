@@ -29,7 +29,7 @@ This crate started as a Rust port of the TypeScript `pi-tui` library and has sin
 
 ### Runtime (`TUI`)
 
-`TUI<T>` is an alias for `runtime::tui::TuiRuntime<T>`. It owns the terminal backend, input parsing, render scheduling, diff rendering, focus/cursor management, and the surface/overlay stack.
+`TUI<T>` is an alias for `runtime::tui::TuiRuntime<T>`. It owns the terminal backend, input parsing, render scheduling, diff rendering, focus/cursor management, and the surface stack.
 
 The runtime is explicitly driven by your code:
 
@@ -55,7 +55,9 @@ Surfaces are managed layers shown above the root component (drawers/modals/toast
 - a `SurfaceInputPolicy` (`Capture` or `Passthrough`) for deterministic routing
 - a `SurfaceHandle` used to hide/show/close/update options
 
-Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root). Legacy overlay APIs (`show_overlay`) remain for compatibility.
+Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root).
+
+Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers).
 
 ### Single output gate (invariant)
 
