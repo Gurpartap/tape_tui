@@ -160,6 +160,8 @@ fn surface_options(input_policy: SurfaceInputPolicy) -> SurfaceOptions {
     }
 }
 
+const SOAK_RUNS: usize = 20;
+
 fn contains_subsequence(trace: &[bool], expected: &[bool]) -> bool {
     if expected.is_empty() {
         return true;
@@ -311,4 +313,327 @@ fn focus_handoff_baseline_remains_stable_across_hide_show_cycles() {
         "expected root focus to regain focus after all surfaces are hidden, got: {:?}",
         root_focus
     );
+}
+
+#[test]
+fn visible_capture_reorder_switches_input_precedence_deterministically() {
+    let terminal = HarnessTerminal::new(20, 5);
+    let probe_terminal = terminal.clone();
+    let mut runtime = TUI::new(terminal);
+
+    runtime.start().expect("start runtime");
+    probe_terminal.take_writes();
+
+    let root_state = ProbeState::new();
+    let root_id = runtime.register_component(ProbeComponent::new("root", root_state.clone()));
+    runtime.set_root(vec![root_id]);
+    runtime.set_focus(root_id);
+
+    let surface_a_state = ProbeState::new();
+    let surface_a_component =
+        runtime.register_component(ProbeComponent::new("surface-a", surface_a_state.clone()));
+    let surface_a = runtime.show_surface(
+        surface_a_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    let surface_b_state = ProbeState::new();
+    let surface_b_component =
+        runtime.register_component(ProbeComponent::new("surface-b", surface_b_state.clone()));
+    let surface_b = runtime.show_surface(
+        surface_b_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    runtime.run_once();
+    probe_terminal.take_writes();
+
+    runtime.handle_input("1");
+    runtime.render_if_needed();
+
+    surface_b.lower();
+    runtime.run_once();
+    runtime.handle_input("2");
+    runtime.render_if_needed();
+
+    surface_b.raise();
+    runtime.run_once();
+    runtime.handle_input("3");
+    runtime.render_if_needed();
+
+    runtime.stop().expect("stop runtime");
+
+    assert_eq!(
+        surface_b_state.events(),
+        vec!["text:1".to_string(), "text:3".to_string()]
+    );
+    assert_eq!(surface_a_state.events(), vec!["text:2".to_string()]);
+    assert!(root_state.events().is_empty());
+
+    assert!(
+        contains_subsequence(&surface_b_state.focus_trace(), &[true, false, true]),
+        "expected visible reorder to hand focus between capture surfaces"
+    );
+    assert!(
+        contains_subsequence(&surface_a_state.focus_trace(), &[true, false]),
+        "expected lower/raise sequence to focus and then unfocus surface-a"
+    );
+
+    let writes = probe_terminal.take_writes();
+    assert!(
+        writes.contains("surface-a") && writes.contains("surface-b"),
+        "expected render transcript to include both capture surfaces: {:?}",
+        writes
+    );
+
+    let _ = surface_a;
+}
+
+#[test]
+fn passthrough_vs_capture_precedence_stays_stable_after_reorder() {
+    let terminal = HarnessTerminal::new(20, 5);
+    let probe_terminal = terminal.clone();
+    let mut runtime = TUI::new(terminal);
+
+    runtime.start().expect("start runtime");
+    probe_terminal.take_writes();
+
+    let root_state = ProbeState::new();
+    let root_id = runtime.register_component(ProbeComponent::new("root", root_state.clone()));
+    runtime.set_root(vec![root_id]);
+    runtime.set_focus(root_id);
+
+    let surface_a_state = ProbeState::new();
+    let surface_a_component =
+        runtime.register_component(ProbeComponent::new("surface-a", surface_a_state.clone()));
+    runtime.show_surface(
+        surface_a_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    let surface_passthrough_state = ProbeState::new();
+    let surface_passthrough_component = runtime.register_component(ProbeComponent::new(
+        "surface-passthrough",
+        surface_passthrough_state.clone(),
+    ));
+    runtime.show_surface(
+        surface_passthrough_component,
+        Some(surface_options(SurfaceInputPolicy::Passthrough)),
+    );
+
+    let surface_c_state = ProbeState::new();
+    let surface_c_component =
+        runtime.register_component(ProbeComponent::new("surface-c", surface_c_state.clone()));
+    let surface_c = runtime.show_surface(
+        surface_c_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    runtime.run_once();
+    probe_terminal.take_writes();
+
+    runtime.handle_input("1");
+    runtime.render_if_needed();
+
+    surface_c.send_to_back();
+    runtime.run_once();
+    runtime.handle_input("2");
+    runtime.render_if_needed();
+
+    surface_c.bring_to_front();
+    runtime.run_once();
+    runtime.handle_input("3");
+    runtime.render_if_needed();
+
+    runtime.stop().expect("stop runtime");
+
+    assert_eq!(
+        surface_c_state.events(),
+        vec!["text:1".to_string(), "text:3".to_string()]
+    );
+    assert_eq!(surface_a_state.events(), vec!["text:2".to_string()]);
+    assert!(
+        surface_passthrough_state.events().is_empty(),
+        "passthrough surface must never capture text input"
+    );
+    assert!(root_state.events().is_empty());
+}
+
+#[test]
+fn hidden_surface_reorder_then_unhide_restores_capture_deterministically() {
+    let terminal = HarnessTerminal::new(20, 5);
+    let probe_terminal = terminal.clone();
+    let mut runtime = TUI::new(terminal);
+
+    runtime.start().expect("start runtime");
+    probe_terminal.take_writes();
+
+    let root_state = ProbeState::new();
+    let root_id = runtime.register_component(ProbeComponent::new("root", root_state.clone()));
+    runtime.set_root(vec![root_id]);
+    runtime.set_focus(root_id);
+
+    let surface_a_state = ProbeState::new();
+    let surface_a_component =
+        runtime.register_component(ProbeComponent::new("surface-a", surface_a_state.clone()));
+    runtime.show_surface(
+        surface_a_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    let surface_b_state = ProbeState::new();
+    let surface_b_component =
+        runtime.register_component(ProbeComponent::new("surface-b", surface_b_state.clone()));
+    let surface_b = runtime.show_surface(
+        surface_b_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    runtime.run_once();
+    probe_terminal.take_writes();
+
+    surface_b.set_hidden(true);
+    runtime.run_once();
+
+    surface_b.send_to_back();
+    runtime.run_once();
+    runtime.handle_input("1");
+    runtime.render_if_needed();
+
+    surface_b.bring_to_front();
+    runtime.run_once();
+    runtime.handle_input("2");
+    runtime.render_if_needed();
+
+    surface_b.set_hidden(false);
+    runtime.run_once();
+    runtime.handle_input("3");
+    runtime.render_if_needed();
+
+    runtime.stop().expect("stop runtime");
+
+    assert_eq!(
+        surface_a_state.events(),
+        vec!["text:1".to_string(), "text:2".to_string()]
+    );
+    assert_eq!(surface_b_state.events(), vec!["text:3".to_string()]);
+    assert!(root_state.events().is_empty());
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReorderDeterminismSnapshot {
+    root_events: Vec<String>,
+    surface_a_events: Vec<String>,
+    surface_b_events: Vec<String>,
+    surface_c_events: Vec<String>,
+    root_focus_trace: Vec<bool>,
+    surface_a_focus_trace: Vec<bool>,
+    surface_b_focus_trace: Vec<bool>,
+    surface_c_focus_trace: Vec<bool>,
+    output: String,
+}
+
+fn run_reorder_determinism_snapshot() -> ReorderDeterminismSnapshot {
+    let terminal = HarnessTerminal::new(24, 6);
+    let probe_terminal = terminal.clone();
+    let mut runtime = TUI::new(terminal);
+
+    runtime.start().expect("start runtime");
+    probe_terminal.take_writes();
+
+    let root_state = ProbeState::new();
+    let root_id = runtime.register_component(ProbeComponent::new("root", root_state.clone()));
+    runtime.set_root(vec![root_id]);
+    runtime.set_focus(root_id);
+
+    let surface_a_state = ProbeState::new();
+    let surface_a_component =
+        runtime.register_component(ProbeComponent::new("surface-a", surface_a_state.clone()));
+    let _surface_a = runtime.show_surface(
+        surface_a_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    let surface_b_state = ProbeState::new();
+    let surface_b_component =
+        runtime.register_component(ProbeComponent::new("surface-b", surface_b_state.clone()));
+    runtime.show_surface(
+        surface_b_component,
+        Some(surface_options(SurfaceInputPolicy::Passthrough)),
+    );
+
+    let surface_c_state = ProbeState::new();
+    let surface_c_component =
+        runtime.register_component(ProbeComponent::new("surface-c", surface_c_state.clone()));
+    let surface_c = runtime.show_surface(
+        surface_c_component,
+        Some(surface_options(SurfaceInputPolicy::Capture)),
+    );
+
+    runtime.run_once();
+    probe_terminal.take_writes();
+
+    runtime.handle_input("0");
+    runtime.render_if_needed();
+
+    surface_c.send_to_back();
+    runtime.run_once();
+    runtime.handle_input("1");
+    runtime.render_if_needed();
+
+    surface_c.bring_to_front();
+    runtime.run_once();
+    runtime.handle_input("2");
+    runtime.render_if_needed();
+
+    surface_c.set_hidden(true);
+    runtime.run_once();
+    surface_c.send_to_back();
+    runtime.run_once();
+    runtime.handle_input("3");
+    runtime.render_if_needed();
+
+    surface_c.set_hidden(false);
+    runtime.run_once();
+    runtime.handle_input("4");
+    runtime.render_if_needed();
+
+    runtime.stop().expect("stop runtime");
+
+    ReorderDeterminismSnapshot {
+        root_events: root_state.events(),
+        surface_a_events: surface_a_state.events(),
+        surface_b_events: surface_b_state.events(),
+        surface_c_events: surface_c_state.events(),
+        root_focus_trace: root_state.focus_trace(),
+        surface_a_focus_trace: surface_a_state.focus_trace(),
+        surface_b_focus_trace: surface_b_state.focus_trace(),
+        surface_c_focus_trace: surface_c_state.focus_trace(),
+        output: probe_terminal.take_writes(),
+    }
+}
+
+#[test]
+fn reorder_sequences_repeat_identically_over_twenty_runs() {
+    let baseline = run_reorder_determinism_snapshot();
+
+    assert_eq!(
+        baseline.surface_c_events,
+        vec![
+            "text:0".to_string(),
+            "text:2".to_string(),
+            "text:4".to_string()
+        ]
+    );
+    assert_eq!(
+        baseline.surface_a_events,
+        vec!["text:1".to_string(), "text:3".to_string()]
+    );
+    assert!(baseline.surface_b_events.is_empty());
+    assert!(baseline.root_events.is_empty());
+
+    for _ in 1..SOAK_RUNS {
+        let rerun = run_reorder_determinism_snapshot();
+        assert_eq!(rerun, baseline);
+    }
 }
