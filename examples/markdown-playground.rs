@@ -7,9 +7,10 @@ use tape_tui::runtime::tui::Command as RuntimeCommand;
 use tape_tui::{
     default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
     EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions,
-    EditorPasteMode, EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme, OverlayAnchor,
-    OverlayHandle, OverlayMargin, OverlayOptions, ProcessTerminal, SelectItem, SelectList,
-    SelectListTheme, SizeValue, TUI,
+    EditorPasteMode, EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme,
+    ProcessTerminal, SelectItem, SelectList, SelectListTheme, SurfaceAnchor, SurfaceHandle,
+    SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions,
+    SurfaceSizeValue, TUI,
 };
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
@@ -458,14 +459,18 @@ impl Component for PlaygroundApp {
     }
 }
 
-fn overlay_options() -> OverlayOptions {
-    OverlayOptions {
-        anchor: Some(OverlayAnchor::Center),
-        margin: Some(OverlayMargin::uniform(2)),
-        width: Some(SizeValue::percent(60.0)),
-        min_width: Some(34),
-        max_height: Some(SizeValue::percent(60.0)),
-        ..Default::default()
+fn palette_surface_options() -> SurfaceOptions {
+    SurfaceOptions {
+        kind: SurfaceKind::Modal,
+        input_policy: SurfaceInputPolicy::Capture,
+        overlay: SurfaceLayoutOptions {
+            anchor: Some(SurfaceAnchor::Center),
+            margin: Some(SurfaceMargin::uniform(2)),
+            width: Some(SurfaceSizeValue::percent(60.0)),
+            min_width: Some(34),
+            max_height: Some(SurfaceSizeValue::percent(60.0)),
+            ..Default::default()
+        },
     }
 }
 
@@ -524,7 +529,7 @@ fn main() -> std::io::Result<()> {
     ));
     tui.set_focus(editor_focus_id);
 
-    let mut palette_handle: Option<OverlayHandle> = None;
+    let mut palette_handle: Option<SurfaceHandle> = None;
 
     tui.start()?;
 
@@ -549,13 +554,17 @@ fn main() -> std::io::Result<()> {
                 handle.hide();
                 tui.request_render();
             } else {
-                let overlay = PaletteOverlay::new(
+                let palette_surface = PaletteOverlay::new(
                     Rc::clone(&palette_state),
                     Rc::clone(&exit_flag),
                     keybindings.clone(),
                 );
-                let overlay_id = tui.register_component(overlay);
-                let handle = render_handle.show_overlay(overlay_id, Some(overlay_options()), false);
+                let surface_id = tui.register_component(palette_surface);
+                let handle = render_handle.show_surface(
+                    surface_id,
+                    Some(palette_surface_options()),
+                    false,
+                );
                 palette_handle = Some(handle);
             }
         }

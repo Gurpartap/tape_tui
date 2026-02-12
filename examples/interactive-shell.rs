@@ -9,8 +9,8 @@ use tape_tui::core::cursor::CURSOR_MARKER;
 use tape_tui::runtime::tui::{Command as RuntimeCommand, RuntimeHandle};
 use tape_tui::{
     truncate_to_width, visible_width, Component, Focusable, InputEvent, KeyEventType,
-    OverlayAnchor, OverlayMargin, OverlayOptions, ProcessTerminal, SizeValue, SurfaceHandle,
-    SurfaceInputPolicy, SurfaceKind, SurfaceOptions, TUI,
+    ProcessTerminal, SurfaceAnchor, SurfaceHandle, SurfaceInputPolicy, SurfaceKind,
+    SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue, TUI,
 };
 
 const MAX_OUTPUT_LINES: usize = 240;
@@ -1556,15 +1556,15 @@ impl Focusable for InteractiveOverlay {
     }
 }
 
-fn overlay_surface_options() -> SurfaceOptions {
+fn session_surface_options() -> SurfaceOptions {
     SurfaceOptions {
         kind: SurfaceKind::Modal,
         input_policy: SurfaceInputPolicy::Capture,
-        overlay: OverlayOptions {
-            anchor: Some(OverlayAnchor::Center),
-            margin: Some(OverlayMargin::uniform(1)),
-            width: Some(SizeValue::percent(OVERLAY_WIDTH_PERCENT)),
-            max_height: Some(SizeValue::percent(OVERLAY_HEIGHT_PERCENT)),
+        overlay: SurfaceLayoutOptions {
+            anchor: Some(SurfaceAnchor::Center),
+            margin: Some(SurfaceMargin::uniform(1)),
+            width: Some(SurfaceSizeValue::percent(OVERLAY_WIDTH_PERCENT)),
+            max_height: Some(SurfaceSizeValue::percent(OVERLAY_HEIGHT_PERCENT)),
             ..Default::default()
         },
     }
@@ -1800,7 +1800,7 @@ fn main() -> std::io::Result<()> {
                         let surface =
                             InteractiveOverlay::new(Arc::clone(&store), id, Rc::clone(&signals));
                         let surface_id = tui.register_component(surface);
-                        let handle = tui.show_surface(surface_id, Some(overlay_surface_options()));
+                        let handle = tui.show_surface(surface_id, Some(session_surface_options()));
                         overlay_handle = Some(handle);
                         overlay_signals = Some(signals);
                     }
@@ -1823,7 +1823,7 @@ fn main() -> std::io::Result<()> {
                         let surface =
                             InteractiveOverlay::new(Arc::clone(&store), id, Rc::clone(&signals));
                         let surface_id = tui.register_component(surface);
-                        let handle = tui.show_surface(surface_id, Some(overlay_surface_options()));
+                        let handle = tui.show_surface(surface_id, Some(session_surface_options()));
                         overlay_handle = Some(handle);
                         overlay_signals = Some(signals);
                         tui.request_render();

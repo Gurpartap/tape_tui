@@ -3737,7 +3737,7 @@ mod tests {
             col: Some(SizeValue::absolute(2)),
             ..Default::default()
         };
-        runtime.show_overlay(overlay_id, Some(options));
+        runtime.show_surface(overlay_id, Some(SurfaceOptions::from(options)));
 
         runtime.run_once();
 
@@ -3792,7 +3792,7 @@ mod tests {
             col: Some(SizeValue::absolute(2)),
             ..Default::default()
         };
-        runtime.show_overlay(overlay_id, Some(options));
+        runtime.show_surface(overlay_id, Some(SurfaceOptions::from(options)));
 
         runtime.run_once();
 
@@ -3840,7 +3840,7 @@ mod tests {
             ..Default::default()
         };
 
-        runtime.show_overlay(overlay_id, Some(options));
+        runtime.show_surface(overlay_id, Some(SurfaceOptions::from(options)));
         runtime.run_once();
 
         assert_eq!(*last.borrow(), Some((10, 3)));
@@ -4017,7 +4017,7 @@ mod tests {
             Rc::clone(&overlay_focus),
         );
         let overlay_id = runtime.register_component(overlay_component);
-        let handle = runtime.show_overlay(overlay_id, None);
+        let handle = runtime.show_surface(overlay_id, None);
         runtime.run_once();
         assert!(*overlay_focus.borrow());
 
@@ -4051,7 +4051,7 @@ mod tests {
             ..Default::default()
         };
 
-        runtime.show_overlay(overlay_id, Some(options));
+        runtime.show_surface(overlay_id, Some(SurfaceOptions::from(options)));
         runtime.run_once();
         assert!(!*overlay_focus.borrow());
 
@@ -4079,7 +4079,7 @@ mod tests {
             TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
         let overlay_id = runtime.register_component(overlay_component);
 
-        let handle = runtime.show_overlay(overlay_id, None);
+        let handle = runtime.show_surface(overlay_id, None);
         runtime.run_once();
 
         handle.set_hidden(true);
@@ -4117,7 +4117,7 @@ mod tests {
             TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
         let overlay_id = runtime.register_component(overlay_component);
 
-        let handle = runtime.show_overlay(overlay_id, None);
+        let handle = runtime.show_surface(overlay_id, None);
         runtime.run_once();
         assert!(*overlay_focus.borrow());
 
@@ -4154,7 +4154,7 @@ mod tests {
             Rc::clone(&overlay_a_focus),
         );
         let overlay_a_id = runtime.register_component(overlay_a_component);
-        runtime.show_overlay(overlay_a_id, None);
+        runtime.show_surface(overlay_a_id, None);
         runtime.run_once();
         assert!(*overlay_a_focus.borrow());
 
@@ -4165,7 +4165,7 @@ mod tests {
             Rc::clone(&overlay_b_focus),
         );
         let overlay_b_id = runtime.register_component(overlay_b_component);
-        let overlay_b_handle = runtime.show_overlay(overlay_b_id, None);
+        let overlay_b_handle = runtime.show_surface(overlay_b_id, None);
         runtime.run_once();
         assert!(*overlay_b_focus.borrow());
 
