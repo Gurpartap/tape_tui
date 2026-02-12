@@ -23,8 +23,9 @@ use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::ime::position_hardware_cursor;
 use crate::runtime::inline_viewport::InlineViewportState;
 use crate::runtime::surface::{
-    measure_visible_surfaces, SurfaceEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind,
-    SurfaceMeasurement, SurfaceMutation, SurfaceOptions, SurfaceRenderEntry, SurfaceState,
+    allocate_surface_budgets, measure_visible_surfaces, SurfaceAllocation, SurfaceEntry,
+    SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceMeasurement, SurfaceMutation,
+    SurfaceOptions, SurfaceRenderEntry, SurfaceState,
 };
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
@@ -2499,10 +2500,17 @@ impl<T: Terminal> TuiRuntime<T> {
         &self,
         width: usize,
         height: usize,
-    ) -> Vec<(SurfaceRenderEntry, SurfaceMeasurement)> {
+    ) -> Vec<(SurfaceRenderEntry, SurfaceMeasurement, SurfaceAllocation)> {
         let entries = self.visible_surface_snapshot();
         let measurements = measure_visible_surfaces(&entries, width, height);
-        entries.into_iter().zip(measurements).collect()
+        let allocations = allocate_surface_budgets(&measurements, width, height);
+
+        entries
+            .into_iter()
+            .zip(measurements)
+            .zip(allocations)
+            .map(|((entry, measurement), allocation)| (entry, measurement, allocation))
+            .collect()
     }
 
     fn composite_surface_lines(
@@ -2517,7 +2525,7 @@ impl<T: Terminal> TuiRuntime<T> {
         let mut reserved_top = 0usize;
         let mut reserved_bottom = 0usize;
 
-        for (entry, measurement) in measured_entries {
+        for (entry, measurement, _allocation) in measured_entries {
             let surface_options = entry.options.unwrap_or_default();
             let layout_options =
                 surface_options.with_lane_reservations(reserved_top, reserved_bottom);

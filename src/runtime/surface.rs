@@ -502,6 +502,70 @@ pub(crate) fn measure_visible_surfaces(
         .collect()
 }
 
+/// Deterministic second-pass allocation output for a measured surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SurfaceAllocation {
+    pub(crate) component_id: ComponentId,
+    pub(crate) stack_index: usize,
+    pub(crate) kind: SurfaceKind,
+    pub(crate) lane: SurfaceLane,
+    pub(crate) reserved_top: usize,
+    pub(crate) reserved_bottom: usize,
+    pub(crate) allocated_width: usize,
+    pub(crate) allocated_rows: usize,
+}
+
+/// Allocate per-surface viewport budgets from measured constraints.
+pub(crate) fn allocate_surface_budgets(
+    measurements: &[SurfaceMeasurement],
+    terminal_cols: usize,
+    terminal_rows: usize,
+) -> Vec<SurfaceAllocation> {
+    let terminal_cols = terminal_cols.max(1);
+    let terminal_rows = terminal_rows.max(1);
+
+    let mut reserved_top = 0usize;
+    let mut reserved_bottom = 0usize;
+
+    measurements
+        .iter()
+        .map(|measurement| {
+            let reserved_top_before = reserved_top;
+            let reserved_bottom_before = reserved_bottom;
+            let available_rows = terminal_rows
+                .saturating_sub(reserved_top_before.saturating_add(reserved_bottom_before));
+
+            let preferred_rows = measurement.preferred_max_height.unwrap_or(available_rows);
+            let allocated_rows = preferred_rows.min(available_rows);
+
+            let allocation = SurfaceAllocation {
+                component_id: measurement.component_id,
+                stack_index: measurement.stack_index,
+                kind: measurement.kind,
+                lane: measurement.lane,
+                reserved_top: reserved_top_before,
+                reserved_bottom: reserved_bottom_before,
+                allocated_width: measurement.preferred_width.clamp(1, terminal_cols),
+                allocated_rows,
+            };
+
+            match measurement.lane {
+                SurfaceLane::Top => {
+                    reserved_top = reserved_top.saturating_add(allocated_rows).min(terminal_rows);
+                }
+                SurfaceLane::Bottom => {
+                    reserved_bottom = reserved_bottom
+                        .saturating_add(allocated_rows)
+                        .min(terminal_rows);
+                }
+                SurfaceLane::Floating => {}
+            }
+
+            allocation
+        })
+        .collect()
+}
+
 fn resolve_measurement_size(value: Option<SurfaceSizeValue>, reference: usize) -> Option<usize> {
     match value {
         None => None,
@@ -624,10 +688,10 @@ pub fn visibility_only_surface_options(visibility: SurfaceVisibility) -> Surface
 #[cfg(test)]
 mod tests {
     use super::{
-        measure_visible_surfaces, surface_options_from_layout, SurfaceAnchor, SurfaceEntry,
-        SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLane, SurfaceLayoutOptions,
-        SurfaceMargin, SurfaceOptions, SurfaceRenderEntry, SurfaceSizeValue, SurfaceState,
-        SurfaceVisibility,
+        allocate_surface_budgets, measure_visible_surfaces, surface_options_from_layout,
+        SurfaceAnchor, SurfaceEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLane,
+        SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceRenderEntry, SurfaceSizeValue,
+        SurfaceState, SurfaceVisibility,
     };
     use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
     use crate::Component;
@@ -717,6 +781,142 @@ mod tests {
         assert_eq!(baseline[3].lane, SurfaceLane::Floating);
         assert_eq!(baseline[3].preferred_width, 30);
         assert_eq!(baseline[3].preferred_max_height, None);
+    }
+
+    #[test]
+    fn allocation_pass_clamps_lane_budgets_under_tiny_terminal_constraints() {
+        let component_ids = build_component_ids(3);
+        let entries = vec![
+            SurfaceRenderEntry {
+                component_id: component_ids[0],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Toast,
+                    layout: SurfaceLayoutOptions {
+                        max_height: Some(SurfaceSizeValue::absolute(8)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[1],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Drawer,
+                    layout: SurfaceLayoutOptions {
+                        max_height: Some(SurfaceSizeValue::absolute(8)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[2],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Modal,
+                    layout: SurfaceLayoutOptions {
+                        max_height: Some(SurfaceSizeValue::absolute(8)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        ];
+
+        let measurements = measure_visible_surfaces(&entries, 20, 3);
+        let allocations = allocate_surface_budgets(&measurements, 20, 3);
+
+        assert_eq!(allocations.len(), 3);
+
+        assert_eq!(allocations[0].lane, SurfaceLane::Top);
+        assert_eq!(allocations[0].reserved_top, 0);
+        assert_eq!(allocations[0].reserved_bottom, 0);
+        assert_eq!(allocations[0].allocated_rows, 3);
+
+        assert_eq!(allocations[1].lane, SurfaceLane::Bottom);
+        assert_eq!(allocations[1].reserved_top, 3);
+        assert_eq!(allocations[1].reserved_bottom, 0);
+        assert_eq!(allocations[1].allocated_rows, 0);
+
+        assert_eq!(allocations[2].lane, SurfaceLane::Floating);
+        assert_eq!(allocations[2].reserved_top, 3);
+        assert_eq!(allocations[2].reserved_bottom, 0);
+        assert_eq!(allocations[2].allocated_rows, 0);
+    }
+
+    #[test]
+    fn allocation_pass_preserves_lane_interaction_order_and_replay_determinism() {
+        let component_ids = build_component_ids(4);
+        let entries = vec![
+            SurfaceRenderEntry {
+                component_id: component_ids[0],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Toast,
+                    layout: SurfaceLayoutOptions {
+                        max_height: Some(SurfaceSizeValue::absolute(2)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[1],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Corner,
+                    layout: SurfaceLayoutOptions {
+                        max_height: Some(SurfaceSizeValue::absolute(99)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[2],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Drawer,
+                    layout: SurfaceLayoutOptions {
+                        max_height: Some(SurfaceSizeValue::absolute(2)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[3],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::AttachmentRow,
+                    layout: SurfaceLayoutOptions {
+                        max_height: Some(SurfaceSizeValue::absolute(2)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+        ];
+
+        let measurements = measure_visible_surfaces(&entries, 30, 4);
+        let baseline = allocate_surface_budgets(&measurements, 30, 4);
+        let rerun = allocate_surface_budgets(&measurements, 30, 4);
+
+        assert_eq!(rerun, baseline);
+        assert_eq!(baseline.len(), 4);
+
+        assert_eq!(baseline[0].lane, SurfaceLane::Top);
+        assert_eq!(baseline[0].allocated_rows, 2);
+
+        assert_eq!(baseline[1].lane, SurfaceLane::Floating);
+        assert_eq!(baseline[1].reserved_top, 2);
+        assert_eq!(baseline[1].reserved_bottom, 0);
+        assert_eq!(baseline[1].allocated_rows, 2);
+
+        assert_eq!(baseline[2].lane, SurfaceLane::Bottom);
+        assert_eq!(baseline[2].reserved_top, 2);
+        assert_eq!(baseline[2].reserved_bottom, 0);
+        assert_eq!(baseline[2].allocated_rows, 2);
+
+        assert_eq!(baseline[3].lane, SurfaceLane::Bottom);
+        assert_eq!(baseline[3].reserved_top, 2);
+        assert_eq!(baseline[3].reserved_bottom, 2);
+        assert_eq!(baseline[3].allocated_rows, 0);
     }
 
     #[test]
