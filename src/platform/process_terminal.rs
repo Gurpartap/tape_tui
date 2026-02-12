@@ -223,7 +223,7 @@ pub struct ProcessTerminal {
 #[cfg(unix)]
 impl ProcessTerminal {
     pub fn new() -> Self {
-        let write_log_path = match env::var_os("PI_TUI_WRITE_LOG") {
+        let write_log_path = match env::var_os("tape_tui_WRITE_LOG") {
             Some(value) if !value.is_empty() => Some(PathBuf::from(value)),
             _ => None,
         };
@@ -1601,7 +1601,11 @@ mod tests {
         assert_eq!(first, "\x1b[97u");
 
         let _ = unsafe {
-            libc::write(pty.master, b"3ux".as_ptr() as *const libc::c_void, b"3ux".len())
+            libc::write(
+                pty.master,
+                b"3ux".as_ptr() as *const libc::c_void,
+                b"3ux".len(),
+            )
         };
 
         let second = rx

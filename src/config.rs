@@ -14,11 +14,11 @@ pub struct EnvConfig {
 impl EnvConfig {
     pub fn from_env() -> Self {
         Self {
-            hardware_cursor: env_flag("PI_HARDWARE_CURSOR"),
-            clear_on_shrink: env_flag("PI_CLEAR_ON_SHRINK"),
-            tui_write_log: env_string_opt("PI_TUI_WRITE_LOG"),
-            tui_debug: env_flag("PI_TUI_DEBUG"),
-            debug_redraw: env_flag("PI_DEBUG_REDRAW"),
+            hardware_cursor: env_flag("TAPE_HARDWARE_CURSOR"),
+            clear_on_shrink: env_flag("TAPE_CLEAR_ON_SHRINK"),
+            tui_write_log: env_string_opt("tape_tui_WRITE_LOG"),
+            tui_debug: env_flag("tape_tui_DEBUG"),
+            debug_redraw: env_flag("TAPE_DEBUG_REDRAW"),
         }
     }
 }
@@ -78,11 +78,11 @@ mod tests {
     #[test]
     fn env_defaults_are_false() {
         let _lock = env_lock();
-        let _g1 = set_env_guard("PI_HARDWARE_CURSOR", None);
-        let _g2 = set_env_guard("PI_CLEAR_ON_SHRINK", None);
-        let _g3 = set_env_guard("PI_TUI_WRITE_LOG", None);
-        let _g4 = set_env_guard("PI_TUI_DEBUG", None);
-        let _g5 = set_env_guard("PI_DEBUG_REDRAW", None);
+        let _g1 = set_env_guard("TAPE_HARDWARE_CURSOR", None);
+        let _g2 = set_env_guard("TAPE_CLEAR_ON_SHRINK", None);
+        let _g3 = set_env_guard("tape_tui_WRITE_LOG", None);
+        let _g4 = set_env_guard("tape_tui_DEBUG", None);
+        let _g5 = set_env_guard("TAPE_DEBUG_REDRAW", None);
 
         let config = EnvConfig::from_env();
         assert!(!config.hardware_cursor);
@@ -95,16 +95,16 @@ mod tests {
     #[test]
     fn env_flags_set_to_one_enable() {
         let _lock = env_lock();
-        let _g1 = set_env_guard("PI_HARDWARE_CURSOR", Some("1"));
-        let _g2 = set_env_guard("PI_CLEAR_ON_SHRINK", Some("1"));
-        let _g3 = set_env_guard("PI_TUI_WRITE_LOG", Some("/tmp/pi.log"));
-        let _g4 = set_env_guard("PI_TUI_DEBUG", Some("1"));
-        let _g5 = set_env_guard("PI_DEBUG_REDRAW", Some("1"));
+        let _g1 = set_env_guard("TAPE_HARDWARE_CURSOR", Some("1"));
+        let _g2 = set_env_guard("TAPE_CLEAR_ON_SHRINK", Some("1"));
+        let _g3 = set_env_guard("tape_tui_WRITE_LOG", Some("/tmp/tape.log"));
+        let _g4 = set_env_guard("tape_tui_DEBUG", Some("1"));
+        let _g5 = set_env_guard("TAPE_DEBUG_REDRAW", Some("1"));
 
         let config = EnvConfig::from_env();
         assert!(config.hardware_cursor);
         assert!(config.clear_on_shrink);
-        assert_eq!(config.tui_write_log.as_deref(), Some("/tmp/pi.log"));
+        assert_eq!(config.tui_write_log.as_deref(), Some("/tmp/tape.log"));
         assert!(config.tui_debug);
         assert!(config.debug_redraw);
     }
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn empty_write_log_is_ignored() {
         let _lock = env_lock();
-        let _g1 = set_env_guard("PI_TUI_WRITE_LOG", Some(""));
+        let _g1 = set_env_guard("tape_tui_WRITE_LOG", Some(""));
         let config = EnvConfig::from_env();
         assert!(config.tui_write_log.is_none());
     }

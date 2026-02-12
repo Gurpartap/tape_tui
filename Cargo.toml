@@ -1,5 +1,5 @@
 [package]
-name = "pi_tui"
+name = "tape_tui"
 version = "0.1.0"
 edition = "2021"
 

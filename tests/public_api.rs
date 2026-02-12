@@ -1,6 +1,6 @@
 #![allow(unused_imports)]
 
-use pi_tui::{
+use tape_tui::{
     allocate_image_id, calculate_image_rows, default_editor_keybindings_handle,
     delete_all_kitty_images, delete_kitty_image, detect_capabilities, encode_iterm2, encode_kitty,
     fuzzy_filter, fuzzy_match, get_capabilities, get_cell_dimensions, get_gif_dimensions,
@@ -16,8 +16,9 @@ use pi_tui::{
     OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility,
     ProcessTerminal, SelectItem, SelectList, SelectListTheme, SettingItem, SettingsList,
     SettingsListTheme, SizeValue, SlashCommand, Spacer, StdinBuffer, StdinBufferEventMap,
-    StdinBufferOptions, Terminal, TerminalCapabilities, Text, TruncatedText, CURSOR_MARKER,
-    DEFAULT_EDITOR_KEYBINDINGS, TUI,
+    StdinBufferOptions, SurfaceHandle, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions,
+    Terminal, TerminalCapabilities, Text, TruncatedText, CURSOR_MARKER, DEFAULT_EDITOR_KEYBINDINGS,
+    TUI,
 };
 
 #[test]

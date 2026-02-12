@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEBUG_REDRAW_ENV: &str = "PI_DEBUG_REDRAW";
-const TUI_DEBUG_ENV: &str = "PI_TUI_DEBUG";
-const DEBUG_REDRAW_PATH: [&str; 3] = [".pi", "agent", "pi-debug.log"];
+const DEBUG_REDRAW_ENV: &str = "TAPE_DEBUG_REDRAW";
+const TUI_DEBUG_ENV: &str = "tape_tui_DEBUG";
+const DEBUG_REDRAW_PATH: [&str; 3] = [".tape", "agent", "tape-debug.log"];
 const TUI_DEBUG_DIR: &str = "/tmp/tui";
 
 static DEBUG_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -197,13 +197,13 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("pi-tui-test-{}-{}", name, counter))
+        std::env::temp_dir().join(format!("tape-tui-test-{}-{}", name, counter))
     }
 
     #[test]
     fn debug_redraw_writes_log_line() {
         let dir = temp_path("debug-redraw");
-        let log_path = dir.join("nested").join("pi-debug.log");
+        let log_path = dir.join("nested").join("tape-debug.log");
         write_debug_redraw(&log_path, "reason", 1, 2, 3);
         let contents = fs::read_to_string(&log_path).expect("expected debug redraw log");
         assert!(contents.contains("fullRender: reason"));

@@ -468,10 +468,7 @@ mod tests {
 
     #[test]
     fn composite_overlays_inserts_reset_guards_for_style_safety() {
-        let base = vec![
-            "\x1b[3mXXXXXXXXXX\x1b[23m".to_string(),
-            "INPUT".to_string(),
-        ];
+        let base = vec!["\x1b[3mXXXXXXXXXX\x1b[23m".to_string(), "INPUT".to_string()];
         let overlays = vec![RenderedOverlay {
             lines: vec!["OVR".to_string()],
             row: 0,

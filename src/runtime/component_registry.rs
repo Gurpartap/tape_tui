@@ -34,10 +34,7 @@ impl ComponentRegistry {
             .next_id
             .checked_add(1)
             .expect("component id overflowed u64");
-        let idx = id
-            .raw()
-            .try_into()
-            .expect("component id overflowed usize");
+        let idx = id.raw().try_into().expect("component id overflowed usize");
         if self.entries.len() <= idx {
             self.entries.resize_with(idx + 1, || None);
         }

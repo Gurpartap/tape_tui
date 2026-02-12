@@ -21,8 +21,10 @@ use crate::render::renderer::DiffRenderer;
 use crate::render::Frame;
 use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::ime::position_hardware_cursor;
-use crate::runtime::overlay::{
-    is_overlay_visible as overlay_options_visible, OverlayId, OverlayOptions,
+use crate::runtime::overlay::{OverlayId, OverlayOptions};
+use crate::runtime::surface::{
+    SurfaceEntry as OverlayEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions,
+    SurfaceRenderEntry as OverlayRenderEntry, SurfaceState as OverlayState,
 };
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
@@ -107,28 +109,17 @@ pub struct TuiRuntime<T: Terminal> {
     panic_hook_guard: Option<crate::platform::PanicHookGuard>,
 }
 
-#[derive(Default)]
-struct OverlayState {
-    entries: Vec<OverlayEntry>,
-}
-
-#[derive(Clone, Copy)]
-struct OverlayEntry {
-    id: OverlayId,
-    component_id: ComponentId,
-    options: Option<OverlayOptions>,
-    pre_focus: Option<ComponentId>,
-    hidden: bool,
-}
-
-#[derive(Clone, Copy)]
-struct OverlayRenderEntry {
-    component_id: ComponentId,
-    options: Option<OverlayOptions>,
-}
-
+/// Handle used to mutate a legacy overlay entry.
+///
+/// Internally overlays are represented as surfaces with default capture/modal behavior.
 pub struct OverlayHandle {
     id: OverlayId,
+    runtime: RuntimeHandle,
+}
+
+/// Handle used to mutate a shown surface entry.
+pub struct SurfaceHandle {
+    id: SurfaceId,
     runtime: RuntimeHandle,
 }
 
@@ -205,7 +196,7 @@ impl std::fmt::Display for CustomCommandError {
 impl std::error::Error for CustomCommandError {}
 
 fn format_runtime_diagnostic(level: &str, code: &str, message: &str) -> String {
-    format!("[pi_tui][{level}][{code}] {message}")
+    format!("[tape_tui][{level}][{code}] {message}")
 }
 
 pub trait CustomCommand: Send + 'static {
@@ -351,6 +342,21 @@ pub enum Command {
         overlay_id: OverlayId,
         hidden: bool,
     },
+    ShowSurface {
+        surface_id: SurfaceId,
+        component: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    },
+    HideSurface(SurfaceId),
+    SetSurfaceHidden {
+        surface_id: SurfaceId,
+        hidden: bool,
+    },
+    UpdateSurfaceOptions {
+        surface_id: SurfaceId,
+        options: Option<SurfaceOptions>,
+    },
     Terminal(TerminalOp),
     Custom(Box<dyn CustomCommand>),
 }
@@ -385,6 +391,34 @@ impl std::fmt::Debug for Command {
                 .field("overlay_id", overlay_id)
                 .field("hidden", hidden)
                 .finish(),
+            Self::ShowSurface {
+                surface_id,
+                component,
+                options,
+                hidden,
+            } => f
+                .debug_struct("ShowSurface")
+                .field("surface_id", surface_id)
+                .field("component", component)
+                .field("options", options)
+                .field("hidden", hidden)
+                .finish(),
+            Self::HideSurface(surface_id) => {
+                f.debug_tuple("HideSurface").field(surface_id).finish()
+            }
+            Self::SetSurfaceHidden { surface_id, hidden } => f
+                .debug_struct("SetSurfaceHidden")
+                .field("surface_id", surface_id)
+                .field("hidden", hidden)
+                .finish(),
+            Self::UpdateSurfaceOptions {
+                surface_id,
+                options,
+            } => f
+                .debug_struct("UpdateSurfaceOptions")
+                .field("surface_id", surface_id)
+                .field("options", options)
+                .finish(),
             Self::Terminal(op) => f.debug_tuple("Terminal").field(op).finish(),
             Self::Custom(command) => f.debug_tuple("Custom").field(&command.name()).finish(),
         }
@@ -405,7 +439,7 @@ pub enum TerminalOp {
 
 #[derive(Default)]
 struct RuntimeWakeState {
-    next_overlay_id: u64,
+    next_surface_id: u64,
     pending_inputs: Vec<String>,
     pending_resize: bool,
     pending_commands: VecDeque<Command>,
@@ -559,17 +593,17 @@ impl RuntimeWake {
         state.render_requested = false;
     }
 
-    fn alloc_overlay_id(&self) -> OverlayId {
+    fn alloc_surface_id(&self) -> SurfaceId {
         let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let next = state.next_overlay_id;
-        state.next_overlay_id = state
-            .next_overlay_id
+        let next = state.next_surface_id;
+        state.next_surface_id = state
+            .next_surface_id
             .checked_add(1)
-            .expect("overlay id overflowed u64");
-        OverlayId::from_raw(next)
+            .expect("surface id overflowed u64");
+        SurfaceId::from_raw(next)
     }
 
     fn request_stop(&self) {
@@ -618,8 +652,31 @@ impl RuntimeHandle {
         self.wake.enqueue_command(command);
     }
 
+    pub fn alloc_surface_id(&self) -> SurfaceId {
+        self.wake.alloc_surface_id()
+    }
+
     pub fn alloc_overlay_id(&self) -> OverlayId {
-        self.wake.alloc_overlay_id()
+        OverlayId::from(self.alloc_surface_id())
+    }
+
+    pub fn show_surface(
+        &self,
+        component_id: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    ) -> SurfaceHandle {
+        let id = self.alloc_surface_id();
+        self.dispatch(Command::ShowSurface {
+            surface_id: id,
+            component: component_id,
+            options,
+            hidden,
+        });
+        SurfaceHandle {
+            id,
+            runtime: self.clone(),
+        }
     }
 
     pub fn show_overlay(
@@ -628,28 +685,57 @@ impl RuntimeHandle {
         options: Option<OverlayOptions>,
         hidden: bool,
     ) -> OverlayHandle {
-        let id = self.alloc_overlay_id();
-        self.dispatch(Command::ShowOverlay {
-            overlay_id: id,
-            component: component_id,
-            options,
-            hidden,
-        });
+        let surface_options = options.map(SurfaceOptions::from);
+        let handle = self.show_surface(component_id, surface_options, hidden);
         OverlayHandle {
-            id,
+            id: OverlayId::from(handle.id),
             runtime: self.clone(),
         }
     }
 }
 
+impl SurfaceHandle {
+    /// Hide (remove) this surface from the runtime stack.
+    pub fn hide(&self) {
+        self.runtime.dispatch(Command::HideSurface(self.id));
+    }
+
+    /// Alias for hide for API readability in host code.
+    pub fn close(&self) {
+        self.hide();
+    }
+
+    /// Set visibility state without removing the surface from the stack.
+    pub fn set_hidden(&self, hidden: bool) {
+        self.runtime.dispatch(Command::SetSurfaceHidden {
+            surface_id: self.id,
+            hidden,
+        });
+    }
+
+    /// Convenience helper to unhide a previously hidden surface.
+    pub fn show(&self) {
+        self.set_hidden(false);
+    }
+
+    /// Replace this surface's options in-place.
+    pub fn update_options(&self, options: Option<SurfaceOptions>) {
+        self.runtime.dispatch(Command::UpdateSurfaceOptions {
+            surface_id: self.id,
+            options,
+        });
+    }
+}
+
 impl OverlayHandle {
     pub fn hide(&self) {
-        self.runtime.dispatch(Command::HideOverlay(self.id));
+        self.runtime
+            .dispatch(Command::HideSurface(SurfaceId::from(self.id)));
     }
 
     pub fn set_hidden(&self, hidden: bool) {
-        self.runtime.dispatch(Command::SetOverlayHidden {
-            overlay_id: self.id,
+        self.runtime.dispatch(Command::SetSurfaceHidden {
+            surface_id: SurfaceId::from(self.id),
             hidden,
         });
     }
@@ -690,12 +776,8 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
     }
 
     fn hide_overlay(&mut self, overlay_id: OverlayId) -> Result<bool, CustomCommandError> {
-        if !self
-            .overlays
-            .entries
-            .iter()
-            .any(|entry| entry.id == overlay_id)
-        {
+        let surface_id = SurfaceId::from(overlay_id);
+        if !self.overlays.contains(surface_id) {
             return Err(CustomCommandError::MissingOverlayId(overlay_id));
         }
         if self.apply_hide_overlay(overlay_id) {
@@ -712,12 +794,8 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
         overlay_id: OverlayId,
         hidden: bool,
     ) -> Result<bool, CustomCommandError> {
-        if !self
-            .overlays
-            .entries
-            .iter()
-            .any(|entry| entry.id == overlay_id)
-        {
+        let surface_id = SurfaceId::from(overlay_id);
+        if !self.overlays.contains(surface_id) {
             return Err(CustomCommandError::MissingOverlayId(overlay_id));
         }
         if self.apply_set_overlay_hidden(overlay_id, hidden) {
@@ -745,8 +823,8 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
 
 impl<T: Terminal> TuiRuntime<T> {
     pub fn new(terminal: T) -> Self {
-        let clear_on_shrink = env_flag("PI_CLEAR_ON_SHRINK");
-        let show_hardware_cursor = env_flag("PI_HARDWARE_CURSOR");
+        let clear_on_shrink = env_flag("TAPE_CLEAR_ON_SHRINK");
+        let show_hardware_cursor = env_flag("TAPE_HARDWARE_CURSOR");
         Self {
             terminal,
             output: OutputGate::new(),
@@ -1021,35 +1099,61 @@ impl<T: Terminal> TuiRuntime<T> {
         self.dispatch_focus_overlay_command(Command::FocusClear);
     }
 
-    pub fn show_overlay(
+    /// Show a surface using runtime surface semantics.
+    pub fn show_surface(
         &mut self,
         component: ComponentId,
-        options: Option<OverlayOptions>,
-    ) -> OverlayHandle {
-        let id = self.wake.alloc_overlay_id();
-        self.dispatch_focus_overlay_command(Command::ShowOverlay {
-            overlay_id: id,
+        options: Option<SurfaceOptions>,
+    ) -> SurfaceHandle {
+        let id = self.wake.alloc_surface_id();
+        self.dispatch_focus_overlay_command(Command::ShowSurface {
+            surface_id: id,
             component,
             options,
             hidden: false,
         });
-        OverlayHandle {
+        SurfaceHandle {
             id,
             runtime: self.runtime_handle(),
         }
     }
 
-    pub fn hide_overlay(&mut self) {
-        if let Some(overlay) = self.overlays.entries.last().copied() {
-            self.dispatch_focus_overlay_command(Command::HideOverlay(overlay.id));
+    /// Show a legacy overlay.
+    ///
+    /// Overlays are represented internally as capture/modal surfaces for
+    /// compatibility with existing callers.
+    pub fn show_overlay(
+        &mut self,
+        component: ComponentId,
+        options: Option<OverlayOptions>,
+    ) -> OverlayHandle {
+        let surface_options = options.map(SurfaceOptions::from);
+        let handle = self.show_surface(component, surface_options);
+        OverlayHandle {
+            id: OverlayId::from(handle.id),
+            runtime: self.runtime_handle(),
         }
     }
 
+    pub fn hide_surface(&mut self) {
+        if let Some(surface) = self.overlays.entries.last().copied() {
+            self.dispatch_focus_overlay_command(Command::HideSurface(surface.id));
+        }
+    }
+
+    pub fn hide_overlay(&mut self) {
+        self.hide_surface();
+    }
+
+    pub fn has_surface(&self) -> bool {
+        self.overlays.has_visible(
+            self.terminal.columns() as usize,
+            self.terminal.rows() as usize,
+        )
+    }
+
     pub fn has_overlay(&self) -> bool {
-        self.overlays
-            .entries
-            .iter()
-            .any(|entry| self.is_overlay_visible(entry))
+        self.has_surface()
     }
 
     fn dispatch_focus_overlay_command(&mut self, command: Command) {
@@ -1293,12 +1397,14 @@ impl<T: Terminal> TuiRuntime<T> {
         }
 
         let mut handled = false;
-        let Some(focused_id) = self.focused else {
+        let Some(target_id) = self.active_input_target() else {
             return;
         };
-        let Some(component) = self.components.get_mut(focused_id) else {
-            debug_assert!(false, "focused component {:?} missing", focused_id);
-            self.focused = None;
+        let Some(component) = self.components.get_mut(target_id) else {
+            debug_assert!(false, "input target component {:?} missing", target_id);
+            if self.focused == Some(target_id) {
+                self.focused = None;
+            }
             return;
         };
         for event in events {
@@ -1385,8 +1491,8 @@ impl<T: Terminal> TuiRuntime<T> {
         let height = self.terminal.rows() as usize;
         let (mut lines, mut cursor_pos) = self.render_root(width, height);
 
-        if self.has_overlay() {
-            let (composited, overlay_cursor) = self.composite_overlay_lines(lines, width, height);
+        if self.has_surface() {
+            let (composited, overlay_cursor) = self.composite_surface_lines(lines, width, height);
             lines = composited;
             if overlay_cursor.is_some() {
                 cursor_pos = overlay_cursor;
@@ -1420,13 +1526,13 @@ impl<T: Terminal> TuiRuntime<T> {
             cursor_pos = Some(pos);
         }
 
-        let has_overlays = self.has_overlay();
+        let has_surfaces = self.has_surface();
         let frame = Frame::from(lines).with_cursor(cursor_pos);
         let cursor_pos = frame.cursor();
         let total_lines = frame.lines().len();
         let render_cmds =
             self.renderer
-                .render(frame, width, height, self.clear_on_shrink, has_overlays);
+                .render(frame, width, height, self.clear_on_shrink, has_surfaces);
         self.output.extend(render_cmds);
 
         let (updated_row, cursor_cmds) = position_hardware_cursor(
@@ -1555,6 +1661,34 @@ impl<T: Terminal> TuiRuntime<T> {
                 }
                 Command::SetOverlayHidden { overlay_id, hidden } => {
                     if self.apply_set_overlay_hidden(overlay_id, hidden) {
+                        render_requested = true;
+                    }
+                }
+                Command::ShowSurface {
+                    surface_id,
+                    component,
+                    options,
+                    hidden,
+                } => {
+                    if self.apply_show_surface(surface_id, component, options, hidden) {
+                        render_requested = true;
+                    }
+                }
+                Command::HideSurface(surface_id) => {
+                    if self.apply_hide_surface(surface_id) {
+                        render_requested = true;
+                    }
+                }
+                Command::SetSurfaceHidden { surface_id, hidden } => {
+                    if self.apply_set_surface_hidden(surface_id, hidden) {
+                        render_requested = true;
+                    }
+                }
+                Command::UpdateSurfaceOptions {
+                    surface_id,
+                    options,
+                } => {
+                    if self.apply_update_surface_options(surface_id, options) {
                         render_requested = true;
                     }
                 }
@@ -1711,12 +1845,48 @@ impl<T: Terminal> TuiRuntime<T> {
         options: Option<OverlayOptions>,
         hidden: bool,
     ) -> bool {
+        self.apply_show_surface_internal(
+            SurfaceId::from(overlay_id),
+            component,
+            options.map(SurfaceOptions::from),
+            hidden,
+            "command.show_overlay.missing_component_id",
+            "show overlay",
+        )
+    }
+
+    fn apply_show_surface(
+        &mut self,
+        surface_id: SurfaceId,
+        component: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    ) -> bool {
+        self.apply_show_surface_internal(
+            surface_id,
+            component,
+            options,
+            hidden,
+            "command.show_surface.missing_component_id",
+            "show surface",
+        )
+    }
+
+    fn apply_show_surface_internal(
+        &mut self,
+        surface_id: SurfaceId,
+        component: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+        missing_component_code: &'static str,
+        action_label: &'static str,
+    ) -> bool {
         if self.components.get_mut(component).is_none() {
             self.emit_runtime_diagnostic(
                 "error",
-                "command.show_overlay.missing_component_id",
+                missing_component_code,
                 format!(
-                    "show overlay references missing component id {}",
+                    "{action_label} references missing component id {}",
                     component.raw()
                 ),
             );
@@ -1725,73 +1895,113 @@ impl<T: Terminal> TuiRuntime<T> {
 
         let pre_focus = self.focused.filter(|focused| *focused != component);
         self.overlays.entries.push(OverlayEntry {
-            id: overlay_id,
+            id: surface_id,
             component_id: component,
             options,
             pre_focus,
             hidden,
         });
 
-        if !hidden && self.is_overlay_visible(self.overlays.entries.last().expect("entry exists")) {
-            self.set_focused(Some(component));
+        let columns = self.terminal.columns() as usize;
+        let rows = self.terminal.rows() as usize;
+        if let Some(entry) = self.overlays.entries.last().copied() {
+            let is_capture = entry.input_policy() == SurfaceInputPolicy::Capture;
+            if !hidden && is_capture && entry.is_visible(columns, rows) {
+                self.set_focused(Some(component));
+            }
         }
 
         true
     }
 
     fn apply_hide_overlay(&mut self, overlay_id: OverlayId) -> bool {
-        let Some(index) = self
-            .overlays
-            .entries
-            .iter()
-            .position(|entry| entry.id == overlay_id)
-        else {
+        self.apply_hide_surface_internal(
+            SurfaceId::from(overlay_id),
+            "command.hide_overlay.missing_overlay_id",
+            "hide overlay",
+        )
+    }
+
+    fn apply_hide_surface(&mut self, surface_id: SurfaceId) -> bool {
+        self.apply_hide_surface_internal(
+            surface_id,
+            "command.hide_surface.missing_surface_id",
+            "hide surface",
+        )
+    }
+
+    fn apply_hide_surface_internal(
+        &mut self,
+        surface_id: SurfaceId,
+        missing_id_code: &'static str,
+        action_label: &'static str,
+    ) -> bool {
+        let Some(index) = self.overlays.index_of(surface_id) else {
             self.emit_runtime_diagnostic(
                 "error",
-                "command.hide_overlay.missing_overlay_id",
-                format!(
-                    "hide overlay references missing overlay id {}",
-                    overlay_id.raw()
-                ),
+                missing_id_code,
+                format!("{action_label} references missing id {}", surface_id.raw()),
             );
             return false;
         };
 
         let removed = self.overlays.entries.remove(index);
-        if self.focused == Some(removed.component_id) {
+        if removed.input_policy() == SurfaceInputPolicy::Capture
+            && self.focused == Some(removed.component_id)
+        {
             self.restore_focus_after_overlay_loss(removed.pre_focus);
         }
         true
     }
 
     fn apply_set_overlay_hidden(&mut self, overlay_id: OverlayId, hidden: bool) -> bool {
-        let Some(index) = self
-            .overlays
-            .entries
-            .iter()
-            .position(|entry| entry.id == overlay_id)
-        else {
+        self.apply_set_surface_hidden_internal(
+            SurfaceId::from(overlay_id),
+            hidden,
+            "command.set_overlay_hidden.missing_overlay_id",
+            "set overlay hidden",
+        )
+    }
+
+    fn apply_set_surface_hidden(&mut self, surface_id: SurfaceId, hidden: bool) -> bool {
+        self.apply_set_surface_hidden_internal(
+            surface_id,
+            hidden,
+            "command.set_surface_hidden.missing_surface_id",
+            "set surface hidden",
+        )
+    }
+
+    fn apply_set_surface_hidden_internal(
+        &mut self,
+        surface_id: SurfaceId,
+        hidden: bool,
+        missing_id_code: &'static str,
+        action_label: &'static str,
+    ) -> bool {
+        let Some(index) = self.overlays.index_of(surface_id) else {
             self.emit_runtime_diagnostic(
                 "error",
-                "command.set_overlay_hidden.missing_overlay_id",
-                format!(
-                    "set overlay hidden references missing overlay id {}",
-                    overlay_id.raw()
-                ),
+                missing_id_code,
+                format!("{action_label} references missing id {}", surface_id.raw()),
             );
             return false;
         };
 
         if hidden {
-            let (component_id, pre_focus) = {
+            let (component_id, pre_focus, was_capture) = {
                 let entry = &mut self.overlays.entries[index];
                 if entry.hidden {
                     return false;
                 }
                 entry.hidden = true;
-                (entry.component_id, entry.pre_focus)
+                (
+                    entry.component_id,
+                    entry.pre_focus,
+                    entry.input_policy() == SurfaceInputPolicy::Capture,
+                )
             };
-            if self.focused == Some(component_id) {
+            if was_capture && self.focused == Some(component_id) {
                 self.restore_focus_after_overlay_loss(pre_focus);
             }
             return true;
@@ -1810,15 +2020,45 @@ impl<T: Terminal> TuiRuntime<T> {
             }
         }
 
-        // Unhiding should make this overlay topmost for deterministic focus handoff.
+        // Unhiding should make this surface topmost for deterministic focus handoff.
         let entry = self.overlays.entries.remove(index);
         let component_id = entry.component_id;
+        let is_capture = entry.input_policy() == SurfaceInputPolicy::Capture;
         self.overlays.entries.push(entry);
 
-        if self.is_overlay_visible(self.overlays.entries.last().expect("entry exists")) {
+        let columns = self.terminal.columns() as usize;
+        let rows = self.terminal.rows() as usize;
+        if is_capture
+            && self
+                .overlays
+                .entries
+                .last()
+                .is_some_and(|entry| entry.is_visible(columns, rows))
+        {
             self.set_focused(Some(component_id));
         }
 
+        true
+    }
+
+    fn apply_update_surface_options(
+        &mut self,
+        surface_id: SurfaceId,
+        options: Option<SurfaceOptions>,
+    ) -> bool {
+        let Some(index) = self.overlays.index_of(surface_id) else {
+            self.emit_runtime_diagnostic(
+                "error",
+                "command.update_surface_options.missing_surface_id",
+                format!(
+                    "update surface options references missing surface id {}",
+                    surface_id.raw()
+                ),
+            );
+            return false;
+        };
+
+        self.overlays.entries[index].options = options;
         true
     }
 
@@ -1867,7 +2107,7 @@ impl<T: Terminal> TuiRuntime<T> {
             }
         }
 
-        if let Some(next_overlay) = self.topmost_visible_overlay() {
+        if let Some(next_overlay) = self.topmost_visible_capture_surface() {
             self.set_focused(Some(next_overlay));
             return;
         }
@@ -1875,37 +2115,38 @@ impl<T: Terminal> TuiRuntime<T> {
         self.set_focused(None);
     }
 
-    fn visible_overlay_snapshot(&self) -> Vec<OverlayRenderEntry> {
-        self.overlays
-            .entries
-            .iter()
-            .filter(|entry| self.is_overlay_visible(entry))
-            .map(|entry| OverlayRenderEntry {
-                component_id: entry.component_id,
-                options: entry.options,
-            })
-            .collect()
+    fn visible_surface_snapshot(&self) -> Vec<OverlayRenderEntry> {
+        self.overlays.visible_snapshot(
+            self.terminal.columns() as usize,
+            self.terminal.rows() as usize,
+        )
     }
 
-    fn composite_overlay_lines(
+    fn composite_surface_lines(
         &mut self,
         lines: Vec<String>,
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
-        let overlay_entries = self.visible_overlay_snapshot();
+        let surface_entries = self.visible_surface_snapshot();
         let mut rendered: Vec<(RenderedOverlay, Option<CursorPos>)> = Vec::new();
 
-        for entry in overlay_entries {
-            let render_options = entry
-                .options
-                .as_ref()
-                .map(crate::render::overlay::OverlayOptions::from);
+        let mut reserved_top = 0usize;
+        let mut reserved_bottom = 0usize;
+
+        for entry in surface_entries {
+            let surface_options = entry.options.unwrap_or_default();
+            let layout_options =
+                surface_options.with_lane_reservations(reserved_top, reserved_bottom);
+            let render_options = Some(crate::render::overlay::OverlayOptions::from(
+                &layout_options,
+            ));
+
             let layout = resolve_overlay_layout(render_options.as_ref(), 0, width, height);
             let Some(component) = self.components.get_mut(entry.component_id) else {
                 debug_assert!(
                     false,
-                    "overlay component {:?} missing during render",
+                    "surface component {:?} missing during render",
                     entry.component_id
                 );
                 continue;
@@ -1914,23 +2155,35 @@ impl<T: Terminal> TuiRuntime<T> {
             component.set_terminal_rows(height);
             let viewport_rows = layout.max_height.unwrap_or(height);
             component.set_viewport_size(layout.width, viewport_rows);
-            let mut overlay_lines = component.render(layout.width);
+            let mut surface_lines = component.render(layout.width);
             let mut cursor_pos = component.cursor_pos();
             if let Some(max_height) = layout.max_height {
-                if overlay_lines.len() > max_height {
-                    overlay_lines.truncate(max_height);
+                if surface_lines.len() > max_height {
+                    surface_lines.truncate(max_height);
                 }
             }
             if let Some(pos) = cursor_pos {
-                if pos.row >= overlay_lines.len() {
+                if pos.row >= surface_lines.len() {
                     cursor_pos = None;
                 }
             }
             let final_layout =
-                resolve_overlay_layout(render_options.as_ref(), overlay_lines.len(), width, height);
+                resolve_overlay_layout(render_options.as_ref(), surface_lines.len(), width, height);
+
+            let lane_height = surface_lines.len();
+            match surface_options.kind {
+                SurfaceKind::Toast => {
+                    reserved_top = reserved_top.saturating_add(lane_height);
+                }
+                SurfaceKind::AttachmentRow | SurfaceKind::Drawer => {
+                    reserved_bottom = reserved_bottom.saturating_add(lane_height);
+                }
+                SurfaceKind::Modal | SurfaceKind::Corner => {}
+            }
+
             rendered.push((
                 RenderedOverlay {
-                    lines: overlay_lines,
+                    lines: surface_lines,
                     row: final_layout.row,
                     col: final_layout.col,
                     width: final_layout.width,
@@ -1985,24 +2238,16 @@ impl<T: Terminal> TuiRuntime<T> {
         (composited, overlay_cursor)
     }
 
-    fn is_overlay_visible(&self, entry: &OverlayEntry) -> bool {
-        if entry.hidden {
-            return false;
-        }
-        overlay_options_visible(
-            entry.options.as_ref(),
+    fn topmost_visible_capture_surface(&self) -> Option<ComponentId> {
+        self.overlays.topmost_visible_component(
             self.terminal.columns() as usize,
             self.terminal.rows() as usize,
+            true,
         )
     }
 
-    fn topmost_visible_overlay(&self) -> Option<ComponentId> {
-        self.overlays
-            .entries
-            .iter()
-            .rev()
-            .find(|entry| self.is_overlay_visible(entry))
-            .map(|entry| entry.component_id)
+    fn active_input_target(&self) -> Option<ComponentId> {
+        self.topmost_visible_capture_surface().or(self.focused)
     }
 
     fn dispatch_resize_event(&mut self) {
@@ -2010,19 +2255,21 @@ impl<T: Terminal> TuiRuntime<T> {
             columns: self.terminal.columns(),
             rows: self.terminal.rows(),
         };
-        let Some(focused_id) = self.focused else {
+        let Some(target_id) = self.active_input_target() else {
             return;
         };
-        let Some(component) = self.components.get_mut(focused_id) else {
-            debug_assert!(false, "focused component {:?} missing", focused_id);
-            self.focused = None;
+        let Some(component) = self.components.get_mut(target_id) else {
+            debug_assert!(false, "resize target component {:?} missing", target_id);
+            if self.focused == Some(target_id) {
+                self.focused = None;
+            }
             return;
         };
         component.handle_event(&event);
     }
 
     fn reconcile_focus(&mut self) {
-        if let Some(topmost) = self.topmost_visible_overlay() {
+        if let Some(topmost) = self.topmost_visible_capture_surface() {
             self.set_focused(Some(topmost));
             return;
         }
@@ -2137,6 +2384,7 @@ mod tests {
     use crate::core::terminal::Terminal;
     use crate::core::terminal_image::get_cell_dimensions;
     use crate::runtime::overlay::{OverlayVisibility, SizeValue};
+    use crate::runtime::surface::{SurfaceInputPolicy, SurfaceKind, SurfaceOptions};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -2494,7 +2742,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         let diagnostic = &diagnostics[0];
         assert!(
-            diagnostic.contains("[pi_tui][error][command.custom.failed]"),
+            diagnostic.contains("[tape_tui][error][command.custom.failed]"),
             "expected custom command failure diagnostic, got: {diagnostic:?}"
         );
         assert!(
@@ -3352,6 +3600,185 @@ mod tests {
     }
 
     #[test]
+    fn surface_capture_receives_input_before_root() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_id = runtime.register_component(surface_component);
+
+        runtime.show_surface(
+            surface_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        runtime.handle_input("x");
+
+        assert_eq!(surface_inputs.borrow().as_slice(), &["x".to_string()]);
+        assert!(root_inputs.borrow().is_empty());
+        assert!(*surface_focus.borrow());
+    }
+
+    #[test]
+    fn surface_passthrough_does_not_steal_input_from_root() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_id = runtime.register_component(surface_component);
+
+        runtime.show_surface(
+            surface_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Passthrough,
+                kind: SurfaceKind::Corner,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        runtime.handle_input("y");
+
+        assert_eq!(root_inputs.borrow().as_slice(), &["y".to_string()]);
+        assert!(surface_inputs.borrow().is_empty());
+        assert!(*root_focus.borrow());
+        assert!(!*surface_focus.borrow());
+    }
+
+    #[test]
+    fn surface_handle_update_options_switches_input_policy() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_id = runtime.register_component(surface_component);
+
+        let handle = runtime.show_surface(
+            surface_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Passthrough,
+                kind: SurfaceKind::Corner,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        runtime.handle_input("a");
+        assert_eq!(root_inputs.borrow().as_slice(), &["a".to_string()]);
+        assert!(surface_inputs.borrow().is_empty());
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        handle.update_options(Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            ..Default::default()
+        }));
+        runtime.run_once();
+        runtime.handle_input("b");
+
+        assert_eq!(surface_inputs.borrow().as_slice(), &["b".to_string()]);
+        assert!(root_inputs.borrow().is_empty());
+        assert!(*surface_focus.borrow());
+    }
+
+    #[test]
+    fn surface_toast_lane_stacks_from_top_without_mutating_transcript_order() {
+        let terminal = TestTerminal::new(40, 6);
+        let root_component = StaticLinesComponent {
+            lines: vec![
+                "root-0".to_string(),
+                "root-1".to_string(),
+                "root-2".to_string(),
+            ],
+            cursor: None,
+        };
+        let (mut runtime, _root_id) = runtime_with_root(terminal, root_component);
+
+        let toast_a_id = runtime.register_component(StaticLinesComponent {
+            lines: vec!["toast-a".to_string()],
+            cursor: None,
+        });
+        let toast_b_id = runtime.register_component(StaticLinesComponent {
+            lines: vec!["toast-b".to_string()],
+            cursor: None,
+        });
+
+        let toast_options = SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Passthrough,
+            kind: SurfaceKind::Toast,
+            overlay: OverlayOptions {
+                width: Some(SizeValue::absolute(10)),
+                ..Default::default()
+            },
+        };
+
+        runtime.show_surface(toast_a_id, Some(toast_options));
+        runtime.show_surface(toast_b_id, Some(toast_options));
+
+        let (lines, _cursor) = runtime.render_root(40, 6);
+        let (composited, _overlay_cursor) = runtime.composite_surface_lines(lines, 40, 6);
+
+        assert!(
+            composited[0].contains("toast-a"),
+            "expected first toast on first viewport row, got: {:?}",
+            composited[0]
+        );
+        assert!(
+            composited[1].contains("toast-b"),
+            "expected second toast stacked below first, got: {:?}",
+            composited[1]
+        );
+        assert!(
+            composited[2].contains("root-2") || composited[2].contains("root-0"),
+            "expected transcript content to remain present after toast compositing, got: {:?}",
+            composited
+        );
+    }
+
+    #[test]
     fn overlay_handle_mutations_apply_only_when_commands_are_drained() {
         let terminal = TestTerminal::new(80, 24);
 
@@ -3571,13 +3998,13 @@ mod tests {
 
         let handle = runtime.runtime_handle();
         let join = thread::spawn(move || {
-            handle.dispatch(Command::SetTitle("pi".to_string()));
+            handle.dispatch(Command::SetTitle("tape".to_string()));
         });
         join.join().expect("join title thread");
 
         runtime.run_once();
         assert_eq!(state.borrow().renders, baseline);
-        assert_eq!(runtime.terminal.output, "\x1b]0;pi\x07");
+        assert_eq!(runtime.terminal.output, "\x1b]0;tape\x07");
     }
 
     #[test]
@@ -3598,7 +4025,7 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let join = thread::spawn(move || {
             ready_rx.recv().expect("wait for runtime to block");
-            handle.dispatch(Command::SetTitle("pi".to_string()));
+            handle.dispatch(Command::SetTitle("tape".to_string()));
         });
 
         runtime.run_with_before_wait(|| {
@@ -3607,7 +4034,7 @@ mod tests {
 
         join.join().expect("join title thread");
         assert_eq!(state.borrow().renders, baseline);
-        assert_eq!(runtime.terminal.output, "\x1b]0;pi\x07");
+        assert_eq!(runtime.terminal.output, "\x1b]0;tape\x07");
     }
 
     #[test]

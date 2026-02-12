@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pi_tui::core::component::{Component, Focusable};
-use pi_tui::core::text::slice::slice_by_column;
-use pi_tui::runtime::tui::Command as RuntimeCommand;
-use pi_tui::{
+use tape_tui::core::component::{Component, Focusable};
+use tape_tui::core::text::slice::slice_by_column;
+use tape_tui::runtime::tui::Command as RuntimeCommand;
+use tape_tui::{
     default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
     EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions,
     EditorPasteMode, EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme, OverlayAnchor,
@@ -28,7 +28,7 @@ Type Markdown on the left and see the preview on the right.
 ## Features
 
 - **Bold**, *italic*, ~~strikethrough~~
-- Links: [pi-tui](https://github.com/badlogic/pi-mono)
+- Links: [Example](https://example.com/)
 - Inline `code`
 
 > Blockquotes wrap to the preview width.
@@ -39,7 +39,7 @@ Type Markdown on the left and see the preview on the right.
 
 ```rust
 fn main() {
-    println!("Hello from pi-tui!");
+    println!("Hello world!");
 }
 ```
 

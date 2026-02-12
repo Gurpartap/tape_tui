@@ -1,7 +1,7 @@
 mod fixture;
 
-use pi_tui::core::component::Component;
-use pi_tui::{Markdown, MarkdownTheme};
+use tape_tui::core::component::Component;
+use tape_tui::{Markdown, MarkdownTheme};
 
 fn plain_theme() -> MarkdownTheme {
     MarkdownTheme {
@@ -36,7 +36,10 @@ fn read_lines(name: &str) -> Vec<String> {
     if normalized.is_empty() {
         Vec::new()
     } else {
-        normalized.split('\n').map(|line| line.to_string()).collect()
+        normalized
+            .split('\n')
+            .map(|line| line.to_string())
+            .collect()
     }
 }
 
@@ -61,11 +64,7 @@ fn assert_markdown_fixture(input_fixture: &str, expected_fixture: &str, width: u
 
 #[test]
 fn markdown_table_narrow_golden() {
-    assert_markdown_fixture(
-        "markdown_table_narrow.md",
-        "markdown_table_narrow.txt",
-        36,
-    );
+    assert_markdown_fixture("markdown_table_narrow.md", "markdown_table_narrow.txt", 36);
 }
 
 #[test]
@@ -79,7 +78,11 @@ fn markdown_blockquote_wrap_golden() {
 
 #[test]
 fn markdown_spacing_rules_golden() {
-    assert_markdown_fixture("markdown_spacing_rules.md", "markdown_spacing_rules.txt", 32);
+    assert_markdown_fixture(
+        "markdown_spacing_rules.md",
+        "markdown_spacing_rules.txt",
+        32,
+    );
 }
 
 #[test]

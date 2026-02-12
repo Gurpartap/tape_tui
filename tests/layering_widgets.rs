@@ -30,8 +30,8 @@ fn widgets_do_not_depend_on_render_layer() {
             .unwrap_or_else(|err| panic!("read_to_string({}): {err}", file.display()));
         if contents.contains("crate::render::")
             || contents.contains("use crate::render")
-            || contents.contains("pi_tui::render::")
-            || contents.contains("use pi_tui::render")
+            || contents.contains("tape_tui::render::")
+            || contents.contains("use tape_tui::render")
         {
             offenders.push(file);
         }

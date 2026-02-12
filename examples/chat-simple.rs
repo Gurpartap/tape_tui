@@ -4,11 +4,11 @@ use std::rc::Rc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pi_tui::core::autocomplete::CommandEntry;
-use pi_tui::core::component::{Component, Focusable};
-use pi_tui::runtime::tui::Command as RuntimeCommand;
-use pi_tui::widgets::select_list::SelectListTheme;
-use pi_tui::{
+use tape_tui::core::autocomplete::CommandEntry;
+use tape_tui::core::component::{Component, Focusable};
+use tape_tui::runtime::tui::Command as RuntimeCommand;
+use tape_tui::widgets::select_list::SelectListTheme;
+use tape_tui::{
     default_editor_keybindings_handle, CombinedAutocompleteProvider, Editor, EditorOptions,
     EditorTheme, InputEvent, Loader, Markdown, MarkdownTheme, ProcessTerminal, SlashCommand, Text,
     TUI,

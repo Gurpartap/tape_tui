@@ -1,8 +1,8 @@
 mod fixture;
 
-use pi_tui::core::output::TerminalCmd;
-use pi_tui::render::renderer::DiffRenderer;
-use pi_tui::render::Frame;
+use tape_tui::core::output::TerminalCmd;
+use tape_tui::render::renderer::DiffRenderer;
+use tape_tui::render::Frame;
 
 fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
     let mut out = String::new();

@@ -1,13 +1,13 @@
 mod fixture;
 
-use pi_tui::core::output::TerminalCmd;
-use pi_tui::core::terminal_image::is_image_line;
-use pi_tui::render::overlay::{
+use tape_tui::core::output::TerminalCmd;
+use tape_tui::core::terminal_image::is_image_line;
+use tape_tui::render::overlay::{
     composite_overlays, resolve_overlay_layout, OverlayAnchor, OverlayOptions, RenderedOverlay,
     SizeValue,
 };
-use pi_tui::runtime::ime::position_hardware_cursor;
-use pi_tui::{core::cursor::CursorPos, render::Frame};
+use tape_tui::runtime::ime::position_hardware_cursor;
+use tape_tui::{core::cursor::CursorPos, render::Frame};
 
 fn cmds_to_bytes(cmds: Vec<TerminalCmd>) -> String {
     let mut out = String::new();

@@ -132,7 +132,7 @@ pub struct EditorTheme {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorHeightMode {
-    /// Preserve pi-tui parity behavior (chat-style editor height heuristic).
+    /// Preserve tape-tui parity behavior (chat-style editor height heuristic).
     Default,
     /// Expand the editor to fill the available vertical space passed via `set_terminal_rows`.
     FillAvailable,
@@ -140,7 +140,7 @@ pub enum EditorHeightMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorPasteMode {
-    /// Preserve pi-tui parity behavior (large pastes are replaced by paste markers).
+    /// Preserve tape-tui parity behavior (large pastes are replaced by paste markers).
     Default,
     /// Always insert the literal pasted content, never inserting paste markers.
     Literal,

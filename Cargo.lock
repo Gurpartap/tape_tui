@@ -55,18 +55,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pi_tui"
-version = "0.1.0"
-dependencies = [
- "emojis",
- "libc",
- "markdown",
- "signal-hook",
- "unicode-segmentation",
- "unicode-width",
-]
-
-[[package]]
 name = "signal-hook"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -91,6 +79,18 @@ name = "siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2aa850e253778c88a04c3d7323b043aeda9d3e30d5971937c1855769763678e"
+
+[[package]]
+name = "tape_tui"
+version = "0.1.0"
+dependencies = [
+ "emojis",
+ "libc",
+ "markdown",
+ "signal-hook",
+ "unicode-segmentation",
+ "unicode-width",
+]
 
 [[package]]
 name = "unicode-id"

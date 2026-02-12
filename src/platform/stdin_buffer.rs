@@ -14,7 +14,7 @@ pub enum StdinEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StdinBufferOptions {
-    /// Timeout alias matching pi-tui options (milliseconds).
+    /// Timeout alias matching tape-tui options (milliseconds).
     pub timeout: Option<u64>,
     pub timeout_ms: u64,
 }

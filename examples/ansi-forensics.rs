@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pi_tui::core::component::{Component, Focusable};
-use pi_tui::core::text::slice::slice_by_column;
-use pi_tui::runtime::tui::Command as RuntimeCommand;
-use pi_tui::{
+use tape_tui::core::component::{Component, Focusable};
+use tape_tui::core::text::slice::slice_by_column;
+use tape_tui::runtime::tui::Command as RuntimeCommand;
+use tape_tui::{
     default_editor_keybindings_handle, truncate_to_width, visible_width, Editor, EditorAction,
     EditorHeightMode, EditorKeybindingsConfig, EditorKeybindingsHandle, EditorOptions,
     EditorPasteMode, EditorTheme, InputEvent, KeyEventType, Markdown, MarkdownTheme,
@@ -80,7 +80,7 @@ fn green(text: &str) -> String {
 fn editor_theme() -> EditorTheme {
     EditorTheme {
         border_color: Box::new(dim),
-        select_list: pi_tui::SelectListTheme {
+        select_list: tape_tui::SelectListTheme {
             selected_prefix: Arc::new(blue),
             selected_text: Arc::new(bold),
             description: Arc::new(dim),

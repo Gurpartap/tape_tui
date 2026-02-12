@@ -5,7 +5,7 @@ Use scribe cli tool to read/explore code: When you need to understand code and i
 # AGENTS.md
 
 ## Project Scope
-- Rust port of pi-tui (terminal UI) with parity against `/Users/gurpartap/Projects/github.com/badlogic/pi-mono/packages/tui`.
+- Rust terminal UI library focused on deterministic runtime/render behavior.
 
 ## Core Principles
 - Correctness over cleverness
@@ -16,12 +16,11 @@ Use scribe cli tool to read/explore code: When you need to understand code and i
 
 ## Workflow Rules
 - Read any file fully before modifying it.
-- Keep changes scoped to the current milestone phase.
 - Do not write to terminal output directly from widgets/components—renderer only.
 - Prefer explicit error handling over silent fallbacks.
 
 ## Implementation Constraints
-- Maintain parity with pi-tui behavior and edge cases from `/Users/gurpartap/Projects/github.com/badlogic/pi-mono/packages/tui`.
+- Preserve current runtime/render/input behavior contracts unless the change explicitly updates them.
 - Backward compatibility or legacy migrations are not required.
 - Avoid cyclic dependencies between modules.
 - No dynamic imports or runtime codegen.
@@ -32,7 +31,7 @@ Use scribe cli tool to read/explore code: When you need to understand code and i
 - Prefer deterministic, golden-style tests for renderer output.
 
 ## Docs
-- Update `/Users/gurpartap/Developer/Incubating/tv/docs{ARCHITECTURE,COMPARISON,EXTENSION_CAPABILITY_MATRIX}.md` when phase boundaries change.
+- Update readme/architecture/capability docs and public Rust API docs (crate/module/item rustdoc) when behavior contracts or public surface area change.
 
 ## Commit Message Policy
 - Do **not** rely on uncommitted planning/spec files for context.

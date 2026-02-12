@@ -1,6 +1,6 @@
 mod fixture;
 
-use pi_tui::core::input::{matches_key, parse_key};
+use tape_tui::core::input::{matches_key, parse_key};
 
 #[test]
 fn key_vectors_match_fixture() {

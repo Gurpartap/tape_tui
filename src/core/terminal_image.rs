@@ -719,9 +719,7 @@ mod tests {
         let kitty_line = format!("{prefix}\x1b_Gf=100;payload\x1b\\{suffix}");
         assert!(is_image_line(&kitty_line));
 
-        let iterm_line = format!(
-            "\x1b[31m{prefix}\x1b]1337;File=inline=1:AAAA\x07{suffix}\x1b[0m"
-        );
+        let iterm_line = format!("\x1b[31m{prefix}\x1b]1337;File=inline=1:AAAA\x07{suffix}\x1b[0m");
         assert!(is_image_line(&iterm_line));
     }
 

@@ -1,4 +1,7 @@
 //! Runtime-owned overlay identifiers and options.
+//!
+//! Overlays are legacy-compatible wrappers over runtime surfaces.
+//! New host integrations should prefer `runtime::surface` APIs.
 
 use crate::render::overlay as render_overlay;
 

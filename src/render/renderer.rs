@@ -273,7 +273,7 @@ impl DiffRenderer {
                         if line_width > width {
                             if strict_width {
                                 panic!(
-                                    "Rendered line {} exceeds terminal width ({} > {}). PI_STRICT_WIDTH is set.",
+                                    "Rendered line {} exceeds terminal width ({} > {}). TAPE_STRICT_WIDTH is set.",
                                     i, line_width, width
                                 );
                             }
@@ -427,7 +427,7 @@ impl DiffRenderer {
             if line_width > width {
                 if strict_width {
                     panic!(
-                        "Rendered line {} exceeds terminal width ({} > {}). PI_STRICT_WIDTH is set.",
+                        "Rendered line {} exceeds terminal width ({} > {}). TAPE_STRICT_WIDTH is set.",
                         i, line_width, width
                     );
                 }
@@ -494,8 +494,8 @@ fn apply_line_resets(lines: &mut [String], is_image: &[bool]) {
 }
 
 fn strict_width_enabled() -> bool {
-    // Strict width checking is enabled when PI_STRICT_WIDTH is set to a non-empty value.
-    std::env::var_os("PI_STRICT_WIDTH").is_some_and(|val| !val.is_empty())
+    // Strict width checking is enabled when TAPE_STRICT_WIDTH is set to a non-empty value.
+    std::env::var_os("TAPE_STRICT_WIDTH").is_some_and(|val| !val.is_empty())
 }
 
 fn clamp_non_image_line_to_width(line: &str, width: usize) -> String {
@@ -526,15 +526,15 @@ mod tests {
     impl StrictWidthEnvGuard {
         fn set(value: &str) -> Self {
             let lock = ENV_LOCK.lock().expect("env lock poisoned");
-            let prev = std::env::var_os("PI_STRICT_WIDTH");
-            std::env::set_var("PI_STRICT_WIDTH", value);
+            let prev = std::env::var_os("TAPE_STRICT_WIDTH");
+            std::env::set_var("TAPE_STRICT_WIDTH", value);
             Self { _lock: lock, prev }
         }
 
         fn unset() -> Self {
             let lock = ENV_LOCK.lock().expect("env lock poisoned");
-            let prev = std::env::var_os("PI_STRICT_WIDTH");
-            std::env::remove_var("PI_STRICT_WIDTH");
+            let prev = std::env::var_os("TAPE_STRICT_WIDTH");
+            std::env::remove_var("TAPE_STRICT_WIDTH");
             Self { _lock: lock, prev }
         }
     }
@@ -542,8 +542,8 @@ mod tests {
     impl Drop for StrictWidthEnvGuard {
         fn drop(&mut self) {
             match self.prev.take() {
-                Some(val) => std::env::set_var("PI_STRICT_WIDTH", val),
-                None => std::env::remove_var("PI_STRICT_WIDTH"),
+                Some(val) => std::env::set_var("TAPE_STRICT_WIDTH", val),
+                None => std::env::remove_var("TAPE_STRICT_WIDTH"),
             }
         }
     }

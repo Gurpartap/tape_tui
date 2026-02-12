@@ -503,8 +503,8 @@ mod tests {
     #[test]
     fn terminal_title_ext_writes_osc_0_title_bel() {
         let mut term = RecordingTerminal::default();
-        term.set_title("pi - test");
-        assert_eq!(term.output, "\x1b]0;pi - test\x07");
+        term.set_title("tape - test");
+        assert_eq!(term.output, "\x1b]0;tape - test\x07");
         assert_eq!(term.write_calls, 1);
     }
 
@@ -521,9 +521,9 @@ mod tests {
         let mut term = RecordingTerminal::default();
         {
             let term_obj: &mut dyn Terminal = &mut term;
-            term_obj.set_title("pi");
+            term_obj.set_title("tape");
         }
-        assert_eq!(term.output, "\x1b]0;pi\x07");
+        assert_eq!(term.output, "\x1b]0;tape\x07");
         assert_eq!(term.write_calls, 1);
     }
 }

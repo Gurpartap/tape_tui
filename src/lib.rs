@@ -1,4 +1,4 @@
-//! Rust port of pi-tui.
+//! Rust port of tape-tui.
 //!
 //! Invariant: single output gate — only `core::output::OutputGate::flush(..)` writes to the
 //! terminal.
@@ -6,7 +6,7 @@
 //! # Public API Overview
 //! - Build widgets and compose them into a runtime via [`TUI`].
 //! - Parse/inspect input with key and event helpers.
-//! - Work with overlay options and handles for layered UIs.
+//! - Work with overlay/surface options and handles for layered UIs.
 //! - Use text and width helpers for ANSI-safe formatting.
 //!
 //! # Runtime Alias
@@ -78,12 +78,13 @@ pub use crate::core::cursor::CURSOR_MARKER;
 pub use crate::render::{Frame, Line, Span};
 /// Stable component identifier type.
 pub use crate::runtime::component_registry::ComponentId;
-/// Handle used to mutate a shown overlay at runtime.
-pub use crate::runtime::tui::OverlayHandle;
-/// Runtime and overlay option/model types.
+/// Handles used to mutate shown overlay/surface layers at runtime.
+pub use crate::runtime::tui::{OverlayHandle, SurfaceHandle};
+/// Runtime, overlay, and surface option/model types.
 pub use crate::runtime::{
     CustomCommand, CustomCommandCtx, CustomCommandError, OverlayAnchor, OverlayId, OverlayMargin,
-    OverlayOptions, OverlayVisibility, SizeValue,
+    OverlayOptions, OverlayVisibility, SizeValue, SurfaceId, SurfaceInputPolicy, SurfaceKind,
+    SurfaceOptions,
 };
 
 /// Alias for the main runtime type.
