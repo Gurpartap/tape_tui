@@ -389,6 +389,18 @@ pub(crate) enum SurfaceMutation {
         surface_id: SurfaceId,
         options: Option<SurfaceOptions>,
     },
+    BringToFront {
+        surface_id: SurfaceId,
+    },
+    SendToBack {
+        surface_id: SurfaceId,
+    },
+    Raise {
+        surface_id: SurfaceId,
+    },
+    Lower {
+        surface_id: SurfaceId,
+    },
 }
 
 /// Runtime-owned surface entry.
@@ -436,6 +448,52 @@ impl SurfaceState {
 
     pub(crate) fn contains(&self, surface_id: SurfaceId) -> bool {
         self.index_of(surface_id).is_some()
+    }
+
+    pub(crate) fn bring_to_front(&mut self, surface_id: SurfaceId) -> bool {
+        let Some(index) = self.index_of(surface_id) else {
+            return false;
+        };
+        if index + 1 == self.entries.len() {
+            return false;
+        }
+        let entry = self.entries.remove(index);
+        self.entries.push(entry);
+        true
+    }
+
+    pub(crate) fn send_to_back(&mut self, surface_id: SurfaceId) -> bool {
+        let Some(index) = self.index_of(surface_id) else {
+            return false;
+        };
+        if index == 0 {
+            return false;
+        }
+        let entry = self.entries.remove(index);
+        self.entries.insert(0, entry);
+        true
+    }
+
+    pub(crate) fn raise(&mut self, surface_id: SurfaceId) -> bool {
+        let Some(index) = self.index_of(surface_id) else {
+            return false;
+        };
+        if index + 1 == self.entries.len() {
+            return false;
+        }
+        self.entries.swap(index, index + 1);
+        true
+    }
+
+    pub(crate) fn lower(&mut self, surface_id: SurfaceId) -> bool {
+        let Some(index) = self.index_of(surface_id) else {
+            return false;
+        };
+        if index == 0 {
+            return false;
+        }
+        self.entries.swap(index, index - 1);
+        true
     }
 
     pub(crate) fn has_visible(&self, columns: usize, rows: usize) -> bool {
@@ -488,9 +546,12 @@ pub fn visibility_only_surface_options(visibility: SurfaceVisibility) -> Surface
 #[cfg(test)]
 mod tests {
     use super::{
-        surface_options_from_layout, SurfaceAnchor, SurfaceInputPolicy, SurfaceKind,
-        SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
+        surface_options_from_layout, SurfaceAnchor, SurfaceEntry, SurfaceId, SurfaceInputPolicy,
+        SurfaceKind, SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue,
+        SurfaceState, SurfaceVisibility,
     };
+    use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
+    use crate::Component;
 
     #[test]
     fn surface_layout_visibility_matrix_is_deterministic() {
@@ -593,5 +654,141 @@ mod tests {
         assert_eq!(actual, expected);
         let round_trip_layout = SurfaceLayoutOptions::from(surface_options);
         assert_eq!(round_trip_layout, layout);
+    }
+
+    #[derive(Default)]
+    struct TestComponent;
+
+    impl Component for TestComponent {
+        fn render(&mut self, _width: usize) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn build_component_ids(count: usize) -> Vec<ComponentId> {
+        let mut registry = ComponentRegistry::new();
+        (0..count)
+            .map(|_| registry.register_boxed(Box::new(TestComponent)))
+            .collect()
+    }
+
+    fn surface_entry(
+        surface_id: SurfaceId,
+        component_id: ComponentId,
+        hidden: bool,
+        input_policy: SurfaceInputPolicy,
+    ) -> SurfaceEntry {
+        SurfaceEntry {
+            id: surface_id,
+            component_id,
+            options: Some(SurfaceOptions {
+                input_policy,
+                ..Default::default()
+            }),
+            pre_focus: None,
+            hidden,
+        }
+    }
+
+    fn surface_order(state: &SurfaceState) -> Vec<u64> {
+        state.entries.iter().map(|entry| entry.id.raw()).collect()
+    }
+
+    #[test]
+    fn surface_state_reorder_primitives_follow_noop_and_move_contracts() {
+        let components = build_component_ids(3);
+        let mut state = SurfaceState {
+            entries: vec![
+                surface_entry(
+                    SurfaceId::from_raw(10),
+                    components[0],
+                    false,
+                    SurfaceInputPolicy::Capture,
+                ),
+                surface_entry(
+                    SurfaceId::from_raw(11),
+                    components[1],
+                    false,
+                    SurfaceInputPolicy::Capture,
+                ),
+                surface_entry(
+                    SurfaceId::from_raw(12),
+                    components[2],
+                    false,
+                    SurfaceInputPolicy::Capture,
+                ),
+            ],
+        };
+
+        assert!(!state.bring_to_front(SurfaceId::from_raw(12)));
+        assert!(!state.send_to_back(SurfaceId::from_raw(10)));
+        assert!(!state.raise(SurfaceId::from_raw(12)));
+        assert!(!state.lower(SurfaceId::from_raw(10)));
+        assert!(!state.bring_to_front(SurfaceId::from_raw(99)));
+
+        assert!(state.raise(SurfaceId::from_raw(11)));
+        assert_eq!(surface_order(&state), vec![10, 12, 11]);
+
+        assert!(state.lower(SurfaceId::from_raw(12)));
+        assert_eq!(surface_order(&state), vec![12, 10, 11]);
+
+        assert!(state.bring_to_front(SurfaceId::from_raw(12)));
+        assert_eq!(surface_order(&state), vec![10, 11, 12]);
+
+        assert!(state.send_to_back(SurfaceId::from_raw(11)));
+        assert_eq!(surface_order(&state), vec![11, 10, 12]);
+    }
+
+    #[test]
+    fn hidden_surfaces_can_reorder_without_changing_visible_capture_winner() {
+        let components = build_component_ids(3);
+        let mut state = SurfaceState {
+            entries: vec![
+                surface_entry(
+                    SurfaceId::from_raw(20),
+                    components[0],
+                    false,
+                    SurfaceInputPolicy::Capture,
+                ),
+                surface_entry(
+                    SurfaceId::from_raw(21),
+                    components[1],
+                    true,
+                    SurfaceInputPolicy::Capture,
+                ),
+                surface_entry(
+                    SurfaceId::from_raw(22),
+                    components[2],
+                    false,
+                    SurfaceInputPolicy::Capture,
+                ),
+            ],
+        };
+
+        let winner_before = state
+            .topmost_visible_component(80, 24, true)
+            .expect("visible capture winner before reorder");
+        assert_eq!(winner_before, components[2]);
+
+        assert!(state.bring_to_front(SurfaceId::from_raw(20)));
+        assert_eq!(surface_order(&state), vec![21, 22, 20]);
+        let winner_after_front = state
+            .topmost_visible_component(80, 24, true)
+            .expect("visible capture winner after bring-to-front");
+        assert_eq!(winner_after_front, components[0]);
+
+        assert!(state.bring_to_front(SurfaceId::from_raw(21)));
+        assert_eq!(surface_order(&state), vec![22, 20, 21]);
+        let winner_after_hidden_front = state
+            .topmost_visible_component(80, 24, true)
+            .expect("visible capture winner after hidden bring-to-front");
+        assert_eq!(winner_after_hidden_front, components[0]);
+
+        assert!(state.lower(SurfaceId::from_raw(20)));
+        assert_eq!(surface_order(&state), vec![20, 22, 21]);
+        let winner_after_lower = state
+            .topmost_visible_component(80, 24, true)
+            .expect("visible capture winner after lower");
+        assert_eq!(winner_after_lower, components[2]);
     }
 }

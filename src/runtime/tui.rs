@@ -1992,6 +1992,14 @@ impl<T: Terminal> TuiRuntime<T> {
                 surface_id,
                 options,
             } => self.apply_update_surface_options(surface_id, options),
+            SurfaceMutation::BringToFront { surface_id } => {
+                self.apply_bring_surface_to_front(surface_id)
+            }
+            SurfaceMutation::SendToBack { surface_id } => {
+                self.apply_send_surface_to_back(surface_id)
+            }
+            SurfaceMutation::Raise { surface_id } => self.apply_raise_surface(surface_id),
+            SurfaceMutation::Lower { surface_id } => self.apply_lower_surface(surface_id),
         }
     }
 
@@ -2276,6 +2284,76 @@ impl<T: Terminal> TuiRuntime<T> {
         };
 
         self.surfaces.entries[index].options = options;
+        true
+    }
+
+    fn apply_bring_surface_to_front(&mut self, surface_id: SurfaceId) -> bool {
+        self.apply_surface_reorder_internal(
+            surface_id,
+            "command.bring_surface_to_front.missing_surface_id",
+            "bring surface to front",
+            |surfaces, id| surfaces.bring_to_front(id),
+        )
+    }
+
+    fn apply_send_surface_to_back(&mut self, surface_id: SurfaceId) -> bool {
+        self.apply_surface_reorder_internal(
+            surface_id,
+            "command.send_surface_to_back.missing_surface_id",
+            "send surface to back",
+            |surfaces, id| surfaces.send_to_back(id),
+        )
+    }
+
+    fn apply_raise_surface(&mut self, surface_id: SurfaceId) -> bool {
+        self.apply_surface_reorder_internal(
+            surface_id,
+            "command.raise_surface.missing_surface_id",
+            "raise surface",
+            |surfaces, id| surfaces.raise(id),
+        )
+    }
+
+    fn apply_lower_surface(&mut self, surface_id: SurfaceId) -> bool {
+        self.apply_surface_reorder_internal(
+            surface_id,
+            "command.lower_surface.missing_surface_id",
+            "lower surface",
+            |surfaces, id| surfaces.lower(id),
+        )
+    }
+
+    fn apply_surface_reorder_internal<F>(
+        &mut self,
+        surface_id: SurfaceId,
+        missing_id_code: &'static str,
+        action_label: &'static str,
+        reorder: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut SurfaceState, SurfaceId) -> bool,
+    {
+        if !self.surfaces.contains(surface_id) {
+            self.emit_runtime_diagnostic(
+                "error",
+                missing_id_code,
+                format!(
+                    "{action_label} references missing surface id {}",
+                    surface_id.raw()
+                ),
+            );
+            return false;
+        }
+
+        let changed = reorder(&mut self.surfaces, surface_id);
+        if !changed {
+            return false;
+        }
+
+        if let Some(topmost_capture) = self.topmost_visible_capture_surface() {
+            self.set_focused(Some(topmost_capture));
+        }
+
         true
     }
 
@@ -2614,7 +2692,7 @@ mod tests {
     use crate::core::terminal_image::get_cell_dimensions;
     use crate::runtime::surface::{
         SurfaceAnchor, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions,
-        SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
+        SurfaceMargin, SurfaceMutation, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
     };
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -4179,6 +4257,213 @@ mod tests {
         assert!(surface_a_inputs.borrow().is_empty());
         assert!(surface_b_inputs.borrow().is_empty());
         assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn internal_surface_reorder_mutations_follow_noop_and_ordering_contracts() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&root_focus),
+        );
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let capture_options = Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            ..Default::default()
+        });
+
+        let surface_a_component = runtime.register_component(TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(false)),
+        ));
+        let surface_b_component = runtime.register_component(TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(false)),
+        ));
+        let surface_c_component = runtime.register_component(TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::new(RefCell::new(false)),
+        ));
+
+        let surface_a = runtime.show_surface(surface_a_component, capture_options);
+        let surface_b = runtime.show_surface(surface_b_component, capture_options);
+        let surface_c = runtime.show_surface(surface_c_component, capture_options);
+        runtime.run_once();
+
+        let stack_order = |runtime: &TuiRuntime<TestTerminal>| {
+            runtime
+                .surfaces
+                .entries
+                .iter()
+                .map(|entry| entry.id.raw())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_b.id.raw(), surface_c.id.raw()]
+        );
+
+        assert!(
+            !runtime.apply_surface_mutation(SurfaceMutation::BringToFront {
+                surface_id: surface_c.id,
+            })
+        );
+        assert!(
+            !runtime.apply_surface_mutation(SurfaceMutation::SendToBack {
+                surface_id: surface_a.id,
+            })
+        );
+        assert!(!runtime.apply_surface_mutation(SurfaceMutation::Raise {
+            surface_id: surface_c.id,
+        }));
+        assert!(!runtime.apply_surface_mutation(SurfaceMutation::Lower {
+            surface_id: surface_a.id,
+        }));
+
+        assert!(runtime.apply_surface_mutation(SurfaceMutation::Raise {
+            surface_id: surface_b.id,
+        }));
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_c.id.raw(), surface_b.id.raw()]
+        );
+
+        assert!(runtime.apply_surface_mutation(SurfaceMutation::Lower {
+            surface_id: surface_c.id,
+        }));
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_c.id.raw(), surface_a.id.raw(), surface_b.id.raw()]
+        );
+
+        assert!(
+            runtime.apply_surface_mutation(SurfaceMutation::BringToFront {
+                surface_id: surface_c.id,
+            })
+        );
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_b.id.raw(), surface_c.id.raw()]
+        );
+
+        assert!(runtime.apply_surface_mutation(SurfaceMutation::SendToBack {
+            surface_id: surface_b.id,
+        }));
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_b.id.raw(), surface_a.id.raw(), surface_c.id.raw()]
+        );
+    }
+
+    #[test]
+    fn hidden_capture_surface_reorder_does_not_steal_visible_capture_input() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_id = runtime.register_component(surface_a_component);
+        let surface_a = runtime.show_surface(
+            surface_a_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_id = runtime.register_component(surface_b_component);
+        let surface_b = runtime.show_surface(
+            surface_b_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        surface_b.set_hidden(true);
+        runtime.run_once();
+
+        assert!(runtime.apply_surface_mutation(SurfaceMutation::SendToBack {
+            surface_id: surface_b.id,
+        }));
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+        runtime.handle_input("x");
+
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["x".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
+        assert!(*surface_a_focus.borrow());
+        assert!(!*surface_b_focus.borrow());
+
+        assert!(
+            runtime.apply_surface_mutation(SurfaceMutation::BringToFront {
+                surface_id: surface_b.id,
+            })
+        );
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+        runtime.handle_input("y");
+
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["y".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
+        assert!(*surface_a_focus.borrow());
+        assert!(!*surface_b_focus.borrow());
+        assert!(runtime
+            .surfaces
+            .entries
+            .iter()
+            .any(|entry| entry.id == surface_b.id && entry.hidden));
+        assert_eq!(
+            runtime
+                .surfaces
+                .entries
+                .iter()
+                .map(|entry| entry.id.raw())
+                .collect::<Vec<_>>(),
+            vec![surface_a.id.raw(), surface_b.id.raw()]
+        );
     }
 
     #[test]
