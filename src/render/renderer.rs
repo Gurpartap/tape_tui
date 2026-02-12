@@ -160,7 +160,7 @@ impl DiffRenderer {
         let force_full_redraw_next = std::mem::take(&mut self.force_full_redraw_next);
 
         let width_changed = self.previous_width != 0 && self.previous_width != width;
-        let _insert_before_fast_path_plan = compute_insert_before_fast_path_eligibility(
+        let insert_before_fast_path_plan = compute_insert_before_fast_path_eligibility(
             &self.previous_lines,
             &lines,
             &is_image,
@@ -323,6 +323,29 @@ impl DiffRenderer {
 
         let append_start =
             appended_lines && first_changed == self.previous_lines.len() && first_changed > 0;
+
+        if let Some(plan) = insert_before_fast_path_plan {
+            if first_changed == plan.insertion_at {
+                let (buffer, final_cursor_row) = emit_insert_before_fast_path(
+                    &lines,
+                    plan,
+                    width,
+                    height,
+                    strict_width,
+                    hardware_cursor_row,
+                );
+                cmds.push(TerminalCmd::Bytes(buffer));
+
+                self.cursor_row = lines.len().saturating_sub(1);
+                self.hardware_cursor_row = final_cursor_row;
+                self.max_lines_rendered = self.max_lines_rendered.max(lines.len());
+                self.previous_viewport_top = self.max_lines_rendered.saturating_sub(height);
+                self.previous_lines = lines;
+                self.previous_width = width;
+
+                return cmds;
+            }
+        }
 
         if first_changed >= lines.len() {
             if self.previous_lines.len() > lines.len() {
@@ -580,6 +603,77 @@ fn compute_insert_before_fast_path_eligibility(
         previous_viewport_top,
         new_viewport_top,
     })
+}
+
+fn append_non_image_line_with_width_guard(
+    buffer: &mut String,
+    line: &str,
+    width: usize,
+    strict_width: bool,
+    line_index: usize,
+) {
+    let line_width = visible_width(line);
+    if line_width > width {
+        if strict_width {
+            panic!(
+                "Rendered line {} exceeds terminal width ({} > {}). TAPE_STRICT_WIDTH is set.",
+                line_index, line_width, width
+            );
+        }
+        buffer.push_str(&clamp_non_image_line_to_width(line, width));
+    } else {
+        buffer.push_str(line);
+    }
+}
+
+fn emit_insert_before_fast_path(
+    lines: &[String],
+    plan: InsertBeforeFastPathPlan,
+    width: usize,
+    height: usize,
+    strict_width: bool,
+    mut hardware_cursor_row: usize,
+) -> (String, usize) {
+    let mut buffer = String::from(SYNC_START);
+
+    let previous_viewport_bottom = plan.previous_viewport_top + height.saturating_sub(1);
+    let current_screen_row = hardware_cursor_row.saturating_sub(plan.previous_viewport_top) as i32;
+    let target_screen_row =
+        previous_viewport_bottom.saturating_sub(plan.previous_viewport_top) as i32;
+    let line_diff = target_screen_row - current_screen_row;
+    if line_diff > 0 {
+        buffer.push_str(&format!("\x1b[{}B", line_diff));
+    } else if line_diff < 0 {
+        buffer.push_str(&format!("\x1b[{}A", -line_diff));
+    }
+    hardware_cursor_row = previous_viewport_bottom;
+
+    for row in plan.insertion_at..plan.insertion_at + plan.inserted_count {
+        buffer.push('\r');
+        buffer.push_str("\x1b[2K");
+        append_non_image_line_with_width_guard(&mut buffer, &lines[row], width, strict_width, row);
+        buffer.push_str("\r\n");
+        hardware_cursor_row = hardware_cursor_row.saturating_add(1);
+    }
+
+    let move_up = height.saturating_sub(1);
+    if move_up > 0 {
+        buffer.push_str(&format!("\x1b[{}A", move_up));
+        hardware_cursor_row = hardware_cursor_row.saturating_sub(move_up);
+    }
+
+    for (offset, row) in (plan.new_viewport_top..lines.len()).enumerate() {
+        if offset > 0 {
+            buffer.push_str("\r\n");
+            hardware_cursor_row = hardware_cursor_row.saturating_add(1);
+        }
+        buffer.push('\r');
+        buffer.push_str("\x1b[2K");
+        append_non_image_line_with_width_guard(&mut buffer, &lines[row], width, strict_width, row);
+    }
+
+    buffer.push_str(SYNC_END);
+    (buffer, hardware_cursor_row)
 }
 
 fn apply_line_resets(lines: &mut [String], is_image: &[bool]) {
@@ -876,6 +970,56 @@ mod tests {
             )
             .is_none(),
             "surface compositing must force fallback"
+        );
+    }
+
+    #[test]
+    fn fast_path_emits_insert_before_sequence_without_full_clear() {
+        let mut renderer = DiffRenderer::new();
+        let height = 3;
+
+        let base_lines: Vec<String> = (0..6).map(|i| format!("line-{i}")).collect();
+        renderer.render(base_lines.clone().into(), 20, height, false, false);
+
+        let mut grown_lines = vec!["history-a".to_string(), "history-b".to_string()];
+        grown_lines.extend(base_lines);
+        let output = cmds_to_bytes(renderer.render(grown_lines.into(), 20, height, false, false));
+
+        let expected = format!(
+            "{}\r\x1b[2Khistory-a{}\r\n\r\x1b[2Khistory-b{}\r\n\x1b[2A\r\x1b[2Kline-3{}\r\n\r\x1b[2Kline-4{}\r\n\r\x1b[2Kline-5{}{}",
+            super::SYNC_START,
+            super::SEGMENT_RESET,
+            super::SEGMENT_RESET,
+            super::SEGMENT_RESET,
+            super::SEGMENT_RESET,
+            super::SEGMENT_RESET,
+            super::SYNC_END,
+        );
+
+        assert_eq!(output, expected);
+        assert!(!output.contains(super::CLEAR_ALL));
+        assert_eq!(renderer.previous_lines_len(), 8);
+        assert_eq!(renderer.max_lines_rendered(), 8);
+        assert_eq!(renderer.hardware_cursor_row(), 7);
+    }
+
+    #[test]
+    fn fast_path_falls_back_to_full_redraw_when_cursor_state_is_unsafe() {
+        let mut renderer = DiffRenderer::new();
+        let height = 3;
+
+        let base_lines: Vec<String> = (0..6).map(|i| format!("line-{i}")).collect();
+        renderer.render(base_lines.clone().into(), 20, height, false, false);
+
+        renderer.set_hardware_cursor_row(0);
+
+        let mut grown_lines = vec!["history-a".to_string(), "history-b".to_string()];
+        grown_lines.extend(base_lines);
+        let output = cmds_to_bytes(renderer.render(grown_lines.into(), 20, height, false, false));
+
+        assert!(
+            output.contains(super::CLEAR_ALL),
+            "unsafe cursor state should force fallback full redraw, got: {output:?}"
         );
     }
 
