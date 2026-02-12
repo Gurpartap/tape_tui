@@ -1,26 +1,57 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role};
-use coding_agent::model::{MockBackend, ModelBackend};
-use coding_agent::runtime::RuntimeController;
-use coding_agent::tools::BuiltinToolExecutor;
+use coding_agent::model::{MockBackend, ModelBackend, RunRequest};
+use coding_agent::runtime::{RunEvent, RuntimeController};
+use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
 use coding_agent::tui::AppComponent;
 use tape_tui::TUI;
 
 mod support;
 
-fn setup_runtime() -> (TUI<support::SharedTerminal>, Arc<Mutex<App>>, Arc<Mutex<support::TerminalTrace>>) {
+#[derive(Default)]
+struct BlockingBackend;
+
+impl ModelBackend for BlockingBackend {
+    fn run(
+        &self,
+        req: RunRequest,
+        cancel: Arc<AtomicBool>,
+        emit: &mut dyn FnMut(RunEvent),
+        _tools: &mut dyn ToolExecutor,
+    ) -> Result<(), String> {
+        let run_id = req.run_id;
+
+        emit(RunEvent::Started { run_id });
+        emit(RunEvent::Chunk {
+            run_id,
+            text: "working...".to_string(),
+        });
+
+        while !cancel.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        emit(RunEvent::Cancelled { run_id });
+        Ok(())
+    }
+}
+
+fn setup_runtime_with_model(
+    model: Arc<dyn ModelBackend>,
+) -> (
+    TUI<support::SharedTerminal>,
+    Arc<Mutex<App>>,
+    Arc<Mutex<support::TerminalTrace>>,
+) {
     let app = Arc::new(Mutex::new(App::new()));
     let (terminal, terminal_trace) = support::SharedTerminal::new(120, 40);
     let mut tui = TUI::new(terminal);
 
     let runtime_handle = tui.runtime_handle();
-    let model: Arc<dyn ModelBackend> = Arc::new(MockBackend::new(vec![
-        "first chunk\n".to_string(),
-        "second chunk".to_string(),
-    ]));
     let tools = BuiltinToolExecutor::new(".").expect("workspace root resolves");
     let host = RuntimeController::new(Arc::clone(&app), runtime_handle, model, tools);
 
@@ -28,6 +59,17 @@ fn setup_runtime() -> (TUI<support::SharedTerminal>, Arc<Mutex<App>>, Arc<Mutex<
     tui.set_root(vec![root]);
 
     (tui, app, terminal_trace)
+}
+
+fn setup_runtime() -> (
+    TUI<support::SharedTerminal>,
+    Arc<Mutex<App>>,
+    Arc<Mutex<support::TerminalTrace>>,
+) {
+    setup_runtime_with_model(Arc::new(MockBackend::new(vec![
+        "first chunk\n".to_string(),
+        "second chunk".to_string(),
+    ])))
 }
 
 fn run_until(
@@ -46,6 +88,51 @@ fn run_until(
     }
 
     predicate()
+}
+
+#[test]
+fn prompt_is_visible_on_start() {
+    let (mut tui, _app, terminal_trace) = setup_runtime();
+
+    tui.start().expect("runtime start");
+
+    let rendered = run_until(&mut tui, Duration::from_secs(1), || {
+        let output = support::rendered_output(&terminal_trace);
+        output.contains("Status: Idle") && output.contains("> ")
+    });
+    assert!(rendered, "initial prompt render was not observed");
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn escape_key_cancels_active_run() {
+    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(BlockingBackend));
+
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "long run");
+    support::inject_input(&terminal_trace, "\r");
+
+    let started = run_until(&mut tui, Duration::from_secs(2), || {
+        matches!(support::lock_unpoisoned(&app).mode, Mode::Running { .. })
+    });
+    assert!(started, "run did not enter running mode");
+
+    support::inject_input(&terminal_trace, "\x1b");
+
+    let cancelled = run_until(&mut tui, Duration::from_secs(3), || {
+        let app = support::lock_unpoisoned(&app);
+        matches!(app.mode, Mode::Idle)
+            && app
+                .transcript
+                .iter()
+                .any(|message| message.role == Role::System && message.content == "Run cancelled")
+    });
+    assert!(cancelled, "escape key did not cancel active run");
+
+    tui.stop().expect("runtime stop");
 }
 
 #[test]
@@ -78,7 +165,14 @@ fn normal_flow_stays_inline_without_alternate_screen_sequences() {
     tui.stop().expect("runtime stop");
 
     let output = support::rendered_output(&terminal_trace);
-    for sequence in ["\x1b[?1049h", "\x1b[?1049l", "\x1b[?1047h", "\x1b[?1047l", "\x1b[?47h", "\x1b[?47l"] {
+    for sequence in [
+        "\x1b[?1049h",
+        "\x1b[?1049l",
+        "\x1b[?1047h",
+        "\x1b[?1047l",
+        "\x1b[?47h",
+        "\x1b[?47l",
+    ] {
         assert!(
             !output.contains(sequence),
             "inline runtime emitted alternate-screen sequence: {sequence:?}"
