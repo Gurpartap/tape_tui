@@ -218,6 +218,17 @@ Each surface has:
 
 Input dispatch uses an internal `Consumed`/`Ignored` result model. Runtime arbitration is capture-first, then deterministic fallback (pre-focus/focused/root) when a capture target ignores an event.
 
+Surface lifecycle now also supports atomic transaction commands: an ordered list of
+`SurfaceTransactionMutation` entries can be applied in one command boundary. The runtime applies
+entries in-order, performs focus reconciliation after the ordered apply stage, and requests render
+once for the transaction boundary when any effective state changed. Invalid targets emit ordered
+runtime diagnostics (`command.surface_transaction.*`) while valid entries still apply.
+
+Transaction non-goals remain explicit in architecture scope:
+- no z-order feature expansion,
+- no two-pass size negotiation,
+- no insert-before viewport fast path.
+
 ### 6. Input Pipeline
 
 ```mermaid

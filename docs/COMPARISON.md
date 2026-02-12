@@ -74,6 +74,15 @@ The Rust runtime now emits structured diagnostics for mutation-path failures (fo
 
 The Rust runtime now centralizes inline viewport anchoring/clamp bookkeeping in a dedicated runtime helper (`runtime/inline_viewport.rs`) and recomputes it deterministically on resize/content updates. The TypeScript reference keeps this logic distributed in runtime/app paths.
 
+### 11. Atomic Surface Transaction Commands ★
+
+The Rust runtime exposes an explicit transaction command path (`SurfaceTransactionMutation` +
+`Command::SurfaceTransaction`) and ergonomic runtime/runtime-handle/custom-command entrypoints for
+ordered multi-mutation surface lifecycle updates. This adds a deterministic batch boundary with one
+reconciliation/render decision stage and ordered diagnostics for mixed valid/invalid mutation
+payloads. The TypeScript reference does not expose an equivalent first-class transaction payload for
+surface lifecycle operations.
+
 ---
 
 ## Where the Rust Port Is Worse
@@ -122,6 +131,7 @@ The Rust runtime uses a `ComponentId` + registry model for ownership-safe mutati
 | Surface compositing | Same single-pass `extractSegments` + `sliceWithWidth` algorithm in transient-layer path | Ported and extended with first-class surface layering | Rust adds surface kinds (`Modal`, `Drawer`, `Corner`, `Toast`, `AttachmentRow`) and lane-aware placement with a surface-only runtime API. |
 | Transient-layer visibility API | `OverlayOptions.visible(termWidth, termHeight)` callback can decide visibility dynamically | `SurfaceVisibility` enum-based checks (`Always`, `MinCols`, `MinSize`) on `SurfaceLayoutOptions` | **Current divergence:** Rust uses deterministic enum-based visibility rules instead of a user callback. |
 | Input routing with transient layers | Overlay event handling done through TS runtime layering/focus mechanics | Deterministic capture-first arbitration with internal `Consumed`/`Ignored` bubbling to pre-focus/focused/root fallback targets | Rust now has explicit `SurfaceInputPolicy::{Capture, Passthrough}` semantics for host/extension composition. |
+| Surface lifecycle batching | Sequential overlay operations | Explicit ordered transaction payloads (`SurfaceTransactionMutation`) plus single-op APIs | Rust adds first-class atomic batching while preserving single-op paths. |
 | Kitty keyboard protocol | Same query → detect → enable flow | Ported faithfully | Same flag 1+2+4 semantics, same base-layout-key fallback logic. |
 | Image support | Kitty + iTerm2 detection/encoding | Ported faithfully | Both detect via env vars. |
 | Render scheduling boundary | `process.nextTick` microtask boundary | Bounded, non-blocking coalescing window in `run_blocking_once()` | Semantic difference; both coalesce. |

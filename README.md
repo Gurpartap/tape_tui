@@ -12,6 +12,7 @@ This crate started as a Rust port of the TypeScript `pi-tui` library and has sin
 - **Deterministic output** via a single terminal output gate (`OutputGate::flush(..)`)
 - ANSI **diff renderer** (fast repaints without clearing the whole screen)
 - **Surface stack** (drawers/modals/toasts/etc.) with explicit input routing policies
+- **Atomic surface transactions** for ordered multi-mutation lifecycle updates in one runtime command boundary
 - Deterministic capture-first bubbling (`Consumed`/`Ignored`) with focused/root fallback
 - Runtime-owned inline viewport state (tail anchor + resize clamp)
 - Structured input events (Kitty keyboard protocol + legacy fallbacks)
@@ -62,6 +63,26 @@ via `SurfaceHandle`. Background threads can enqueue equivalent mutations through
 Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root).
 
 Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers). Internally, geometry resolution and compositing are surface-native (`render::surface`) with no overlay compatibility layer.
+
+#### Atomic surface transactions
+
+When multiple lifecycle updates must be applied as one deterministic operation, use
+`SurfaceTransactionMutation` with `TuiRuntime::surface_transaction(..)` or
+`RuntimeHandle::surface_transaction(..)`.
+
+Transaction contract:
+- mutations are applied strictly in payload order,
+- focus reconciliation happens after the ordered apply stage,
+- rendering is requested once for the transaction boundary (unless nothing changed),
+- invalid mutation targets produce ordered diagnostics while valid entries continue.
+
+Transactions compose with existing APIs (single-op commands, `SurfaceHandle`, custom commands)
+instead of replacing them.
+
+Current non-goals for transaction semantics:
+- no z-order control expansion,
+- no two-pass size negotiation,
+- no viewport insert-before fast path.
 
 ### Single output gate (invariant)
 
