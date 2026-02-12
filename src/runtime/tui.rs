@@ -344,6 +344,56 @@ impl<'a> CustomCommandCtx<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SurfaceTransactionMutation {
+    Show {
+        surface_id: SurfaceId,
+        component: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    },
+    Hide {
+        surface_id: SurfaceId,
+    },
+    SetHidden {
+        surface_id: SurfaceId,
+        hidden: bool,
+    },
+    UpdateOptions {
+        surface_id: SurfaceId,
+        options: Option<SurfaceOptions>,
+    },
+}
+
+impl SurfaceTransactionMutation {
+    fn into_internal(self) -> SurfaceMutation {
+        match self {
+            Self::Show {
+                surface_id,
+                component,
+                options,
+                hidden,
+            } => SurfaceMutation::Show {
+                surface_id,
+                component_id: component,
+                options,
+                hidden,
+            },
+            Self::Hide { surface_id } => SurfaceMutation::Hide { surface_id },
+            Self::SetHidden { surface_id, hidden } => {
+                SurfaceMutation::SetHidden { surface_id, hidden }
+            }
+            Self::UpdateOptions {
+                surface_id,
+                options,
+            } => SurfaceMutation::UpdateOptions {
+                surface_id,
+                options,
+            },
+        }
+    }
+}
+
 pub enum Command {
     RequestRender,
     RequestStop,
@@ -367,6 +417,9 @@ pub enum Command {
     UpdateSurfaceOptions {
         surface_id: SurfaceId,
         options: Option<SurfaceOptions>,
+    },
+    SurfaceTransaction {
+        mutations: Vec<SurfaceTransactionMutation>,
     },
     Terminal(TerminalOp),
     Custom(Box<dyn CustomCommand>),
@@ -409,6 +462,10 @@ impl std::fmt::Debug for Command {
                 .debug_struct("UpdateSurfaceOptions")
                 .field("surface_id", surface_id)
                 .field("options", options)
+                .finish(),
+            Self::SurfaceTransaction { mutations } => f
+                .debug_struct("SurfaceTransaction")
+                .field("mutations", mutations)
                 .finish(),
             Self::Terminal(op) => f.debug_tuple("Terminal").field(op).finish(),
             Self::Custom(command) => f.debug_tuple("Custom").field(&command.name()).finish(),
@@ -1737,6 +1794,11 @@ impl<T: Terminal> TuiRuntime<T> {
                         render_requested = true;
                     }
                 }
+                Command::SurfaceTransaction { mutations } => {
+                    if self.apply_surface_transaction(mutations) {
+                        render_requested = true;
+                    }
+                }
                 Command::Terminal(op) => {
                     if self.apply_terminal_op(op) {
                         render_requested = true;
@@ -1900,6 +1962,85 @@ impl<T: Terminal> TuiRuntime<T> {
                 options,
             } => self.apply_update_surface_options(surface_id, options),
         }
+    }
+
+    fn apply_surface_transaction(&mut self, mutations: Vec<SurfaceTransactionMutation>) -> bool {
+        let mut changed = false;
+
+        for (index, mutation) in mutations.into_iter().enumerate() {
+            let valid_target = match mutation {
+                SurfaceTransactionMutation::Show { component, .. } => {
+                    if self.components.get_mut(component).is_none() {
+                        self.emit_runtime_diagnostic(
+                            "error",
+                            "command.surface_transaction.missing_component_id",
+                            format!(
+                                "surface transaction mutation[{index}] show references missing component id {}",
+                                component.raw()
+                            ),
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+                SurfaceTransactionMutation::Hide { surface_id } => {
+                    if !self.surfaces.contains(surface_id) {
+                        self.emit_runtime_diagnostic(
+                            "error",
+                            "command.surface_transaction.missing_surface_id",
+                            format!(
+                                "surface transaction mutation[{index}] hide references missing surface id {}",
+                                surface_id.raw()
+                            ),
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+                SurfaceTransactionMutation::SetHidden { surface_id, .. } => {
+                    if !self.surfaces.contains(surface_id) {
+                        self.emit_runtime_diagnostic(
+                            "error",
+                            "command.surface_transaction.missing_surface_id",
+                            format!(
+                                "surface transaction mutation[{index}] set-hidden references missing surface id {}",
+                                surface_id.raw()
+                            ),
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+                SurfaceTransactionMutation::UpdateOptions { surface_id, .. } => {
+                    if !self.surfaces.contains(surface_id) {
+                        self.emit_runtime_diagnostic(
+                            "error",
+                            "command.surface_transaction.missing_surface_id",
+                            format!(
+                                "surface transaction mutation[{index}] update-options references missing surface id {}",
+                                surface_id.raw()
+                            ),
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+            };
+
+            if !valid_target {
+                continue;
+            }
+
+            if self.apply_surface_mutation(mutation.into_internal()) {
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     fn apply_show_surface(
@@ -2433,7 +2574,7 @@ mod tests {
     use super::{
         apply_lane_reservations, find_cell_size_response, CoalesceBudget, Command, ComponentId,
         CrashCleanup, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle,
-        TerminalOp, TuiRuntime,
+        SurfaceTransactionMutation, TerminalOp, TuiRuntime,
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
@@ -4639,6 +4780,254 @@ mod tests {
         assert_eq!(surface_a_inputs.borrow().as_slice(), &["w".to_string()]);
         assert!(surface_b_inputs.borrow().is_empty());
         assert!(root_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn surface_transaction_applies_ordered_mutations_with_single_render_boundary() {
+        let terminal = TestTerminal::new(80, 24);
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let (mut runtime, _root_id) = runtime_with_root(terminal, component);
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+        let baseline_renders = state.borrow().renders;
+
+        let first_surface_component = runtime.register_component(DummyComponent::default());
+        let second_surface_component = runtime.register_component(DummyComponent::default());
+
+        let handle = runtime.runtime_handle();
+        let surface_a = handle.alloc_surface_id();
+        let surface_b = handle.alloc_surface_id();
+
+        handle.dispatch(Command::SurfaceTransaction {
+            mutations: vec![
+                SurfaceTransactionMutation::Show {
+                    surface_id: surface_a,
+                    component: first_surface_component,
+                    options: Some(SurfaceOptions {
+                        input_policy: SurfaceInputPolicy::Capture,
+                        kind: SurfaceKind::Modal,
+                        ..Default::default()
+                    }),
+                    hidden: false,
+                },
+                SurfaceTransactionMutation::Show {
+                    surface_id: surface_b,
+                    component: second_surface_component,
+                    options: Some(SurfaceOptions {
+                        input_policy: SurfaceInputPolicy::Capture,
+                        kind: SurfaceKind::Modal,
+                        ..Default::default()
+                    }),
+                    hidden: true,
+                },
+                SurfaceTransactionMutation::SetHidden {
+                    surface_id: surface_b,
+                    hidden: false,
+                },
+                SurfaceTransactionMutation::Hide {
+                    surface_id: surface_a,
+                },
+                SurfaceTransactionMutation::UpdateOptions {
+                    surface_id: surface_b,
+                    options: Some(SurfaceOptions {
+                        input_policy: SurfaceInputPolicy::Passthrough,
+                        kind: SurfaceKind::Corner,
+                        ..Default::default()
+                    }),
+                },
+            ],
+        });
+
+        runtime.run_once();
+
+        assert_eq!(state.borrow().renders, baseline_renders + 1);
+        assert_eq!(runtime.surfaces.entries.len(), 1);
+        assert_eq!(runtime.surfaces.entries[0].id, surface_b);
+        assert_eq!(
+            runtime.surfaces.entries[0].component_id,
+            second_surface_component
+        );
+        assert!(!runtime.surfaces.entries[0].hidden);
+        assert_eq!(
+            runtime.surfaces.entries[0].input_policy(),
+            SurfaceInputPolicy::Passthrough
+        );
+    }
+
+    #[test]
+    fn surface_transaction_invalid_targets_emit_ordered_diagnostics_and_continue() {
+        let mut id_source_runtime = TuiRuntime::new(TestTerminal::default());
+        let _ = id_source_runtime.register_component(DummyComponent::default());
+        let _ = id_source_runtime.register_component(DummyComponent::default());
+        let missing_component_id = id_source_runtime.register_component(DummyComponent::default());
+
+        let terminal = TestTerminal::new(80, 24);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+
+        let diagnostics = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = Rc::clone(&diagnostics);
+        runtime.set_on_diagnostic(Some(Box::new(move |message| {
+            sink.borrow_mut().push(message.to_string());
+        })));
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+
+        let valid_component = runtime.register_component(DummyComponent::default());
+        let valid_surface_id = SurfaceId::from_raw(700);
+        let missing_surface_id = SurfaceId::from_raw(4040);
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::SurfaceTransaction {
+            mutations: vec![
+                SurfaceTransactionMutation::Show {
+                    surface_id: valid_surface_id,
+                    component: missing_component_id,
+                    options: None,
+                    hidden: false,
+                },
+                SurfaceTransactionMutation::Hide {
+                    surface_id: missing_surface_id,
+                },
+                SurfaceTransactionMutation::Show {
+                    surface_id: valid_surface_id,
+                    component: valid_component,
+                    options: None,
+                    hidden: false,
+                },
+                SurfaceTransactionMutation::SetHidden {
+                    surface_id: missing_surface_id,
+                    hidden: true,
+                },
+            ],
+        });
+
+        runtime.run_once();
+
+        assert_eq!(runtime.surfaces.entries.len(), 1);
+        assert_eq!(runtime.surfaces.entries[0].id, valid_surface_id);
+        assert_eq!(runtime.surfaces.entries[0].component_id, valid_component);
+
+        let diagnostics = diagnostics.borrow();
+        assert_eq!(diagnostics.len(), 3);
+        assert!(
+            diagnostics[0].contains("command.surface_transaction.missing_component_id")
+                && diagnostics[0].contains("mutation[0]"),
+            "expected ordered missing component diagnostic, got: {:?}",
+            diagnostics[0]
+        );
+        assert!(
+            diagnostics[1].contains("command.surface_transaction.missing_surface_id")
+                && diagnostics[1].contains("mutation[1]"),
+            "expected ordered missing surface diagnostic, got: {:?}",
+            diagnostics[1]
+        );
+        assert!(
+            diagnostics[2].contains("command.surface_transaction.missing_surface_id")
+                && diagnostics[2].contains("mutation[3]"),
+            "expected ordered missing surface diagnostic, got: {:?}",
+            diagnostics[2]
+        );
+    }
+
+    #[test]
+    fn surface_transaction_replay_produces_identical_final_state() {
+        let snapshot = || {
+            let terminal = TestTerminal::new(80, 24);
+
+            let root_focus = Rc::new(RefCell::new(false));
+            let root_component = TestComponent::new(
+                false,
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::clone(&root_focus),
+            );
+            let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+            runtime.start().expect("runtime start");
+            runtime.set_focus(root_id);
+            runtime.run_once();
+
+            let surface_a_focus = Rc::new(RefCell::new(false));
+            let surface_a_component = TestComponent::new(
+                false,
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::clone(&surface_a_focus),
+            );
+            let surface_a_component_id = runtime.register_component(surface_a_component);
+
+            let surface_b_focus = Rc::new(RefCell::new(false));
+            let surface_b_component = TestComponent::new(
+                false,
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::clone(&surface_b_focus),
+            );
+            let surface_b_component_id = runtime.register_component(surface_b_component);
+
+            let handle = runtime.runtime_handle();
+            let surface_a_id = handle.alloc_surface_id();
+            let surface_b_id = handle.alloc_surface_id();
+            handle.dispatch(Command::SurfaceTransaction {
+                mutations: vec![
+                    SurfaceTransactionMutation::Show {
+                        surface_id: surface_a_id,
+                        component: surface_a_component_id,
+                        options: Some(SurfaceOptions {
+                            input_policy: SurfaceInputPolicy::Capture,
+                            kind: SurfaceKind::Modal,
+                            ..Default::default()
+                        }),
+                        hidden: false,
+                    },
+                    SurfaceTransactionMutation::Show {
+                        surface_id: surface_b_id,
+                        component: surface_b_component_id,
+                        options: Some(SurfaceOptions {
+                            input_policy: SurfaceInputPolicy::Capture,
+                            kind: SurfaceKind::Modal,
+                            ..Default::default()
+                        }),
+                        hidden: false,
+                    },
+                    SurfaceTransactionMutation::SetHidden {
+                        surface_id: surface_a_id,
+                        hidden: true,
+                    },
+                    SurfaceTransactionMutation::UpdateOptions {
+                        surface_id: surface_b_id,
+                        options: Some(SurfaceOptions {
+                            input_policy: SurfaceInputPolicy::Passthrough,
+                            kind: SurfaceKind::Corner,
+                            ..Default::default()
+                        }),
+                    },
+                ],
+            });
+
+            runtime.run_once();
+
+            let surfaces = runtime
+                .surfaces
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.id.raw(),
+                        entry.component_id.raw(),
+                        entry.hidden,
+                        entry.input_policy(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let focused = runtime.focused.map(ComponentId::raw);
+            (surfaces, focused)
+        };
+
+        let baseline = snapshot();
+        let rerun = snapshot();
+        assert_eq!(rerun, baseline);
     }
 
     #[test]
