@@ -83,6 +83,15 @@ reconciliation/render decision stage and ordered diagnostics for mixed valid/inv
 payloads. The TypeScript reference does not expose an equivalent first-class transaction payload for
 surface lifecycle operations.
 
+### 12. Deterministic Two-Pass Surface Budgeting ★★
+
+The Rust runtime now performs visible-surface sizing with an explicit measure → allocate → render
+flow. In constrained terminals, lane reservations are allocated deterministically and clamped to
+terminal bounds before any surface render call. This guarantees that `set_viewport_size` receives
+final budgets (including zero-row allocations for later lane occupants when earlier lanes consume
+available space). The TypeScript reference still resolves overlay sizing/compositing in a single
+pass without this explicit runtime negotiation stage.
+
 ---
 
 ## Where the Rust Port Is Worse
@@ -128,7 +137,7 @@ The Rust runtime uses a `ComponentId` + registry model for ownership-safe mutati
 | Width calculation | `get-east-asian-width` + `Intl.Segmenter` + LRU cache | `unicode-width` + `unicode-segmentation` + `emojis` crate | Different implementations, both correct. TS uses a 512-entry cache; Rust doesn't (but Rust is faster baseline). |
 | Markdown parser | `marked` (not visible in deps, probably workspace) | `markdown` crate | Different parsers, potentially different edge cases. |
 | ANSI tracker | `AnsiCodeTracker` class with mutable state | Inline in `text/slice.rs` + `text/ansi.rs` | Same granularity of SGR tracking. |
-| Surface compositing | Same single-pass `extractSegments` + `sliceWithWidth` algorithm in transient-layer path | Ported and extended with first-class surface layering | Rust adds surface kinds (`Modal`, `Drawer`, `Corner`, `Toast`, `AttachmentRow`) and lane-aware placement with a surface-only runtime API. |
+| Surface compositing | Single-pass overlay layout/compositing in transient-layer path | Two-pass runtime negotiation (measure + allocate) before compositing | Rust adds surface kinds (`Modal`, `Drawer`, `Corner`, `Toast`, `AttachmentRow`) plus deterministic lane-budget allocation and clamped constrained-size behavior. |
 | Transient-layer visibility API | `OverlayOptions.visible(termWidth, termHeight)` callback can decide visibility dynamically | `SurfaceVisibility` enum-based checks (`Always`, `MinCols`, `MinSize`) on `SurfaceLayoutOptions` | **Current divergence:** Rust uses deterministic enum-based visibility rules instead of a user callback. |
 | Input routing with transient layers | Overlay event handling done through TS runtime layering/focus mechanics | Deterministic capture-first arbitration with internal `Consumed`/`Ignored` bubbling to pre-focus/focused/root fallback targets | Rust now has explicit `SurfaceInputPolicy::{Capture, Passthrough}` semantics for host/extension composition. |
 | Surface lifecycle batching | Sequential overlay operations | Explicit ordered transaction payloads (`SurfaceTransactionMutation`) plus single-op APIs | Rust adds first-class atomic batching while preserving single-op paths. |

@@ -12,6 +12,7 @@ This crate started as a Rust port of the TypeScript `pi-tui` library and has sin
 - **Deterministic output** via a single terminal output gate (`OutputGate::flush(..)`)
 - ANSI **diff renderer** (fast repaints without clearing the whole screen)
 - **Surface stack** (drawers/modals/toasts/etc.) with explicit input routing policies
+- Deterministic two-pass surface size negotiation (measure → allocate → render)
 - Deterministic surface z-order controls (`bring_to_front`, `send_to_back`, `raise`, `lower`)
 - **Atomic surface transactions** for ordered multi-mutation lifecycle updates in one runtime command boundary
 - Deterministic capture-first bubbling (`Consumed`/`Ignored`) with focused/root fallback
@@ -67,6 +68,16 @@ Runtime input arbitration is deterministic: the topmost visible capture surface 
 
 Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers). Internally, geometry resolution and compositing are surface-native (`render::surface`) with no overlay compatibility layer.
 
+Two-pass sizing contract for visible surfaces:
+1. **Measure pass:** derive deterministic per-surface constraints from `SurfaceOptions` (`SurfaceKind` lane + layout width/height constraints).
+2. **Allocate pass:** compute deterministic lane reservations and per-surface viewport budgets (width + rows), clamped to terminal bounds.
+3. **Render pass:** call `set_viewport_size` with the final allocated budget, render lines, and composite with resolved geometry.
+
+Implications:
+- hidden surfaces are excluded from the active budget,
+- constrained terminals can yield zero-budget allocations for later lane occupants,
+- same surface stack + terminal size => same measured constraints and final allocations.
+
 Z-order mutation contract:
 - `bring_to_front` / `send_to_back` perform absolute repositioning,
 - `raise` / `lower` perform one-step adjacent swaps,
@@ -90,7 +101,6 @@ instead of replacing them.
 
 Current non-goals for transaction semantics:
 - transaction payloads do not currently include z-order mutation variants (use handle/runtime z-order commands),
-- no two-pass size negotiation,
 - no viewport insert-before fast path.
 
 ### Single output gate (invariant)

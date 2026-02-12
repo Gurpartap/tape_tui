@@ -185,9 +185,13 @@ sequenceDiagram
     TUI->>TUI: extract_cursor_marker() (fallback cursor)
     TUI->>TUI: strip CURSOR_MARKER from all lines
 
-    loop Each visible surface
-        TUI->>Surfaces: render(resolved_width) → Vec<String>
-        TUI->>Surfaces: resolve layout (anchor, margins, %)
+    TUI->>TUI: measure visible surface constraints (kind + layout options)
+    TUI->>TUI: allocate deterministic lane budgets (top/bottom/floating)
+
+    loop Each visible surface (with allocated budget)
+        TUI->>Surfaces: set_viewport_size(allocated_cols, allocated_rows)
+        TUI->>Surfaces: render(allocated_cols) → Vec<String>
+        TUI->>Surfaces: resolve layout (anchor, margins, allocated size)
     end
 
     TUI->>TUI: composite_surface_lines onto base lines
@@ -213,12 +217,18 @@ Each surface has:
 - **Layout options**: anchor point, size (absolute or %), margins, offsets
 - **Input policy**: `Capture` or `Passthrough` for deterministic routing
 - **Surface kind**: `Modal`, `Drawer`, `Corner`, `Toast`, `AttachmentRow` for lane defaults
+- **Two-pass sizing**: visible surfaces are measured first, then allocated deterministic lane budgets before render
 - **Focus management**: `pre_focus` saves the previously focused component for restoration
 - **Z-order controls**: deterministic `bring_to_front`, `send_to_back`, `raise`, `lower` mutations
 - **Compositing**: surfaces are spliced into the base frame line-by-line using `extract_segments()` + `slice_with_width()` from the text engine
 
 Input dispatch uses an internal `Consumed`/`Ignored` result model. Runtime arbitration is capture-first, then deterministic fallback (pre-focus/focused/root) when a capture target ignores an event.
 Visible/hidden status gates input ownership even after reorder mutations; hidden surfaces can be reordered without becoming capture winners.
+
+Sizing/compositing constraints are now deterministic under tiny terminals:
+- hidden surfaces are excluded from the active measure/allocate budget,
+- lane allocations are clamped to terminal bounds,
+- later lane surfaces may receive a zero-row budget when earlier lane occupants consume constrained space.
 
 Surface lifecycle now also supports atomic transaction commands: an ordered list of
 `SurfaceTransactionMutation` entries can be applied in one command boundary. The runtime applies
@@ -233,7 +243,6 @@ Z-order mutations are available through three coherent paths:
 
 Transaction non-goals remain explicit in architecture scope:
 - transaction payloads do not yet include z-order mutation variants,
-- no two-pass size negotiation,
 - no insert-before viewport fast path.
 
 ### 6. Input Pipeline
