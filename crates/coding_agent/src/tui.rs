@@ -7,12 +7,34 @@ use tape_tui::core::component::Focusable;
 use tape_tui::core::cursor::CursorPos;
 use tape_tui::core::input::KeyEventType;
 use tape_tui::{
-    default_editor_keybindings_handle, Component, Editor, EditorOptions, EditorTheme, InputEvent,
-    SelectListTheme,
+    default_editor_keybindings_handle, Component, Editor, EditorOptions, EditorTheme, InputEvent, Markdown,
+    MarkdownTheme, SelectListTheme,
 };
 
 use crate::app::{App, HostOps, Message, Mode, Role};
 use crate::runtime::RuntimeController;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Plan,
+    Build,
+}
+
+impl ViewMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Plan => Self::Build,
+            Self::Build => Self::Plan,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Build => "build",
+        }
+    }
+}
 
 fn ansi_wrap(text: &str, prefix: &str, suffix: &str) -> String {
     format!("{prefix}{text}{suffix}")
@@ -54,6 +76,18 @@ fn yellow_dim(text: &str) -> String {
     ansi_wrap(text, "\x1b[33m\x1b[2m", "\x1b[22m\x1b[39m")
 }
 
+fn underline(text: &str) -> String {
+    ansi_wrap(text, "\x1b[4m", "\x1b[24m")
+}
+
+fn italic(text: &str) -> String {
+    ansi_wrap(text, "\x1b[3m", "\x1b[23m")
+}
+
+fn strikethrough(text: &str) -> String {
+    ansi_wrap(text, "\x1b[9m", "\x1b[29m")
+}
+
 fn editor_theme() -> EditorTheme {
     EditorTheme {
         border_color: Box::new(dim),
@@ -72,6 +106,7 @@ pub struct AppComponent {
     host: Arc<RuntimeController>,
     editor: Editor,
     cursor_pos: Option<CursorPos>,
+    view_mode: ViewMode,
 }
 
 impl AppComponent {
@@ -122,6 +157,7 @@ impl AppComponent {
             host,
             editor,
             cursor_pos: None,
+            view_mode: ViewMode::Plan,
         }
     }
 
@@ -155,18 +191,15 @@ impl Component for AppComponent {
             "",
         );
         let editor_start_row = lines.len();
-        lines.extend(self.editor.render(width));
+        let mut editor_lines = self.editor.render(width);
+        if let Some(editor_border) = editor_lines.get_mut(0) {
+            *editor_border = render_mode_line(width, self.view_mode);
+        }
+        lines.extend(editor_lines);
         append_wrapped_text(
             &mut lines,
             width,
-            &render_command_guide(),
-            "",
-            "",
-        );
-        append_wrapped_text(
-            &mut lines,
-            width,
-            &render_working_directory(),
+            &render_status_footer(width),
             "",
             "",
         );
@@ -206,6 +239,11 @@ impl Component for AppComponent {
                 }
                 "ctrl+c" => {
                     self.with_app_mut(|app, host| app.on_quit(host));
+                }
+                "shift+tab" => {
+                    self.view_mode = self.view_mode.next();
+                    let mut host = Arc::clone(&self.host);
+                    host.request_render();
                 }
                 _ => {
                     self.editor.handle_event(event);
@@ -255,13 +293,67 @@ fn render_working_directory() -> String {
         Ok(path) => {
             let cwd = path.display().to_string();
             let branch = current_git_branch().unwrap_or_else(|| "unknown".to_string());
-            format!("{} {} {}", dim("cwd"), cyan(&cwd), dim(&format!("({branch})")))
+            let home = std::env::var("HOME").ok();
+            format_working_directory_with_home(&cwd, &branch, home.as_deref())
         }
         Err(_) => format!(
-            "{} {}",
-            dim("cwd"),
-            red("<unable to read current working directory>")
+            "{}", dim("<unable to read current working directory>")
         ),
+    }
+}
+
+fn render_model_and_thinking() -> String {
+    let model = std::env::var("CODING_AGENT_MODEL").unwrap_or_else(|_| "mock".to_string());
+    let thinking = std::env::var("CODING_AGENT_THINKING").unwrap_or_else(|_| "balanced".to_string());
+
+    render_model_and_thinking_with(&model, &thinking)
+}
+
+fn render_model_and_thinking_with(model: &str, thinking: &str) -> String {
+    format!(
+        "{} {} {} {} {}",
+        dim("model"),
+        cyan(model),
+        dim("•"),
+        dim("thinking"),
+        yellow(thinking)
+    )
+}
+
+fn format_working_directory_with_home(cwd: &str, branch: &str, home: Option<&str>) -> String {
+    let display_path = home
+        .map(|home| {
+            if cwd == home {
+                "~".to_string()
+            } else {
+                cwd.strip_prefix(&format!("{home}/"))
+                    .map_or(cwd.to_string(), |rest| format!("~/{rest}"))
+            }
+        })
+        .unwrap_or_else(|| cwd.to_string());
+
+    format!("{} {}", dim(&display_path), dim(&format!("({branch})")))
+}
+
+fn render_status_footer(width: usize) -> String {
+    let left = render_working_directory();
+    let right = render_model_and_thinking();
+    let left_width = visible_text_width(&left);
+    let right_width = visible_text_width(&right);
+
+    if width == 0 {
+        return String::new();
+    }
+
+    if left_width + right_width + 2 > width {
+        if right_width >= width {
+            right
+        } else {
+            format!("{:>width$}", right, width = width)
+        }
+    } else {
+        let fill = width - (left_width + right_width);
+        format!("{left}{}{}", " ".repeat(fill), right)
     }
 }
 
@@ -285,22 +377,34 @@ fn current_git_branch() -> Option<String> {
     }
 }
 
-fn render_command_guide() -> String {
-    let commands = ["/help", "/clear", "/cancel", "/quit"];
+fn render_mode_line(width: usize, view_mode: ViewMode) -> String {
+    let label = format!(" {} ", view_mode.label());
+    let label_width = visible_text_width(&label);
+
+    if width == 0 {
+        return String::new();
+    }
+
+    if label_width >= width {
+        return dim(&"─".repeat(width));
+    }
+
+    if width <= 2 + label_width {
+        return dim(&"─".repeat(width));
+    }
+
+    let right_pad = width - 2 - label_width;
     format!(
-        "{} {}",
-        dim("Commands:"),
-        commands
-            .iter()
-            .map(|command| cyan(command))
-            .collect::<Vec<_>>()
-            .join(" ")
+        "{}{}{}",
+        dim("──"),
+        yellow_dim(&label),
+        dim(&"─".repeat(right_pad))
     )
 }
 
 fn separator_line(width: usize) -> String {
     let max = width.max(10);
-    dim(&"─".repeat(max.saturating_sub(1)))
+    dim(&"─".repeat(max))
 }
 
 fn spinner_glyph() -> String {
@@ -315,175 +419,61 @@ fn spinner_glyph() -> String {
 
 fn render_message_lines(message: &Message, width: usize, lines: &mut Vec<String>) {
     let role_prefix = message_role_prefix(message);
-    let markdown_lines = render_markdown_lines(&message.content);
 
     if message.content.is_empty() {
         append_wrapped_text(lines, width, "", &format!("{role_prefix}: "), "  ");
         return;
     }
 
-    for (index, line) in markdown_lines.iter().enumerate() {
-        let prefix = if index == 0 {
-            format!("{role_prefix}: ")
-        } else {
-            "  ".to_string()
-        };
-        append_wrapped_text(lines, width, line, &prefix, "  ");
-    }
-}
-
-fn render_markdown_lines(text: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut in_code_block = false;
-
-    for line in text.split('\n') {
-        let rendered = render_markdown_line(line, &mut in_code_block);
-        lines.push(rendered);
-    }
-
-    lines
-}
-
-fn render_markdown_line(line: &str, in_code_block: &mut bool) -> String {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("```") {
-        *in_code_block = !*in_code_block;
-        return magenta(trimmed);
-    }
-
-    if *in_code_block {
-        return magenta(line);
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("###### ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("·"), bold(rest));
-    }
-    if let Some(rest) = trimmed.strip_prefix("##### ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("◦"), bold(rest));
-    }
-    if let Some(rest) = trimmed.strip_prefix("#### ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("•"), bold(rest));
-    }
-    if let Some(rest) = trimmed.strip_prefix("### ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("»"), bold(rest));
-    }
-    if let Some(rest) = trimmed.strip_prefix("## ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("›"), bold(rest));
-    }
-    if let Some(rest) = trimmed.strip_prefix("# ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{}", indent, bold(rest));
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("- ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("•"), render_inline_markdown(rest));
-    }
-    if let Some(rest) = trimmed.strip_prefix("* ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("•"), render_inline_markdown(rest));
-    }
-    if let Some(rest) = trimmed.strip_prefix("+ ") {
-        let indent = " ".repeat(line.len() - trimmed.len());
-        return format!("{}{} {}", indent, cyan("•"), render_inline_markdown(rest));
-    }
-
-    render_inline_markdown(line)
-}
-
-fn render_inline_markdown(text: &str) -> String {
-    let mut output = String::new();
-    let mut index = 0;
-
-    while index < text.len() {
-        let remaining = &text[index..];
-
-        if remaining.starts_with("**") {
-            if let Some(end) = remaining[2..].find("**") {
-                let inner = &remaining[2..2 + end];
-                output.push_str(&bold(&render_inline_markdown(inner)));
-                index += end + 4;
-                continue;
+    match message.role {
+        Role::Assistant => {
+            append_wrapped_text(lines, width, &format!("{role_prefix}:"), "", "");
+            let markdown_lines = render_markdown_lines(width.saturating_sub(2), &message.content);
+            for line in markdown_lines {
+                lines.push(format!("  {line}"));
             }
         }
-
-        if remaining.starts_with("`") {
-            if let Some(end) = remaining[1..].find('`') {
-                let inner = &remaining[1..1 + end];
-                output.push_str(&yellow(inner));
-                index += end + 2;
-                continue;
+        _ => {
+            let text_lines: Vec<String> = message.content.split('\n').map(ToString::to_string).collect();
+            for (index, line) in text_lines.iter().enumerate() {
+                let prefix = if index == 0 {
+                    format!("{role_prefix}: ")
+                } else {
+                    "  ".to_string()
+                };
+                append_wrapped_text(lines, width, line, &prefix, "  ");
             }
         }
-
-        if remaining.starts_with("__") {
-            if let Some(end) = remaining[2..].find("__") {
-                let inner = &remaining[2..2 + end];
-                output.push_str(&underline(&render_inline_markdown(inner)));
-                index += end + 4;
-                continue;
-            }
-        }
-
-        let ch = match remaining.chars().next() {
-            Some(ch) => ch,
-            None => break,
-        };
-        output.push(ch);
-        index += ch.len_utf8();
     }
-
-    output
 }
 
-fn underline(text: &str) -> String {
-    ansi_wrap(text, "\x1b[4m", "\x1b[24m")
+fn render_markdown_lines(width: usize, text: &str) -> Vec<String> {
+    let mut markdown = Markdown::new(text, 0, 0, markdown_theme(), None);
+    let rendered = markdown.render(width);
+    rendered
+        .into_iter()
+        .map(|line| line.trim_end().to_string())
+        .collect()
 }
 
-#[cfg(test)]
-mod markdown_tests {
-    use super::*;
-
-    fn text_without_ansi(text: &str) -> String {
-        strip_ansi(text)
-    }
-
-    #[test]
-    fn bold_markdown_is_styled() {
-        let rendered = render_inline_markdown("alpha **bold** omega");
-        assert!(rendered.contains("\x1b[1m"));
-        assert_eq!(text_without_ansi(&rendered), "alpha bold omega");
-    }
-
-    #[test]
-    fn inline_code_markdown_is_styled() {
-        let rendered = render_inline_markdown("run `ls` now");
-        assert!(rendered.contains("\x1b[33m"));
-        assert_eq!(text_without_ansi(&rendered), "run ls now");
-    }
-
-    #[test]
-    fn markdown_lines_track_code_block_state() {
-        let rendered = render_markdown_lines("```rust\nlet x = 1;\n```");
-        assert_eq!(rendered.len(), 3);
-        assert!(rendered[0].contains("```"));
-        assert!(rendered[1].contains("let x = 1;"));
-        assert!(rendered[2].contains("```"));
-    }
-
-    #[test]
-    fn markdown_heading_and_list_are_rendered() {
-        let mut heading_mode = false;
-        let heading = render_markdown_line("### Title", &mut heading_mode);
-        assert!(heading.contains("»"));
-        let mut list_mode = false;
-        let bullet = render_markdown_line("- item", &mut list_mode);
-        assert!(text_without_ansi(&bullet).contains("• item"));
+fn markdown_theme() -> MarkdownTheme {
+    MarkdownTheme {
+        heading: Box::new(cyan),
+        link: Box::new(blue),
+        link_url: Box::new(dim),
+        code: Box::new(yellow),
+        code_block: Box::new(green),
+        code_block_border: Box::new(dim),
+        quote: Box::new(italic),
+        quote_border: Box::new(dim),
+        hr: Box::new(dim),
+        list_bullet: Box::new(cyan),
+        bold: Box::new(bold),
+        italic: Box::new(italic),
+        strikethrough: Box::new(strikethrough),
+        underline: Box::new(underline),
+        highlight_code: None,
+        code_block_indent: None,
     }
 }
 
@@ -598,5 +588,60 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_mode_line_is_left_anchored() {
+        let line = strip_ansi(&render_mode_line(30, ViewMode::Plan));
+        assert!(line.starts_with("──"));
+        assert!(line.contains(" plan "));
+        assert_eq!(line.chars().count(), 30);
+    }
+
+    #[test]
+    fn render_markdown_lines_keeps_empty_lines() {
+        let lines = render_markdown_lines(80, "first paragraph\n\nsecond paragraph");
+        assert_eq!(strip_ansi(&lines[0]), "first paragraph");
+        assert!(lines.len() >= 3);
+        assert!(strip_ansi(&lines[1]).trim().is_empty());
+    }
+
+    #[test]
+    fn render_working_directory_uses_home_alias() {
+        let line = strip_ansi(&format_working_directory_with_home(
+            "/Users/dev/project",
+            "main",
+            Some("/Users/dev"),
+        ));
+        assert_eq!(line, "~/project (main)");
+        let line = strip_ansi(&format_working_directory_with_home(
+            "/Users/dev",
+            "main",
+            Some("/Users/dev"),
+        ));
+        assert_eq!(line, "~ (main)");
+        let line = strip_ansi(&format_working_directory_with_home(
+            "/tmp/other",
+            "main",
+            Some("/Users/dev"),
+        ));
+        assert_eq!(line, "/tmp/other (main)");
+    }
+
+    #[test]
+    fn model_and_thinking_has_bullet_separator() {
+        let line = strip_ansi(&render_model_and_thinking_with("gpt-5-codex", "medium"));
+        assert_eq!(line, "model gpt-5-codex • thinking medium");
+    }
+
+    #[test]
+    fn view_mode_cycles_between_plan_and_build() {
+        assert_eq!(ViewMode::Plan.next(), ViewMode::Build);
+        assert_eq!(ViewMode::Build.next(), ViewMode::Plan);
     }
 }
