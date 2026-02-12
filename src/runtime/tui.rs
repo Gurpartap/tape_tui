@@ -4437,6 +4437,174 @@ mod tests {
     }
 
     #[test]
+    fn same_tick_surface_mutation_order_is_deterministic() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_component_id = runtime.register_component(surface_a_component);
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_component_id = runtime.register_component(surface_b_component);
+
+        let handle = runtime.runtime_handle();
+        let surface_a_id = handle.alloc_surface_id();
+        let surface_b_id = handle.alloc_surface_id();
+        let capture_modal = Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            ..Default::default()
+        });
+
+        handle.dispatch(Command::ShowSurface {
+            surface_id: surface_a_id,
+            component: surface_a_component_id,
+            options: capture_modal,
+            hidden: false,
+        });
+        handle.dispatch(Command::ShowSurface {
+            surface_id: surface_b_id,
+            component: surface_b_component_id,
+            options: capture_modal,
+            hidden: false,
+        });
+        handle.dispatch(Command::SetSurfaceHidden {
+            surface_id: surface_b_id,
+            hidden: true,
+        });
+        handle.dispatch(Command::UpdateSurfaceOptions {
+            surface_id: surface_a_id,
+            options: Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Passthrough,
+                kind: SurfaceKind::Corner,
+                ..Default::default()
+            }),
+        });
+
+        runtime.run_once();
+
+        assert_eq!(runtime.surfaces.entries.len(), 2);
+        assert_eq!(runtime.surfaces.entries[0].id, surface_a_id);
+        assert_eq!(runtime.surfaces.entries[1].id, surface_b_id);
+        assert!(!runtime.surfaces.entries[0].hidden);
+        assert!(runtime.surfaces.entries[1].hidden);
+        assert_eq!(
+            runtime.surfaces.entries[0].input_policy(),
+            SurfaceInputPolicy::Passthrough
+        );
+        assert!(*root_focus.borrow());
+        assert!(!*surface_a_focus.borrow());
+        assert!(!*surface_b_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+
+        runtime.handle_input("q");
+
+        assert_eq!(root_inputs.borrow().as_slice(), &["q".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+        assert!(surface_b_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn same_tick_focus_reconciliation_restores_previous_capture_surface() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_component_id = runtime.register_component(surface_a_component);
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_component_id = runtime.register_component(surface_b_component);
+
+        let handle = runtime.runtime_handle();
+        let surface_a_id = handle.alloc_surface_id();
+        let surface_b_id = handle.alloc_surface_id();
+        let capture_modal = Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            ..Default::default()
+        });
+
+        handle.dispatch(Command::ShowSurface {
+            surface_id: surface_a_id,
+            component: surface_a_component_id,
+            options: capture_modal,
+            hidden: false,
+        });
+        handle.dispatch(Command::ShowSurface {
+            surface_id: surface_b_id,
+            component: surface_b_component_id,
+            options: capture_modal,
+            hidden: false,
+        });
+        handle.dispatch(Command::HideSurface(surface_b_id));
+
+        runtime.run_once();
+
+        assert_eq!(runtime.surfaces.entries.len(), 1);
+        assert_eq!(runtime.surfaces.entries[0].id, surface_a_id);
+        assert_eq!(
+            runtime.surfaces.entries[0].component_id,
+            surface_a_component_id
+        );
+        assert!(*surface_a_focus.borrow());
+        assert!(!*surface_b_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+
+        runtime.handle_input("w");
+
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["w".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
+    }
+
+    #[test]
     fn topmost_surface_without_cursor_keeps_lower_surface_cursor_winner() {
         let _guard = env_test_lock().lock().expect("test lock poisoned");
         std::env::remove_var("TERM_PROGRAM");
