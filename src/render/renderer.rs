@@ -787,6 +787,187 @@ mod tests {
         rendered
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct VisibleSnapshot {
+        rows: Vec<String>,
+        cursor_row: usize,
+        cursor_col: usize,
+    }
+
+    fn parse_csi_first_param(params: &str, default: usize) -> usize {
+        params
+            .trim_start_matches('?')
+            .split(';')
+            .next()
+            .and_then(|value| {
+                if value.is_empty() {
+                    None
+                } else {
+                    value.parse::<usize>().ok()
+                }
+            })
+            .unwrap_or(default)
+    }
+
+    fn simulate_visible_snapshot(bytes: &str, width: usize, height: usize) -> VisibleSnapshot {
+        fn clear_line(screen: &mut [Vec<char>], row: usize) {
+            if row >= screen.len() {
+                return;
+            }
+            for cell in screen[row].iter_mut() {
+                *cell = ' ';
+            }
+        }
+
+        fn clear_screen(screen: &mut [Vec<char>]) {
+            for row in 0..screen.len() {
+                clear_line(screen, row);
+            }
+        }
+
+        fn scroll_up(screen: &mut Vec<Vec<char>>, width: usize) {
+            screen.remove(0);
+            screen.push(vec![' '; width]);
+        }
+
+        assert!(width > 0);
+        assert!(height > 0);
+
+        let mut screen = vec![vec![' '; width]; height];
+        let mut row = 0usize;
+        let mut col = 0usize;
+
+        let bytes = bytes.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\x1b' => {
+                    if index + 1 >= bytes.len() {
+                        break;
+                    }
+
+                    match bytes[index + 1] {
+                        b'[' => {
+                            let mut end = index + 2;
+                            while end < bytes.len() && !(0x40..=0x7E).contains(&bytes[end]) {
+                                end += 1;
+                            }
+                            if end >= bytes.len() {
+                                break;
+                            }
+
+                            let params = std::str::from_utf8(&bytes[index + 2..end])
+                                .expect("CSI params must be utf-8 digits");
+                            let final_byte = bytes[end] as char;
+                            match final_byte {
+                                'A' => {
+                                    let delta = parse_csi_first_param(params, 1);
+                                    row = row.saturating_sub(delta);
+                                }
+                                'B' => {
+                                    let delta = parse_csi_first_param(params, 1);
+                                    row = row.saturating_add(delta).min(height.saturating_sub(1));
+                                }
+                                'G' => {
+                                    let target_col = parse_csi_first_param(params, 1);
+                                    col = target_col.saturating_sub(1).min(width.saturating_sub(1));
+                                }
+                                'H' => {
+                                    row = 0;
+                                    col = 0;
+                                }
+                                'J' => {
+                                    let mode = parse_csi_first_param(params, 0);
+                                    if mode == 2 {
+                                        clear_screen(&mut screen);
+                                        row = 0;
+                                        col = 0;
+                                    }
+                                }
+                                'K' => {
+                                    let mode = parse_csi_first_param(params, 0);
+                                    if mode == 2 {
+                                        clear_line(&mut screen, row);
+                                    }
+                                }
+                                'm' | 'h' | 'l' => {
+                                    // Styling and DEC private toggles do not affect visible cells.
+                                }
+                                _ => {}
+                            }
+
+                            index = end + 1;
+                            continue;
+                        }
+                        b']' => {
+                            let mut end = index + 2;
+                            while end < bytes.len() {
+                                if bytes[end] == 0x07 {
+                                    end += 1;
+                                    break;
+                                }
+                                if end + 1 < bytes.len()
+                                    && bytes[end] == b'\x1b'
+                                    && bytes[end + 1] == b'\\'
+                                {
+                                    end += 2;
+                                    break;
+                                }
+                                end += 1;
+                            }
+                            index = end;
+                            continue;
+                        }
+                        _ => {
+                            index += 1;
+                            continue;
+                        }
+                    }
+                }
+                b'\r' => {
+                    col = 0;
+                    index += 1;
+                    continue;
+                }
+                b'\n' => {
+                    if row + 1 >= height {
+                        scroll_up(&mut screen, width);
+                        row = height.saturating_sub(1);
+                    } else {
+                        row += 1;
+                    }
+                    index += 1;
+                    continue;
+                }
+                byte => {
+                    if row < height && col < width {
+                        screen[row][col] = byte as char;
+                    }
+                    col = col.saturating_add(1).min(width.saturating_sub(1));
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+
+        let rows = screen
+            .into_iter()
+            .map(|row| {
+                let mut line: String = row.into_iter().collect();
+                while line.ends_with(' ') {
+                    line.pop();
+                }
+                line
+            })
+            .collect();
+
+        VisibleSnapshot {
+            rows,
+            cursor_row: row,
+            cursor_col: col,
+        }
+    }
+
     #[test]
     fn eligibility_accepts_pure_insert_before_previous_viewport() {
         let previous_lines =
@@ -1020,6 +1201,79 @@ mod tests {
         assert!(
             output.contains(super::CLEAR_ALL),
             "unsafe cursor state should force fallback full redraw, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn fast_and_fallback_paths_are_visually_equivalent() {
+        let width = 20;
+        let height = 3;
+
+        let base_lines: Vec<String> = (0..6).map(|i| format!("line-{i}")).collect();
+        let mut grown_lines = vec!["history-a".to_string(), "history-b".to_string()];
+        grown_lines.extend(base_lines.clone());
+
+        let mut fast_renderer = DiffRenderer::new();
+        fast_renderer.render(base_lines.clone().into(), width, height, false, false);
+        let fast_output = cmds_to_bytes(fast_renderer.render(
+            grown_lines.clone().into(),
+            width,
+            height,
+            false,
+            false,
+        ));
+
+        let mut fallback_renderer = DiffRenderer::new();
+        fallback_renderer.render(base_lines.into(), width, height, false, false);
+        let fallback_output =
+            cmds_to_bytes(fallback_renderer.render(grown_lines.into(), width, height, false, true));
+
+        assert!(
+            !fast_output.contains(super::CLEAR_ALL),
+            "expected optimized path to avoid full clear, got: {fast_output:?}"
+        );
+        assert!(
+            fallback_output.contains(super::CLEAR_ALL),
+            "expected forced fallback to use full clear path, got: {fallback_output:?}"
+        );
+
+        let fast_visible = simulate_visible_snapshot(&fast_output, width, height);
+        let fallback_visible = simulate_visible_snapshot(&fallback_output, width, height);
+        assert_eq!(fast_visible, fallback_visible);
+
+        assert_eq!(
+            fast_renderer.hardware_cursor_row(),
+            fallback_renderer.hardware_cursor_row(),
+            "hardware cursor row must stay deterministic across path selection"
+        );
+    }
+
+    #[test]
+    fn ineligible_surface_or_image_conditions_force_baseline_fallback() {
+        let width = 20;
+        let height = 3;
+        let base_lines: Vec<String> = (0..6).map(|i| format!("line-{i}")).collect();
+
+        let mut with_surface = DiffRenderer::new();
+        with_surface.render(base_lines.clone().into(), width, height, false, false);
+        let mut grown_lines = vec!["history-a".to_string(), "history-b".to_string()];
+        grown_lines.extend(base_lines.clone());
+        let with_surface_output =
+            cmds_to_bytes(with_surface.render(grown_lines.into(), width, height, false, true));
+        assert!(
+            with_surface_output.contains(super::CLEAR_ALL),
+            "surface composition must force baseline fallback, got: {with_surface_output:?}"
+        );
+
+        let mut with_image = DiffRenderer::new();
+        with_image.render(base_lines.clone().into(), width, height, false, false);
+        let mut with_image_growth = vec!["\x1b_Gimage-inline".to_string(), "history-b".to_string()];
+        with_image_growth.extend(base_lines);
+        let with_image_output =
+            cmds_to_bytes(with_image.render(with_image_growth.into(), width, height, false, false));
+        assert!(
+            with_image_output.contains(super::CLEAR_ALL),
+            "image insert-before paths must force baseline fallback, got: {with_image_output:?}"
         );
     }
 
