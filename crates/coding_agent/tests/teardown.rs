@@ -23,6 +23,7 @@ fn setup_runtime() -> (TUI<support::SharedTerminal>, Arc<Mutex<App>>, Arc<Mutex<
 
     let root = tui.register_component(AppComponent::new(Arc::clone(&app), host));
     tui.set_root(vec![root]);
+    tui.set_focus(root);
 
     (tui, app, terminal_trace)
 }

@@ -1,10 +1,11 @@
-@/Users/gurpartap/.codex/SCRIBE.md
+Use `cm` (CodeMapper) cli tool to read/explore code: When you need to understand code and its dependencies, **use cm** instead of iterative Read/Grep operations.
 
-Use scribe cli tool to read/explore code: When you need to understand code and its dependencies, **use scribe** instead of iterative Read/Grep operations.
+# AGENTS.md (Repo Root)
 
-# AGENTS.md
+This file defines default rules for this repository.
+Subdirectory `AGENTS.md` files may add **local overrides**; when present, treat root + local as combined policy.
 
-## Project Scope
+## Project Scope (repo default)
 - Rust terminal UI library focused on deterministic runtime/render behavior.
 
 ## Core Principles
@@ -38,7 +39,13 @@ Use scribe cli tool to read/explore code: When you need to understand code and i
 - Commit messages must be **very detailed** and capture:
   - the architecture summary
   - scope and non-goals
+  - explain intent and constraints; do not translate the whole diff into English.
   - the implementation plan or roadmap
   - key invariants and decisions (especially around memory)
 - Do **not** mention or reference files that are not committed.
 - Assume the commit message is the canonical historical record for future agents/humans.
+
+### Prohibited/avoid language
+- Milestone framing: `Phase X`, `later phase`, `next phase`, or plan files in title/body.
+- Ambiguous statements that hide scope.
+- Filler sections with no concrete information.

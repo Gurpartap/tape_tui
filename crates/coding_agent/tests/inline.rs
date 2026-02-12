@@ -57,6 +57,7 @@ fn setup_runtime_with_model(
 
     let root = tui.register_component(AppComponent::new(Arc::clone(&app), host));
     tui.set_root(vec![root]);
+    tui.set_focus(root);
 
     (tui, app, terminal_trace)
 }
@@ -98,9 +99,50 @@ fn prompt_is_visible_on_start() {
 
     let rendered = run_until(&mut tui, Duration::from_secs(1), || {
         let output = support::rendered_output(&terminal_trace);
-        output.contains("Status: Idle") && output.contains("> ")
+        output.contains("Coding Agent")
+            && output.contains("Ready")
+            && output.contains("\x1b[7m")
     });
     assert!(rendered, "initial prompt render was not observed");
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn composer_remains_interactive_during_streaming() {
+    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(BlockingBackend));
+
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "streaming composer check");
+    support::inject_input(&terminal_trace, "\r");
+
+    let started = run_until(&mut tui, Duration::from_secs(2), || {
+        matches!(support::lock_unpoisoned(&app).mode, Mode::Running { .. })
+    });
+    assert!(started, "run did not enter running mode");
+
+    support::inject_input(&terminal_trace, " typing while running");
+
+    let interactive = run_until(&mut tui, Duration::from_secs(2), || {
+        support::rendered_output(&terminal_trace).contains("typing while running")
+    });
+    assert!(
+        interactive,
+        "composer was not interactive while run remained active"
+    );
+
+    support::inject_input(&terminal_trace, "\x1b");
+    let cancelled = run_until(&mut tui, Duration::from_secs(2), || {
+        let app = support::lock_unpoisoned(&app);
+        matches!(app.mode, Mode::Idle)
+            && app
+                .transcript
+                .iter()
+                .any(|message| message.role == Role::System && message.content == "Run cancelled")
+    });
+    assert!(cancelled, "cancel did not end run during streaming");
 
     tui.stop().expect("runtime stop");
 }
