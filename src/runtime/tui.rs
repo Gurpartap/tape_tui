@@ -1886,6 +1886,15 @@ impl<T: Terminal> TuiRuntime<T> {
             return false;
         }
 
+        if let Some(existing_index) = self.overlays.index_of(surface_id) {
+            let replaced = self.overlays.entries.remove(existing_index);
+            if replaced.input_policy() == SurfaceInputPolicy::Capture
+                && self.focused == Some(replaced.component_id)
+            {
+                self.restore_focus_after_overlay_loss(replaced.pre_focus);
+            }
+        }
+
         let pre_focus = self.focused.filter(|focused| *focused != component);
         self.overlays.entries.push(OverlayEntry {
             id: surface_id,
@@ -4248,6 +4257,214 @@ mod tests {
 
         assert!(runtime.overlays.entries.is_empty());
         assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn show_surface_with_reused_id_replaces_previous_entry_deterministically() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_id = runtime.register_component(surface_a_component);
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_id = runtime.register_component(surface_b_component);
+
+        let handle = runtime.runtime_handle();
+        let surface_id = handle.alloc_surface_id();
+        let capture_options = Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            ..Default::default()
+        });
+
+        handle.dispatch(Command::ShowSurface {
+            surface_id,
+            component: surface_a_id,
+            options: capture_options,
+            hidden: false,
+        });
+        handle.dispatch(Command::ShowSurface {
+            surface_id,
+            component: surface_b_id,
+            options: capture_options,
+            hidden: false,
+        });
+        runtime.run_once();
+
+        assert_eq!(runtime.overlays.entries.len(), 1);
+        assert_eq!(runtime.overlays.entries[0].id, surface_id);
+        assert_eq!(runtime.overlays.entries[0].component_id, surface_b_id);
+        assert!(!*surface_a_focus.borrow());
+        assert!(*surface_b_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+        runtime.handle_input("x");
+
+        assert!(root_inputs.borrow().is_empty());
+        assert!(surface_a_inputs.borrow().is_empty());
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["x".to_string()]);
+
+        handle.dispatch(Command::HideSurface(surface_id));
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries.is_empty());
+        assert!(*root_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+        runtime.handle_input("y");
+
+        assert_eq!(root_inputs.borrow().as_slice(), &["y".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+    }
+
+    #[test]
+    fn surface_visibility_command_applies_before_input_in_same_tick() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_id = runtime.register_component(surface_component);
+
+        runtime.show_surface(
+            surface_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+        assert!(*surface_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+
+        let shown_surface_id = runtime.overlays.entries[0].id;
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::SetSurfaceHidden {
+            surface_id: shown_surface_id,
+            hidden: true,
+        });
+        runtime.wake.enqueue_input("z".to_string());
+
+        runtime.run_once();
+
+        assert_eq!(root_inputs.borrow().as_slice(), &["z".to_string()]);
+        assert!(surface_inputs.borrow().is_empty());
+        assert!(*root_focus.borrow());
+        assert!(!*surface_focus.borrow());
+    }
+
+    #[test]
+    fn topmost_surface_without_cursor_keeps_lower_surface_cursor_winner() {
+        let _guard = env_test_lock().lock().expect("test lock poisoned");
+        std::env::remove_var("TERM_PROGRAM");
+        std::env::remove_var("KITTY_WINDOW_ID");
+
+        struct BaseCursorComponent;
+
+        impl Component for BaseCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["one".to_string(), "two".to_string(), "three".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 0 })
+            }
+        }
+
+        struct LowerOverlayCursorComponent;
+
+        impl Component for LowerOverlayCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["lower".to_string()]
+            }
+
+            fn cursor_pos(&self) -> Option<CursorPos> {
+                Some(CursorPos { row: 0, col: 1 })
+            }
+        }
+
+        struct TopOverlayNoCursorComponent;
+
+        impl Component for TopOverlayNoCursorComponent {
+            fn render(&mut self, _width: usize) -> Vec<String> {
+                vec!["top".to_string()]
+            }
+        }
+
+        let terminal = TestTerminal::new(20, 3);
+        let (mut runtime, _root_id) = runtime_with_root(terminal, BaseCursorComponent);
+        runtime.show_hardware_cursor = false;
+
+        runtime.start().expect("runtime start");
+        runtime.terminal.output.clear();
+
+        let lower_overlay_id = runtime.register_component(LowerOverlayCursorComponent);
+        runtime.show_surface(
+            lower_overlay_id,
+            Some(SurfaceOptions::from(OverlayOptions {
+                width: Some(SizeValue::absolute(10)),
+                row: Some(SizeValue::absolute(1)),
+                col: Some(SizeValue::absolute(2)),
+                ..Default::default()
+            })),
+        );
+
+        let top_overlay_id = runtime.register_component(TopOverlayNoCursorComponent);
+        runtime.show_surface(
+            top_overlay_id,
+            Some(SurfaceOptions::from(OverlayOptions {
+                width: Some(SizeValue::absolute(10)),
+                row: Some(SizeValue::absolute(0)),
+                col: Some(SizeValue::absolute(0)),
+                ..Default::default()
+            })),
+        );
+
+        runtime.run_once();
+
+        let output = runtime.terminal.output.as_str();
+        assert!(
+            output.ends_with("\x1b[1A\x1b[4G\x1b[?25l"),
+            "expected lower overlay cursor to remain winner when top overlay has no cursor, got: {output:?}"
+        );
     }
 
     #[test]
