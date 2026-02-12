@@ -13,5 +13,5 @@ pub use surface::{
 };
 pub use tui::{
     Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle, SurfaceHandle,
-    TerminalOp,
+    SurfaceTransactionMutation, TerminalOp,
 };

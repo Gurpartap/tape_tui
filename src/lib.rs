@@ -85,7 +85,7 @@ pub use crate::runtime::tui::SurfaceHandle;
 pub use crate::runtime::{
     CustomCommand, CustomCommandCtx, CustomCommandError, SurfaceAnchor, SurfaceId,
     SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions,
-    SurfaceSizeValue, SurfaceVisibility,
+    SurfaceSizeValue, SurfaceTransactionMutation, SurfaceVisibility,
 };
 
 /// Alias for the main runtime type.
