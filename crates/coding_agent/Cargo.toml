@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 wait-timeout = "0.2"
+tape_tui = { path = "../.." }
 
 [dev-dependencies]
 tempfile = "3"
