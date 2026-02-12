@@ -2,9 +2,9 @@ mod fixture;
 
 use tape_tui::core::output::TerminalCmd;
 use tape_tui::core::terminal_image::is_image_line;
-use tape_tui::render::overlay::{
-    composite_overlays, resolve_overlay_layout, OverlayAnchor, OverlayOptions, RenderedOverlay,
-    SizeValue,
+use tape_tui::render::surface::{
+    composite_surfaces, resolve_surface_layout, RenderedSurface, SurfaceAnchor, SurfaceOptions,
+    SurfaceSizeValue,
 };
 use tape_tui::runtime::ime::position_hardware_cursor;
 use tape_tui::{core::cursor::CursorPos, render::Frame};
@@ -64,19 +64,19 @@ fn cursor_metadata_and_hardware_cursor_match_fixture() {
 }
 
 #[test]
-fn overlay_composite_anchor_fixture() {
-    let expected = fixture::read_lines_unescaped("overlay_composite_anchor.txt");
+fn surface_composite_anchor_fixture() {
+    let expected = fixture::read_lines_unescaped("surface_composite_anchor.txt");
     let term_width = 10;
     let term_height = 5;
 
-    let options = OverlayOptions {
-        width: Some(SizeValue::absolute(3)),
-        anchor: Some(OverlayAnchor::BottomRight),
+    let options = SurfaceOptions {
+        width: Some(SurfaceSizeValue::absolute(3)),
+        anchor: Some(SurfaceAnchor::BottomRight),
         ..Default::default()
     };
 
-    let layout = resolve_overlay_layout(Some(&options), 1, term_width, term_height);
-    let overlays = vec![RenderedOverlay {
+    let layout = resolve_surface_layout(Some(&options), 1, term_width, term_height);
+    let surfaces = vec![RenderedSurface {
         lines: vec!["\x1b[31mX\x1b[0m".to_string()],
         row: layout.row,
         col: layout.col,
@@ -84,34 +84,34 @@ fn overlay_composite_anchor_fixture() {
     }];
 
     let base = vec!["base".to_string()];
-    let composed = composite_overlays(base, &overlays, term_width, term_height, 1, is_image_line);
+    let composed = composite_surfaces(base, &surfaces, term_width, term_height, 1, is_image_line);
 
     assert_eq!(composed, expected);
 }
 
 #[test]
-fn overlay_mixed_ansi_osc_fixture() {
-    let expected = fixture::read_lines_unescaped("overlay_mixed_ansi_osc.txt");
+fn surface_mixed_ansi_osc_fixture() {
+    let expected = fixture::read_lines_unescaped("surface_mixed_ansi_osc.txt");
     let term_width = 10;
     let term_height = 2;
-    let overlays = vec![RenderedOverlay {
+    let surfaces = vec![RenderedSurface {
         lines: vec!["\x1b[31mAB\x1b]8;;https://x\x07CDEFGH\x1b]8;;\x07\x1b[0m".to_string()],
         row: 0,
         col: 2,
         width: 6,
     }];
     let base = vec!["0123456789".to_string(), "INPUT".to_string()];
-    let composed = composite_overlays(base, &overlays, term_width, term_height, 2, is_image_line);
+    let composed = composite_surfaces(base, &surfaces, term_width, term_height, 2, is_image_line);
 
     assert_eq!(composed, expected);
     assert_eq!(
         composed[0].matches("\x1b[0m\x1b]8;;\x07").count(),
         2,
-        "overlay composition must bracket inserted segments with reset guards"
+        "surface composition must bracket inserted segments with reset guards"
     );
     assert_eq!(composed[1], "INPUT");
     assert!(
         !composed[1].contains('\x1b'),
-        "base lines after a composited overlay should remain unstyled"
+        "base lines after a composited surface should remain unstyled"
     );
 }

@@ -94,10 +94,7 @@ impl Terminal for HarnessTerminal {
     }
 
     fn columns(&self) -> u16 {
-        let state = self
-            .state
-            .lock()
-            .expect("lock terminal state for columns");
+        let state = self.state.lock().expect("lock terminal state for columns");
         state.columns
     }
 
@@ -157,9 +154,7 @@ impl Component for ProbeComponent {
         let entry = match event {
             InputEvent::Text { text, .. } => format!("text:{text}"),
             InputEvent::Key {
-                key_id,
-                event_type,
-                ..
+                key_id, event_type, ..
             } => format!("key:{key_id}:{event_type:?}"),
             InputEvent::Paste { text, .. } => format!("paste:{text}"),
             InputEvent::Resize { columns, rows } => format!("resize:{columns}x{rows}"),
@@ -279,7 +274,9 @@ fn run_focus_routing_snapshot() -> FocusRoutingSnapshot {
     let probe_terminal = terminal.clone();
     let mut runtime = TUI::new(terminal);
 
-    runtime.start().expect("start runtime for focus/routing snapshot");
+    runtime
+        .start()
+        .expect("start runtime for focus/routing snapshot");
     probe_terminal.take_writes();
 
     let root_state = ProbeState::new();
@@ -319,7 +316,9 @@ fn run_focus_routing_snapshot() -> FocusRoutingSnapshot {
     runtime.handle_input("y");
     runtime.render_if_needed();
 
-    runtime.stop().expect("stop runtime for focus/routing snapshot");
+    runtime
+        .stop()
+        .expect("stop runtime for focus/routing snapshot");
     let output = probe_terminal.take_writes();
 
     FocusRoutingSnapshot {
@@ -337,7 +336,9 @@ fn run_viewport_snapshot() -> ViewportSnapshot {
     let probe_terminal = terminal.clone();
     let mut runtime = TUI::new(terminal);
 
-    runtime.start().expect("start runtime for viewport snapshot");
+    runtime
+        .start()
+        .expect("start runtime for viewport snapshot");
     probe_terminal.take_writes();
 
     let root_state = ProbeState::new();
@@ -488,7 +489,10 @@ fn deterministic_viewport_window_and_cursor_bounds_repeat_cleanly() {
 fn deterministic_visibility_toggle_sequence_remains_stable() {
     let baseline = run_visibility_toggle_snapshot();
 
-    assert_eq!(baseline.surface_events, vec!["text:a".to_string(), "text:c".to_string()]);
+    assert_eq!(
+        baseline.surface_events,
+        vec!["text:a".to_string(), "text:c".to_string()]
+    );
     assert_eq!(baseline.root_events, vec!["text:b".to_string()]);
     assert!(
         baseline.surface_focus_trace.ends_with(&[true, false, true]),

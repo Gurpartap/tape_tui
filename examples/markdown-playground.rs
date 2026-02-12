@@ -463,7 +463,7 @@ fn palette_surface_options() -> SurfaceOptions {
     SurfaceOptions {
         kind: SurfaceKind::Modal,
         input_policy: SurfaceInputPolicy::Capture,
-        overlay: SurfaceLayoutOptions {
+        layout: SurfaceLayoutOptions {
             anchor: Some(SurfaceAnchor::Center),
             margin: Some(SurfaceMargin::uniform(2)),
             width: Some(SurfaceSizeValue::percent(60.0)),

@@ -4,7 +4,7 @@
 //! They provide deterministic lifecycle, visibility, input policy, and lane semantics
 //! while preserving inline-first rendering behavior.
 
-use crate::render::overlay as render_overlay;
+use crate::render::surface as render_surface;
 use crate::runtime::component_registry::ComponentId;
 
 /// Stable identifier for a surface owned by a single runtime instance.
@@ -165,7 +165,7 @@ impl SurfaceLayoutOptions {
     }
 }
 
-impl From<SurfaceSizeValue> for render_overlay::SizeValue {
+impl From<SurfaceSizeValue> for render_surface::SurfaceSizeValue {
     fn from(value: SurfaceSizeValue) -> Self {
         match value {
             SurfaceSizeValue::Absolute(value) => Self::Absolute(value),
@@ -174,7 +174,7 @@ impl From<SurfaceSizeValue> for render_overlay::SizeValue {
     }
 }
 
-impl From<SurfaceAnchor> for render_overlay::OverlayAnchor {
+impl From<SurfaceAnchor> for render_surface::SurfaceAnchor {
     fn from(anchor: SurfaceAnchor) -> Self {
         match anchor {
             SurfaceAnchor::Center => Self::Center,
@@ -190,7 +190,7 @@ impl From<SurfaceAnchor> for render_overlay::OverlayAnchor {
     }
 }
 
-impl From<SurfaceMargin> for render_overlay::OverlayMargin {
+impl From<SurfaceMargin> for render_surface::SurfaceMargin {
     fn from(margin: SurfaceMargin) -> Self {
         Self {
             top: margin.top,
@@ -201,7 +201,7 @@ impl From<SurfaceMargin> for render_overlay::OverlayMargin {
     }
 }
 
-impl From<&SurfaceLayoutOptions> for render_overlay::OverlayOptions {
+impl From<&SurfaceLayoutOptions> for render_surface::SurfaceOptions {
     fn from(options: &SurfaceLayoutOptions) -> Self {
         Self {
             width: options.width.map(Into::into),
@@ -258,7 +258,7 @@ impl Default for SurfaceInputPolicy {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceOptions {
     /// Layout and visibility controls for surface placement.
-    pub overlay: SurfaceLayoutOptions,
+    pub layout: SurfaceLayoutOptions,
     /// Surface class used for lane defaults and reservation behavior.
     pub kind: SurfaceKind,
     /// Input routing behavior.
@@ -268,7 +268,7 @@ pub struct SurfaceOptions {
 impl Default for SurfaceOptions {
     fn default() -> Self {
         Self {
-            overlay: SurfaceLayoutOptions::default(),
+            layout: SurfaceLayoutOptions::default(),
             kind: SurfaceKind::default(),
             input_policy: SurfaceInputPolicy::default(),
         }
@@ -278,7 +278,7 @@ impl Default for SurfaceOptions {
 impl SurfaceOptions {
     /// Whether this surface should be visible at the provided terminal size.
     pub fn is_visible(&self, columns: usize, rows: usize) -> bool {
-        self.overlay.is_visible(columns, rows)
+        self.layout.is_visible(columns, rows)
     }
 
     /// Return layout options adjusted for lane reservations and surface defaults.
@@ -292,7 +292,7 @@ impl SurfaceOptions {
         reserved_top: usize,
         reserved_bottom: usize,
     ) -> SurfaceLayoutOptions {
-        let mut layout = self.overlay;
+        let mut layout = self.layout;
 
         if reserved_top > 0 || reserved_bottom > 0 {
             let mut margin = layout.margin.unwrap_or(SurfaceMargin {
@@ -342,9 +342,9 @@ impl SurfaceOptions {
 }
 
 impl From<SurfaceLayoutOptions> for SurfaceOptions {
-    fn from(overlay: SurfaceLayoutOptions) -> Self {
+    fn from(layout: SurfaceLayoutOptions) -> Self {
         Self {
-            overlay,
+            layout,
             kind: SurfaceKind::Modal,
             input_policy: SurfaceInputPolicy::Capture,
         }
@@ -352,20 +352,20 @@ impl From<SurfaceLayoutOptions> for SurfaceOptions {
 }
 
 impl From<&SurfaceLayoutOptions> for SurfaceOptions {
-    fn from(overlay: &SurfaceLayoutOptions) -> Self {
-        Self::from(*overlay)
+    fn from(layout: &SurfaceLayoutOptions) -> Self {
+        Self::from(*layout)
     }
 }
 
 impl From<SurfaceOptions> for SurfaceLayoutOptions {
     fn from(options: SurfaceOptions) -> Self {
-        options.overlay
+        options.layout
     }
 }
 
 impl From<&SurfaceOptions> for SurfaceLayoutOptions {
     fn from(options: &SurfaceOptions) -> Self {
-        options.overlay
+        options.layout
     }
 }
 
@@ -459,7 +459,7 @@ pub fn surface_options_from_layout(layout: SurfaceLayoutOptions) -> SurfaceOptio
 /// Convenience helper to create surface options from visibility-only defaults.
 pub fn visibility_only_surface_options(visibility: SurfaceVisibility) -> SurfaceOptions {
     let mut options = SurfaceOptions::default();
-    options.overlay.visibility = visibility;
+    options.layout.visibility = visibility;
     options
 }
 
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn lane_reservations_adjust_margins_without_mutating_original_layout() {
         let options = SurfaceOptions {
-            overlay: SurfaceLayoutOptions {
+            layout: SurfaceLayoutOptions {
                 margin: Some(SurfaceMargin::uniform(1)),
                 ..Default::default()
             },
@@ -505,7 +505,7 @@ mod tests {
             })
         );
 
-        assert_eq!(options.overlay.margin, Some(SurfaceMargin::uniform(1)));
+        assert_eq!(options.layout.margin, Some(SurfaceMargin::uniform(1)));
     }
 
     #[test]
@@ -558,15 +558,15 @@ mod tests {
             ..Default::default()
         };
 
-        let layout_render = crate::render::overlay::OverlayOptions::from(&layout);
+        let layout_render = crate::render::surface::SurfaceOptions::from(&layout);
         let expected =
-            crate::render::overlay::resolve_overlay_layout(Some(&layout_render), 9, 120, 40);
+            crate::render::surface::resolve_surface_layout(Some(&layout_render), 9, 120, 40);
 
         let surface_options = surface_options_from_layout(layout);
         let layout_options = surface_options.with_lane_reservations(0, 0);
-        let surface_render = crate::render::overlay::OverlayOptions::from(&layout_options);
+        let surface_render = crate::render::surface::SurfaceOptions::from(&layout_options);
         let actual =
-            crate::render::overlay::resolve_overlay_layout(Some(&surface_render), 9, 120, 40);
+            crate::render::surface::resolve_surface_layout(Some(&surface_render), 9, 120, 40);
 
         assert_eq!(actual, expected);
         let round_trip_layout = SurfaceLayoutOptions::from(surface_options);

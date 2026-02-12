@@ -121,7 +121,7 @@ impl DiffRenderer {
         width: usize,
         height: usize,
         clear_on_shrink: bool,
-        has_overlays: bool,
+        has_surfaces: bool,
     ) -> Vec<TerminalCmd> {
         let mut lines = Vec::new();
         let mut is_image = Vec::new();
@@ -177,7 +177,7 @@ impl DiffRenderer {
             return cmds;
         }
 
-        if clear_on_shrink && lines.len() < self.max_lines_rendered && !has_overlays {
+        if clear_on_shrink && lines.len() < self.max_lines_rendered && !has_surfaces {
             if debug_redraw_enabled() {
                 let reason = format!(
                     "clearOnShrink (maxLinesRendered={})",

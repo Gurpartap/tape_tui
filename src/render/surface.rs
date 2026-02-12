@@ -1,10 +1,10 @@
-//! Overlay compositing.
+//! Surface compositing.
 
 use crate::core::text::slice::{extract_segments, slice_by_column, slice_with_width};
 use crate::core::text::width::visible_width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayAnchor {
+pub enum SurfaceAnchor {
     Center,
     TopLeft,
     TopRight,
@@ -17,14 +17,14 @@ pub enum OverlayAnchor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverlayMargin {
+pub struct SurfaceMargin {
     pub top: Option<usize>,
     pub right: Option<usize>,
     pub bottom: Option<usize>,
     pub left: Option<usize>,
 }
 
-impl OverlayMargin {
+impl SurfaceMargin {
     pub fn uniform(value: usize) -> Self {
         Self {
             top: Some(value),
@@ -36,12 +36,12 @@ impl OverlayMargin {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SizeValue {
+pub enum SurfaceSizeValue {
     Absolute(usize),
     Percent(f32),
 }
 
-impl SizeValue {
+impl SurfaceSizeValue {
     pub fn absolute(value: usize) -> Self {
         Self::Absolute(value)
     }
@@ -52,21 +52,21 @@ impl SizeValue {
 }
 
 #[derive(Default)]
-pub struct OverlayOptions {
-    pub width: Option<SizeValue>,
+pub struct SurfaceOptions {
+    pub width: Option<SurfaceSizeValue>,
     pub min_width: Option<usize>,
-    pub max_height: Option<SizeValue>,
-    pub anchor: Option<OverlayAnchor>,
+    pub max_height: Option<SurfaceSizeValue>,
+    pub anchor: Option<SurfaceAnchor>,
     pub offset_x: Option<i32>,
     pub offset_y: Option<i32>,
-    pub row: Option<SizeValue>,
-    pub col: Option<SizeValue>,
-    pub margin: Option<OverlayMargin>,
+    pub row: Option<SurfaceSizeValue>,
+    pub col: Option<SurfaceSizeValue>,
+    pub margin: Option<SurfaceMargin>,
     pub visible: Option<Box<dyn Fn(usize, usize) -> bool>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverlayLayout {
+pub struct SurfaceLayout {
     pub width: usize,
     pub row: usize,
     pub col: usize,
@@ -74,7 +74,7 @@ pub struct OverlayLayout {
 }
 
 #[derive(Debug)]
-pub struct RenderedOverlay {
+pub struct RenderedSurface {
     pub lines: Vec<String>,
     pub row: usize,
     pub col: usize,
@@ -83,11 +83,11 @@ pub struct RenderedOverlay {
 
 const SEGMENT_RESET: &str = "\x1b[0m\x1b]8;;\x07";
 
-fn parse_size_value(value: Option<SizeValue>, reference: usize) -> Option<usize> {
+fn parse_size_value(value: Option<SurfaceSizeValue>, reference: usize) -> Option<usize> {
     match value {
         None => None,
-        Some(SizeValue::Absolute(v)) => Some(v),
-        Some(SizeValue::Percent(percent)) => {
+        Some(SurfaceSizeValue::Absolute(v)) => Some(v),
+        Some(SurfaceSizeValue::Percent(percent)) => {
             let percent = percent.max(0.0);
             Some(((reference as f32) * (percent / 100.0)).floor() as usize)
         }
@@ -102,16 +102,16 @@ fn clamp_within(value: usize, min: usize, max: usize) -> usize {
     }
 }
 
-pub fn resolve_overlay_layout(
-    options: Option<&OverlayOptions>,
-    overlay_height: usize,
+pub fn resolve_surface_layout(
+    options: Option<&SurfaceOptions>,
+    surface_height: usize,
     term_width: usize,
     term_height: usize,
-) -> OverlayLayout {
-    let default_options = OverlayOptions::default();
+) -> SurfaceLayout {
+    let default_options = SurfaceOptions::default();
     let opt = options.unwrap_or(&default_options);
 
-    let margin = opt.margin.unwrap_or(OverlayMargin {
+    let margin = opt.margin.unwrap_or(SurfaceMargin {
         top: None,
         right: None,
         bottom: None,
@@ -138,33 +138,33 @@ pub fn resolve_overlay_layout(
         *height = (*height).clamp(1, avail_height);
     }
 
-    let effective_height = max_height.map_or(overlay_height, |height| overlay_height.min(height));
+    let effective_height = max_height.map_or(surface_height, |height| surface_height.min(height));
 
     let mut row = if let Some(value) = opt.row {
         match value {
-            SizeValue::Absolute(v) => v,
-            SizeValue::Percent(percent) => {
+            SurfaceSizeValue::Absolute(v) => v,
+            SurfaceSizeValue::Percent(percent) => {
                 let max_row = avail_height.saturating_sub(effective_height);
                 let percent = percent.max(0.0);
                 margin_top + ((max_row as f32) * (percent / 100.0)).floor() as usize
             }
         }
     } else {
-        let anchor = opt.anchor.unwrap_or(OverlayAnchor::Center);
+        let anchor = opt.anchor.unwrap_or(SurfaceAnchor::Center);
         resolve_anchor_row(anchor, effective_height, avail_height, margin_top)
     };
 
     let mut col = if let Some(value) = opt.col {
         match value {
-            SizeValue::Absolute(v) => v,
-            SizeValue::Percent(percent) => {
+            SurfaceSizeValue::Absolute(v) => v,
+            SurfaceSizeValue::Percent(percent) => {
                 let max_col = avail_width.saturating_sub(width);
                 let percent = percent.max(0.0);
                 margin_left + ((max_col as f32) * (percent / 100.0)).floor() as usize
             }
         }
     } else {
-        let anchor = opt.anchor.unwrap_or(OverlayAnchor::Center);
+        let anchor = opt.anchor.unwrap_or(SurfaceAnchor::Center);
         resolve_anchor_col(anchor, width, avail_width, margin_left)
     };
 
@@ -180,7 +180,7 @@ pub fn resolve_overlay_layout(
     let max_col = term_width.saturating_sub(margin_right + width);
     col = clamp_within(col, margin_left, max_col);
 
-    OverlayLayout {
+    SurfaceLayout {
         width,
         row,
         col,
@@ -188,22 +188,22 @@ pub fn resolve_overlay_layout(
     }
 }
 
-pub fn composite_overlays(
+pub fn composite_surfaces(
     lines: Vec<String>,
-    overlays: &[RenderedOverlay],
+    surfaces: &[RenderedSurface],
     term_width: usize,
     term_height: usize,
     max_lines_rendered: usize,
     is_image_line: fn(&str) -> bool,
 ) -> Vec<String> {
-    if overlays.is_empty() {
+    if surfaces.is_empty() {
         return lines;
     }
 
     let mut result = lines;
     let mut min_lines_needed = result.len();
-    for overlay in overlays {
-        min_lines_needed = min_lines_needed.max(overlay.row + overlay.lines.len());
+    for surface in surfaces {
+        min_lines_needed = min_lines_needed.max(surface.row + surface.lines.len());
     }
 
     let working_height = max_lines_rendered.max(min_lines_needed);
@@ -214,20 +214,20 @@ pub fn composite_overlays(
     let viewport_start = working_height.saturating_sub(term_height);
     let mut modified_lines = Vec::new();
 
-    for overlay in overlays {
-        for (i, line) in overlay.lines.iter().enumerate() {
-            let idx = viewport_start + overlay.row + i;
+    for surface in surfaces {
+        for (i, line) in surface.lines.iter().enumerate() {
+            let idx = viewport_start + surface.row + i;
             if idx < result.len() {
-                let truncated = if visible_width(line) > overlay.width {
-                    slice_by_column(line, 0, overlay.width, true)
+                let truncated = if visible_width(line) > surface.width {
+                    slice_by_column(line, 0, surface.width, true)
                 } else {
                     line.clone()
                 };
                 let composed = composite_line_at(
                     &result[idx],
                     &truncated,
-                    overlay.col,
-                    overlay.width,
+                    surface.col,
+                    surface.width,
                     term_width,
                     is_image_line,
                 );
@@ -250,9 +250,9 @@ pub fn composite_overlays(
 
 pub fn composite_line_at(
     base_line: &str,
-    overlay_line: &str,
+    surface_line: &str,
     start_col: usize,
-    overlay_width: usize,
+    surface_width: usize,
     total_width: usize,
     is_image_line: fn(&str) -> bool,
 ) -> String {
@@ -260,7 +260,7 @@ pub fn composite_line_at(
         return base_line.to_string();
     }
 
-    let after_start = start_col.saturating_add(overlay_width);
+    let after_start = start_col.saturating_add(surface_width);
     let base = extract_segments(
         base_line,
         start_col,
@@ -268,21 +268,21 @@ pub fn composite_line_at(
         total_width.saturating_sub(after_start),
         true,
     );
-    let overlay = slice_with_width(overlay_line, 0, overlay_width, true);
+    let surface = slice_with_width(surface_line, 0, surface_width, true);
 
     let before_pad = start_col.saturating_sub(base.before_width);
-    let overlay_pad = overlay_width.saturating_sub(overlay.width);
+    let surface_pad = surface_width.saturating_sub(surface.width);
     let actual_before_width = start_col.max(base.before_width);
-    let actual_overlay_width = overlay_width.max(overlay.width);
-    let after_target = total_width.saturating_sub(actual_before_width + actual_overlay_width);
+    let actual_surface_width = surface_width.max(surface.width);
+    let after_target = total_width.saturating_sub(actual_before_width + actual_surface_width);
     let after_pad = after_target.saturating_sub(base.after_width);
 
     let mut result = String::new();
     result.push_str(&base.before);
     result.push_str(&" ".repeat(before_pad));
     result.push_str(SEGMENT_RESET);
-    result.push_str(&overlay.text);
-    result.push_str(&" ".repeat(overlay_pad));
+    result.push_str(&surface.text);
+    result.push_str(&" ".repeat(surface_pad));
     result.push_str(SEGMENT_RESET);
     result.push_str(&base.after);
     result.push_str(&" ".repeat(after_pad));
@@ -295,36 +295,36 @@ pub fn composite_line_at(
 }
 
 fn resolve_anchor_row(
-    anchor: OverlayAnchor,
+    anchor: SurfaceAnchor,
     height: usize,
     avail_height: usize,
     margin_top: usize,
 ) -> usize {
     match anchor {
-        OverlayAnchor::TopLeft | OverlayAnchor::TopCenter | OverlayAnchor::TopRight => margin_top,
-        OverlayAnchor::BottomLeft | OverlayAnchor::BottomCenter | OverlayAnchor::BottomRight => {
+        SurfaceAnchor::TopLeft | SurfaceAnchor::TopCenter | SurfaceAnchor::TopRight => margin_top,
+        SurfaceAnchor::BottomLeft | SurfaceAnchor::BottomCenter | SurfaceAnchor::BottomRight => {
             margin_top + avail_height.saturating_sub(height)
         }
-        OverlayAnchor::LeftCenter | OverlayAnchor::Center | OverlayAnchor::RightCenter => {
+        SurfaceAnchor::LeftCenter | SurfaceAnchor::Center | SurfaceAnchor::RightCenter => {
             margin_top + avail_height.saturating_sub(height) / 2
         }
     }
 }
 
 fn resolve_anchor_col(
-    anchor: OverlayAnchor,
+    anchor: SurfaceAnchor,
     width: usize,
     avail_width: usize,
     margin_left: usize,
 ) -> usize {
     match anchor {
-        OverlayAnchor::TopLeft | OverlayAnchor::LeftCenter | OverlayAnchor::BottomLeft => {
+        SurfaceAnchor::TopLeft | SurfaceAnchor::LeftCenter | SurfaceAnchor::BottomLeft => {
             margin_left
         }
-        OverlayAnchor::TopRight | OverlayAnchor::RightCenter | OverlayAnchor::BottomRight => {
+        SurfaceAnchor::TopRight | SurfaceAnchor::RightCenter | SurfaceAnchor::BottomRight => {
             margin_left + avail_width.saturating_sub(width)
         }
-        OverlayAnchor::TopCenter | OverlayAnchor::Center | OverlayAnchor::BottomCenter => {
+        SurfaceAnchor::TopCenter | SurfaceAnchor::Center | SurfaceAnchor::BottomCenter => {
             margin_left + avail_width.saturating_sub(width) / 2
         }
     }
@@ -354,23 +354,23 @@ mod tests {
     #[test]
     fn layout_anchor_matrix_all_variants() {
         let cases = [
-            (OverlayAnchor::TopLeft, 0, 0),
-            (OverlayAnchor::TopRight, 0, 14),
-            (OverlayAnchor::BottomLeft, 7, 0),
-            (OverlayAnchor::BottomRight, 7, 14),
-            (OverlayAnchor::TopCenter, 0, 7),
-            (OverlayAnchor::BottomCenter, 7, 7),
-            (OverlayAnchor::LeftCenter, 3, 0),
-            (OverlayAnchor::RightCenter, 3, 14),
-            (OverlayAnchor::Center, 3, 7),
+            (SurfaceAnchor::TopLeft, 0, 0),
+            (SurfaceAnchor::TopRight, 0, 14),
+            (SurfaceAnchor::BottomLeft, 7, 0),
+            (SurfaceAnchor::BottomRight, 7, 14),
+            (SurfaceAnchor::TopCenter, 0, 7),
+            (SurfaceAnchor::BottomCenter, 7, 7),
+            (SurfaceAnchor::LeftCenter, 3, 0),
+            (SurfaceAnchor::RightCenter, 3, 14),
+            (SurfaceAnchor::Center, 3, 7),
         ];
         for (anchor, expected_row, expected_col) in cases {
-            let options = OverlayOptions {
-                width: Some(SizeValue::Absolute(6)),
+            let options = SurfaceOptions {
+                width: Some(SurfaceSizeValue::Absolute(6)),
                 anchor: Some(anchor),
                 ..Default::default()
             };
-            let layout = resolve_overlay_layout(Some(&options), 3, 20, 10);
+            let layout = resolve_surface_layout(Some(&options), 3, 20, 10);
             assert_eq!(layout.row, expected_row, "anchor {anchor:?} row mismatch");
             assert_eq!(layout.col, expected_col, "anchor {anchor:?} col mismatch");
         }
@@ -386,13 +386,13 @@ mod tests {
             (-25.0, -10.0, 0, 0),
         ];
         for (row_percent, col_percent, expected_row, expected_col) in cases {
-            let options = OverlayOptions {
-                width: Some(SizeValue::Absolute(8)),
-                row: Some(SizeValue::Percent(row_percent)),
-                col: Some(SizeValue::Percent(col_percent)),
+            let options = SurfaceOptions {
+                width: Some(SurfaceSizeValue::Absolute(8)),
+                row: Some(SurfaceSizeValue::Percent(row_percent)),
+                col: Some(SurfaceSizeValue::Percent(col_percent)),
                 ..Default::default()
             };
-            let layout = resolve_overlay_layout(Some(&options), 2, 20, 10);
+            let layout = resolve_surface_layout(Some(&options), 2, 20, 10);
             assert_eq!(
                 layout.row, expected_row,
                 "row percent {row_percent} should resolve predictably"
@@ -406,12 +406,12 @@ mod tests {
 
     #[test]
     fn layout_margin_and_size_constraints_interact_correctly() {
-        let options = OverlayOptions {
-            width: Some(SizeValue::Absolute(30)),
+        let options = SurfaceOptions {
+            width: Some(SurfaceSizeValue::Absolute(30)),
             min_width: Some(20),
-            max_height: Some(SizeValue::Percent(90.0)),
-            anchor: Some(OverlayAnchor::BottomRight),
-            margin: Some(OverlayMargin {
+            max_height: Some(SurfaceSizeValue::Percent(90.0)),
+            anchor: Some(SurfaceAnchor::BottomRight),
+            margin: Some(SurfaceMargin {
                 top: Some(1),
                 right: Some(3),
                 bottom: Some(4),
@@ -419,7 +419,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let layout = resolve_overlay_layout(Some(&options), 6, 20, 10);
+        let layout = resolve_surface_layout(Some(&options), 6, 20, 10);
         assert_eq!(layout.width, 15);
         assert_eq!(layout.max_height, Some(5));
         assert_eq!(layout.row, 1);
@@ -428,26 +428,26 @@ mod tests {
 
     #[test]
     fn layout_absolute_position_overrides_anchor_then_offsets_and_clamps() {
-        let options = OverlayOptions {
-            width: Some(SizeValue::Absolute(5)),
-            anchor: Some(OverlayAnchor::BottomRight),
-            row: Some(SizeValue::Absolute(2)),
-            col: Some(SizeValue::Absolute(1)),
+        let options = SurfaceOptions {
+            width: Some(SurfaceSizeValue::Absolute(5)),
+            anchor: Some(SurfaceAnchor::BottomRight),
+            row: Some(SurfaceSizeValue::Absolute(2)),
+            col: Some(SurfaceSizeValue::Absolute(1)),
             offset_y: Some(-10),
             offset_x: Some(50),
-            margin: Some(OverlayMargin::uniform(1)),
+            margin: Some(SurfaceMargin::uniform(1)),
             ..Default::default()
         };
-        let layout = resolve_overlay_layout(Some(&options), 2, 20, 10);
+        let layout = resolve_surface_layout(Some(&options), 2, 20, 10);
         assert_eq!(layout.row, 1);
         assert_eq!(layout.col, 14);
     }
 
     #[test]
-    fn composite_line_truncates_mixed_ansi_osc_overlay_and_closes_segments() {
+    fn composite_line_truncates_mixed_ansi_osc_surface_and_closes_segments() {
         let base = "0123456789";
-        let overlay = "\x1b[31mAB\x1b]8;;https://x\x07CDEFGH\x1b]8;;\x07\x1b[0m";
-        let composed = composite_line_at(base, overlay, 2, 6, 10, not_image);
+        let surface = "\x1b[31mAB\x1b]8;;https://x\x07CDEFGH\x1b]8;;\x07\x1b[0m";
+        let composed = composite_line_at(base, surface, 2, 6, 10, not_image);
         let expected =
             "01\x1b[0m\x1b]8;;\x07\x1b[31mAB\x1b]8;;https://x\x07CDEF\x1b[0m\x1b]8;;\x0789";
         assert_eq!(composed, expected);
@@ -456,10 +456,10 @@ mod tests {
     }
 
     #[test]
-    fn composite_line_pads_short_mixed_ansi_osc_overlay() {
+    fn composite_line_pads_short_mixed_ansi_osc_surface() {
         let base = "abcdef";
-        let overlay = "\x1b]8;;https://x\x07Z\x1b]8;;\x07";
-        let composed = composite_line_at(base, overlay, 0, 4, 6, not_image);
+        let surface = "\x1b]8;;https://x\x07Z\x1b]8;;\x07";
+        let composed = composite_line_at(base, surface, 0, 4, 6, not_image);
         let expected =
             "\x1b[0m\x1b]8;;\x07\x1b]8;;https://x\x07Z\x1b]8;;\x07   \x1b[0m\x1b]8;;\x07ef";
         assert_eq!(composed, expected);
@@ -467,15 +467,15 @@ mod tests {
     }
 
     #[test]
-    fn composite_overlays_inserts_reset_guards_for_style_safety() {
+    fn composite_surfaces_inserts_reset_guards_for_style_safety() {
         let base = vec!["\x1b[3mXXXXXXXXXX\x1b[23m".to_string(), "INPUT".to_string()];
-        let overlays = vec![RenderedOverlay {
+        let surfaces = vec![RenderedSurface {
             lines: vec!["OVR".to_string()],
             row: 0,
             col: 5,
             width: 3,
         }];
-        let composed = composite_overlays(base, &overlays, 10, 2, 2, not_image);
+        let composed = composite_surfaces(base, &surfaces, 10, 2, 2, not_image);
         assert_eq!(composed.len(), 2);
         assert_eq!(visible_width(&composed[0]), 10);
         assert_eq!(count_occurrences(&composed[0], SEGMENT_RESET), 2);

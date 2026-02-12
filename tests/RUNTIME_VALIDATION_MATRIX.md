@@ -18,7 +18,7 @@ When changing runtime, rendering, or surface behavior, run this matrix locally b
 ## Legacy regression guards
 
 - `cargo test --test legacy_surface_guard`
-- `rg -n "show_overlay\(|OverlayHandle|OverlayId" src/lib.rs src/runtime/mod.rs src/runtime/tui.rs README.md`
+- `rg -n "show_overlay\(|OverlayHandle|OverlayId|OverlayOptions" src/lib.rs src/runtime/mod.rs src/runtime/tui.rs README.md`
 
 ## Notes
 

@@ -9,8 +9,8 @@ pub trait Component {
 
     /// Provide an allocated viewport size for this component (optional).
     ///
-    /// This is intended for overlay components that need to size nested terminal
-    /// emulation (for example, a PTY-backed TUI) to match the space the overlay
+    /// This is intended for surface components that need to size nested terminal
+    /// emulation (for example, a PTY-backed TUI) to match the space the surface
     /// is allowed to use.
     ///
     /// This is a constraint/budget, not a promise about the number of lines that

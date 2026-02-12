@@ -1560,7 +1560,7 @@ fn session_surface_options() -> SurfaceOptions {
     SurfaceOptions {
         kind: SurfaceKind::Modal,
         input_policy: SurfaceInputPolicy::Capture,
-        overlay: SurfaceLayoutOptions {
+        layout: SurfaceLayoutOptions {
             anchor: Some(SurfaceAnchor::Center),
             margin: Some(SurfaceMargin::uniform(1)),
             width: Some(SurfaceSizeValue::percent(OVERLAY_WIDTH_PERCENT)),
