@@ -182,6 +182,7 @@ impl<'a, T: Terminal> Drop for TerminalGuard<'a, T> {
 pub enum CustomCommandError {
     MissingComponentId(ComponentId),
     MissingOverlayId(OverlayId),
+    MissingSurfaceId(SurfaceId),
     InvalidState(String),
     Message(String),
 }
@@ -194,6 +195,9 @@ impl std::fmt::Display for CustomCommandError {
             }
             Self::MissingOverlayId(overlay_id) => {
                 write!(f, "missing overlay id {}", overlay_id.raw())
+            }
+            Self::MissingSurfaceId(surface_id) => {
+                write!(f, "missing surface id {}", surface_id.raw())
             }
             Self::InvalidState(message) => write!(f, "invalid state: {message}"),
             Self::Message(message) => write!(f, "{message}"),
@@ -227,6 +231,24 @@ trait CustomCommandRuntimeOps {
         &mut self,
         overlay_id: OverlayId,
         hidden: bool,
+    ) -> Result<bool, CustomCommandError>;
+    fn show_surface(
+        &mut self,
+        surface_id: SurfaceId,
+        component_id: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError>;
+    fn hide_surface(&mut self, surface_id: SurfaceId) -> Result<bool, CustomCommandError>;
+    fn set_surface_hidden(
+        &mut self,
+        surface_id: SurfaceId,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError>;
+    fn update_surface_options(
+        &mut self,
+        surface_id: SurfaceId,
+        options: Option<SurfaceOptions>,
     ) -> Result<bool, CustomCommandError>;
     fn with_component_mut_dyn(
         &mut self,
@@ -304,6 +326,51 @@ impl<'a> CustomCommandCtx<'a> {
         hidden: bool,
     ) -> Result<(), CustomCommandError> {
         if self.runtime.set_overlay_hidden(overlay_id, hidden)? {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn show_surface(
+        &mut self,
+        surface_id: SurfaceId,
+        component_id: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    ) -> Result<(), CustomCommandError> {
+        if self
+            .runtime
+            .show_surface(surface_id, component_id, options, hidden)?
+        {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn hide_surface(&mut self, surface_id: SurfaceId) -> Result<(), CustomCommandError> {
+        if self.runtime.hide_surface(surface_id)? {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn set_surface_hidden(
+        &mut self,
+        surface_id: SurfaceId,
+        hidden: bool,
+    ) -> Result<(), CustomCommandError> {
+        if self.runtime.set_surface_hidden(surface_id, hidden)? {
+            self.request_render();
+        }
+        Ok(())
+    }
+
+    pub fn update_surface_options(
+        &mut self,
+        surface_id: SurfaceId,
+        options: Option<SurfaceOptions>,
+    ) -> Result<(), CustomCommandError> {
+        if self.runtime.update_surface_options(surface_id, options)? {
             self.request_render();
         }
         Ok(())
@@ -811,6 +878,72 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
         } else {
             Err(CustomCommandError::InvalidState(
                 "overlay hidden state unchanged".to_string(),
+            ))
+        }
+    }
+
+    fn show_surface(
+        &mut self,
+        surface_id: SurfaceId,
+        component_id: ComponentId,
+        options: Option<SurfaceOptions>,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError> {
+        if self.components.get_mut(component_id).is_none() {
+            return Err(CustomCommandError::MissingComponentId(component_id));
+        }
+        if self.apply_show_surface(surface_id, component_id, options, hidden) {
+            Ok(true)
+        } else {
+            Err(CustomCommandError::InvalidState(
+                "failed to show surface".to_string(),
+            ))
+        }
+    }
+
+    fn hide_surface(&mut self, surface_id: SurfaceId) -> Result<bool, CustomCommandError> {
+        if !self.overlays.contains(surface_id) {
+            return Err(CustomCommandError::MissingSurfaceId(surface_id));
+        }
+        if self.apply_hide_surface(surface_id) {
+            Ok(true)
+        } else {
+            Err(CustomCommandError::InvalidState(
+                "failed to hide surface".to_string(),
+            ))
+        }
+    }
+
+    fn set_surface_hidden(
+        &mut self,
+        surface_id: SurfaceId,
+        hidden: bool,
+    ) -> Result<bool, CustomCommandError> {
+        if !self.overlays.contains(surface_id) {
+            return Err(CustomCommandError::MissingSurfaceId(surface_id));
+        }
+        if self.apply_set_surface_hidden(surface_id, hidden) {
+            Ok(true)
+        } else {
+            Err(CustomCommandError::InvalidState(
+                "surface hidden state unchanged".to_string(),
+            ))
+        }
+    }
+
+    fn update_surface_options(
+        &mut self,
+        surface_id: SurfaceId,
+        options: Option<SurfaceOptions>,
+    ) -> Result<bool, CustomCommandError> {
+        if !self.overlays.contains(surface_id) {
+            return Err(CustomCommandError::MissingSurfaceId(surface_id));
+        }
+        if self.apply_update_surface_options(surface_id, options) {
+            Ok(true)
+        } else {
+            Err(CustomCommandError::InvalidState(
+                "failed to update surface options".to_string(),
             ))
         }
     }
@@ -2463,7 +2596,7 @@ mod tests {
     use crate::core::terminal::Terminal;
     use crate::core::terminal_image::get_cell_dimensions;
     use crate::runtime::overlay::{OverlayVisibility, SizeValue};
-    use crate::runtime::surface::{SurfaceInputPolicy, SurfaceKind, SurfaceOptions};
+    use crate::runtime::surface::{SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -2672,6 +2805,55 @@ mod tests {
                 OverlayMutationAction::SetHidden { overlay_id, hidden } => {
                     ctx.set_overlay_hidden(overlay_id, hidden)
                 }
+            }
+        }
+    }
+
+    enum SurfaceMutationAction {
+        Show {
+            surface_id: SurfaceId,
+            component_id: ComponentId,
+            options: Option<SurfaceOptions>,
+            hidden: bool,
+        },
+        Hide {
+            surface_id: SurfaceId,
+        },
+        SetHidden {
+            surface_id: SurfaceId,
+            hidden: bool,
+        },
+        UpdateOptions {
+            surface_id: SurfaceId,
+            options: Option<SurfaceOptions>,
+        },
+    }
+
+    struct SurfaceMutationCustomCommand {
+        action: SurfaceMutationAction,
+    }
+
+    impl CustomCommand for SurfaceMutationCustomCommand {
+        fn name(&self) -> &'static str {
+            "surface_mutation_custom_command"
+        }
+
+        fn apply(self: Box<Self>, ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError> {
+            match self.action {
+                SurfaceMutationAction::Show {
+                    surface_id,
+                    component_id,
+                    options,
+                    hidden,
+                } => ctx.show_surface(surface_id, component_id, options, hidden),
+                SurfaceMutationAction::Hide { surface_id } => ctx.hide_surface(surface_id),
+                SurfaceMutationAction::SetHidden { surface_id, hidden } => {
+                    ctx.set_surface_hidden(surface_id, hidden)
+                }
+                SurfaceMutationAction::UpdateOptions {
+                    surface_id,
+                    options,
+                } => ctx.update_surface_options(surface_id, options),
             }
         }
     }
@@ -2987,6 +3169,165 @@ mod tests {
         assert!(
             diagnostic.contains("missing overlay id 9001"),
             "expected missing overlay id details in diagnostic, got: {diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn custom_command_surface_mutation_lifecycle_supports_visibility_and_option_updates() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+        assert!(*root_focus.borrow());
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_component_id = runtime.register_component(surface_component);
+        let surface_id = SurfaceId::from_raw(777);
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Custom(Box::new(SurfaceMutationCustomCommand {
+            action: SurfaceMutationAction::Show {
+                surface_id,
+                component_id: surface_component_id,
+                options: Some(SurfaceOptions {
+                    input_policy: SurfaceInputPolicy::Capture,
+                    kind: SurfaceKind::Modal,
+                    ..Default::default()
+                }),
+                hidden: false,
+            },
+        })));
+        runtime.run_once();
+
+        assert_eq!(runtime.overlays.entries.len(), 1);
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*surface_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        handle.dispatch(Command::Custom(Box::new(SurfaceMutationCustomCommand {
+            action: SurfaceMutationAction::UpdateOptions {
+                surface_id,
+                options: Some(SurfaceOptions {
+                    input_policy: SurfaceInputPolicy::Passthrough,
+                    kind: SurfaceKind::Corner,
+                    ..Default::default()
+                }),
+            },
+        })));
+        runtime.run_once();
+
+        runtime.handle_input("a");
+        assert_eq!(root_inputs.borrow().as_slice(), &["a".to_string()]);
+        assert!(surface_inputs.borrow().is_empty());
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        handle.dispatch(Command::Custom(Box::new(SurfaceMutationCustomCommand {
+            action: SurfaceMutationAction::UpdateOptions {
+                surface_id,
+                options: Some(SurfaceOptions {
+                    input_policy: SurfaceInputPolicy::Capture,
+                    kind: SurfaceKind::Modal,
+                    ..Default::default()
+                }),
+            },
+        })));
+        runtime.run_once();
+
+        runtime.handle_input("b");
+        assert!(root_inputs.borrow().is_empty());
+        assert_eq!(surface_inputs.borrow().as_slice(), &["b".to_string()]);
+
+        handle.dispatch(Command::Custom(Box::new(SurfaceMutationCustomCommand {
+            action: SurfaceMutationAction::SetHidden {
+                surface_id,
+                hidden: true,
+            },
+        })));
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries[0].hidden);
+        assert!(!*surface_focus.borrow());
+        assert!(*root_focus.borrow());
+
+        handle.dispatch(Command::Custom(Box::new(SurfaceMutationCustomCommand {
+            action: SurfaceMutationAction::SetHidden {
+                surface_id,
+                hidden: false,
+            },
+        })));
+        runtime.run_once();
+
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*surface_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.dispatch(Command::Custom(Box::new(SurfaceMutationCustomCommand {
+            action: SurfaceMutationAction::Hide { surface_id },
+        })));
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries.is_empty());
+        assert!(!*surface_focus.borrow());
+        assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn custom_command_surface_mutation_missing_id_emits_runtime_diagnostic() {
+        let terminal = TestTerminal::default();
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+        let diagnostics = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = Rc::clone(&diagnostics);
+        runtime.set_on_diagnostic(Some(Box::new(move |message| {
+            sink.borrow_mut().push(message.to_string());
+        })));
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+
+        let missing_surface_id = SurfaceId::from_raw(4040);
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Custom(Box::new(SurfaceMutationCustomCommand {
+            action: SurfaceMutationAction::Hide {
+                surface_id: missing_surface_id,
+            },
+        })));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.run_once();
+        }));
+        if cfg!(debug_assertions) {
+            assert!(
+                result.is_err(),
+                "expected debug_assert panic for failing custom command in debug builds"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "expected no panic when debug assertions are disabled"
+            );
+        }
+
+        let diagnostics = diagnostics.borrow();
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert!(
+            diagnostic.contains("[tape_tui][error][command.custom.failed]"),
+            "expected custom command failure diagnostic, got: {diagnostic:?}"
+        );
+        assert!(
+            diagnostic.contains("missing surface id 4040"),
+            "expected missing surface id details in diagnostic, got: {diagnostic:?}"
         );
     }
 
