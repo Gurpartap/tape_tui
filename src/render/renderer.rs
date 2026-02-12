@@ -1277,6 +1277,122 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct PathSwitchSnapshot {
+        outputs: Vec<String>,
+        hardware_cursor_row: usize,
+        previous_lines_len: usize,
+        max_lines_rendered: usize,
+    }
+
+    fn run_mixed_path_switch_snapshot() -> PathSwitchSnapshot {
+        let mut renderer = DiffRenderer::new();
+        let width = 20;
+        let height = 3;
+
+        let mut lines: Vec<String> = (0..6).map(|i| format!("line-{i}")).collect();
+        let mut outputs = Vec::new();
+
+        outputs.push(cmds_to_bytes(renderer.render(
+            lines.clone().into(),
+            width,
+            height,
+            false,
+            false,
+        )));
+
+        lines.insert(0, "hist-a".to_string());
+        lines.insert(1, "hist-b".to_string());
+        outputs.push(cmds_to_bytes(renderer.render(
+            lines.clone().into(),
+            width,
+            height,
+            false,
+            false,
+        )));
+
+        lines.insert(0, "surface-hit".to_string());
+        outputs.push(cmds_to_bytes(renderer.render(
+            lines.clone().into(),
+            width,
+            height,
+            false,
+            true,
+        )));
+
+        lines.insert(0, "resize-hit".to_string());
+        outputs.push(cmds_to_bytes(renderer.render(
+            lines.clone().into(),
+            width + 4,
+            height,
+            false,
+            false,
+        )));
+
+        lines.insert(0, "resize-back".to_string());
+        outputs.push(cmds_to_bytes(renderer.render(
+            lines.clone().into(),
+            width,
+            height,
+            false,
+            false,
+        )));
+
+        lines.insert(0, "fast-again".to_string());
+        outputs.push(cmds_to_bytes(renderer.render(
+            lines.into(),
+            width,
+            height,
+            false,
+            false,
+        )));
+
+        PathSwitchSnapshot {
+            outputs,
+            hardware_cursor_row: renderer.hardware_cursor_row(),
+            previous_lines_len: renderer.previous_lines_len(),
+            max_lines_rendered: renderer.max_lines_rendered(),
+        }
+    }
+
+    #[test]
+    fn mixed_eligible_and_ineligible_churn_replays_identically() {
+        let baseline = run_mixed_path_switch_snapshot();
+
+        let clear_count = baseline
+            .outputs
+            .iter()
+            .filter(|output| output.contains(super::CLEAR_ALL))
+            .count();
+        assert!(
+            clear_count >= 3,
+            "expected multiple forced-fallback full clears during churn, got outputs: {:?}",
+            baseline.outputs
+        );
+
+        let fast_count = baseline
+            .outputs
+            .iter()
+            .filter(|output| !output.contains(super::CLEAR_ALL) && output.contains("hist-"))
+            .count();
+        assert!(
+            fast_count >= 1,
+            "expected at least one fast-path emission during churn, got outputs: {:?}",
+            baseline.outputs
+        );
+
+        assert!(
+            baseline.hardware_cursor_row + 1 == baseline.previous_lines_len,
+            "expected hardware cursor to land on transcript tail after churn"
+        );
+        assert_eq!(baseline.max_lines_rendered, baseline.previous_lines_len);
+
+        for _ in 0..20 {
+            let rerun = run_mixed_path_switch_snapshot();
+            assert_eq!(rerun, baseline);
+        }
+    }
+
     #[test]
     fn width_change_triggers_full_clear() {
         let mut renderer = DiffRenderer::new();

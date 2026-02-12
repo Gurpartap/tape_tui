@@ -266,6 +266,87 @@ impl Component for TranscriptComponent {
     }
 }
 
+#[derive(Clone)]
+struct ChurnState {
+    lines: Arc<Mutex<Vec<String>>>,
+    events: Arc<Mutex<Vec<String>>>,
+    counter: Arc<Mutex<usize>>,
+}
+
+impl ChurnState {
+    fn new(lines: Vec<String>) -> Self {
+        Self {
+            lines: Arc::new(Mutex::new(lines)),
+            events: Arc::new(Mutex::new(Vec::new())),
+            counter: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .expect("lock churn lines for snapshot")
+            .clone()
+    }
+
+    fn prepend_event_line(&self, label: &str) {
+        let mut counter = self.counter.lock().expect("lock churn counter");
+        let mut lines = self.lines.lock().expect("lock churn lines for prepend");
+        lines.insert(0, format!("{label}-{}", *counter));
+        *counter = counter.saturating_add(1);
+    }
+
+    fn push_event(&self, event: String) {
+        self.events
+            .lock()
+            .expect("lock churn events for push")
+            .push(event);
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.events.lock().expect("lock churn events clone").clone()
+    }
+}
+
+struct ChurnComponent {
+    state: ChurnState,
+}
+
+impl ChurnComponent {
+    fn new(state: ChurnState) -> Self {
+        Self { state }
+    }
+}
+
+impl Component for ChurnComponent {
+    fn render(&mut self, _width: usize) -> Vec<String> {
+        self.state.lines()
+    }
+
+    fn handle_event(&mut self, event: &InputEvent) {
+        match event {
+            InputEvent::Text { text, .. } => {
+                self.state.push_event(format!("text:{text}"));
+                self.state.prepend_event_line("txt");
+            }
+            InputEvent::Resize { columns, rows } => {
+                self.state.push_event(format!("resize:{columns}x{rows}"));
+                self.state.prepend_event_line("rsz");
+            }
+            _ => {
+                self.state.push_event("other".to_string());
+            }
+        }
+    }
+
+    fn cursor_pos(&self) -> Option<CursorPos> {
+        Some(CursorPos {
+            row: self.state.lines().len().saturating_sub(1),
+            col: 64,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FocusRoutingSnapshot {
     root_events: Vec<String>,
@@ -284,6 +365,13 @@ struct ViewportSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InlineInsertBeforeSnapshot {
+    output: String,
+    max_cursor_column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SameTickChurnSnapshot {
+    events: Vec<String>,
     output: String,
     max_cursor_column: usize,
 }
@@ -495,6 +583,49 @@ fn run_inline_insert_before_snapshot() -> InlineInsertBeforeSnapshot {
     }
 }
 
+fn run_same_tick_churn_snapshot() -> SameTickChurnSnapshot {
+    let terminal = HarnessTerminal::new(8, 3);
+    let probe_terminal = terminal.clone();
+    let mut runtime = TUI::new(terminal.clone());
+
+    runtime
+        .start()
+        .expect("start runtime for same-tick churn snapshot");
+    probe_terminal.take_writes();
+
+    let churn_state = ChurnState::new((0..6).map(|i| format!("line-{i}")).collect::<Vec<String>>());
+    let component = ChurnComponent::new(churn_state.clone());
+    let root_id = runtime.register_component(component);
+    runtime.set_root(vec![root_id]);
+    runtime.set_focus(root_id);
+    runtime.render_now();
+    probe_terminal.take_writes();
+
+    terminal.emit_input("a");
+    terminal.set_size(10, 3);
+    terminal.emit_resize();
+    runtime.run_once();
+
+    terminal.emit_input("b");
+    terminal.set_size(8, 3);
+    terminal.emit_resize();
+    runtime.run_once();
+
+    terminal.emit_input("c");
+    runtime.run_once();
+
+    runtime
+        .stop()
+        .expect("stop runtime for same-tick churn snapshot");
+
+    let output = probe_terminal.take_writes();
+    SameTickChurnSnapshot {
+        events: churn_state.events(),
+        max_cursor_column: max_cursor_column(&output),
+        output,
+    }
+}
+
 fn run_visibility_toggle_snapshot() -> VisibilityToggleSnapshot {
     let terminal = HarnessTerminal::new(10, 3);
     let probe_terminal = terminal.clone();
@@ -629,6 +760,41 @@ fn deterministic_inline_insert_before_growth_preserves_history_and_cursor_bounds
 
     for _ in 1..SOAK_RUNS {
         let rerun = run_inline_insert_before_snapshot();
+        assert_eq!(rerun, baseline);
+    }
+}
+
+#[test]
+fn deterministic_same_tick_input_resize_render_churn_remains_stable() {
+    let baseline = run_same_tick_churn_snapshot();
+
+    assert!(
+        baseline.events.iter().any(|event| event == "text:a")
+            && baseline.events.iter().any(|event| event == "text:b")
+            && baseline.events.iter().any(|event| event == "text:c"),
+        "expected churn sequence to include text events, got: {:?}",
+        baseline.events
+    );
+    assert!(
+        baseline.events.iter().any(|event| event == "resize:10x3")
+            && baseline.events.iter().any(|event| event == "resize:8x3"),
+        "expected churn sequence to include resize events, got: {:?}",
+        baseline.events
+    );
+    assert!(
+        baseline.output.contains("\x1b[3J\x1b[2J\x1b[H") && baseline.output.contains("\x1b[?2026h"),
+        "expected churn output to include both fallback full clears and sync-gated diff output: {:?}",
+        baseline.output
+    );
+    assert!(
+        baseline.max_cursor_column <= 10,
+        "cursor column exceeded churn width bounds: {}\noutput={:?}",
+        baseline.max_cursor_column,
+        baseline.output
+    );
+
+    for _ in 1..SOAK_RUNS {
+        let rerun = run_same_tick_churn_snapshot();
         assert_eq!(rerun, baseline);
     }
 }
