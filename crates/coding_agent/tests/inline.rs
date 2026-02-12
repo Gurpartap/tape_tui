@@ -314,3 +314,87 @@ fn normal_flow_stays_inline_without_alternate_screen_sequences() {
         );
     }
 }
+
+#[test]
+fn input_history_up_down_keys_cycle_and_return_to_live_draft() {
+    let (mut tui, app, terminal_trace) = setup_runtime();
+
+    tui.start().expect("runtime start");
+
+    {
+        let mut app = support::lock_unpoisoned(&app);
+        app.push_history_entry("first command");
+        app.push_history_entry("second command");
+        app.push_history_entry("third command");
+        app.input = "draft input".to_string();
+    }
+
+    support::inject_input(&terminal_trace, "\x1bOA");
+    let recalled_last = run_until(&mut tui, Duration::from_secs(1), || {
+        support::lock_unpoisoned(&app).input == "third command"
+    });
+    assert!(recalled_last, "up did not recall the most recent command");
+
+    support::inject_input(&terminal_trace, "\x1b[A");
+    let recalled_second = run_until(&mut tui, Duration::from_secs(1), || {
+        support::lock_unpoisoned(&app).input == "second command"
+    });
+    assert!(recalled_second, "second up did not recall previous command");
+
+    support::inject_input(&terminal_trace, "\x1b[A");
+    let recalled_third = run_until(&mut tui, Duration::from_secs(1), || {
+        support::lock_unpoisoned(&app).input == "first command"
+    });
+    assert!(recalled_third, "additional up did not stay at oldest command");
+
+    support::inject_input(&terminal_trace, "\x1bOB");
+    let restored_middle = run_until(&mut tui, Duration::from_secs(1), || {
+        support::lock_unpoisoned(&app).input == "second command"
+    });
+    assert!(
+        restored_middle,
+        "down did not move forward through command history"
+    );
+
+    support::inject_input(&terminal_trace, "\x1b[B");
+    let restored_draft = run_until(&mut tui, Duration::from_secs(1), || {
+        support::lock_unpoisoned(&app).input == "third command"
+    });
+    assert!(
+        restored_draft,
+        "down did not move from middle to newest command"
+    );
+
+    support::inject_input(&terminal_trace, "\x1b[B");
+    let returned_to_draft = run_until(&mut tui, Duration::from_secs(1), || {
+        support::lock_unpoisoned(&app).input == "draft input"
+    });
+    assert!(
+        returned_to_draft,
+        "down did not return to the live draft after history"
+    );
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn ctrl_c_clears_text_input_and_does_not_exit() {
+    let (mut tui, app, terminal_trace) = setup_runtime();
+
+    tui.start().expect("runtime start");
+
+    support::inject_input(&terminal_trace, "draft input");
+    let started_editing = run_until(&mut tui, Duration::from_secs(1), || {
+        support::lock_unpoisoned(&app).input == "draft input"
+    });
+    assert!(started_editing, "typed input did not reach app state");
+
+    support::inject_input(&terminal_trace, "\x03");
+    let cleared = run_until(&mut tui, Duration::from_secs(1), || {
+        let app = support::lock_unpoisoned(&app);
+        app.input.is_empty() && !app.should_exit
+    });
+    assert!(cleared, "ctrl+c did not clear input without exiting");
+
+    tui.stop().expect("runtime stop");
+}

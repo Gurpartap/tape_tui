@@ -47,7 +47,7 @@ fn submit_starts_run_and_enters_running_mode() {
     app.on_submit(&mut host);
 
     assert_eq!(host.started_prompts, vec!["describe the module layout".to_string()]);
-    assert_eq!(app.history.entries, vec!["describe the module layout".to_string()]);
+    assert_eq!(app.history_entries(), &["describe the module layout".to_string()]);
     assert_eq!(app.mode, Mode::Running { run_id: 42 });
     assert_eq!(app.input, "");
     assert_eq!(app.transcript.len(), 1);
@@ -160,4 +160,44 @@ fn sending_message_while_running_is_non_failing() {
     assert_eq!(app.mode, Mode::Running { run_id: 11 });
     assert_eq!(host.started_prompts.len(), 1);
     assert_eq!(host.render_requests, 2);
+}
+
+#[test]
+fn ctrl_c_clears_input_before_other_actions() {
+    let mut app = App::new();
+    let mut host = HostSpy::with_next_run_id(99);
+
+    app.on_input_replace("draft prompt".to_string());
+    app.mode = Mode::Running { run_id: 99 };
+
+    app.on_control_c(&mut host);
+
+    assert_eq!(app.input, "");
+    assert_eq!(app.mode, Mode::Running { run_id: 99 });
+    assert!(host.cancelled_runs.is_empty());
+    assert_eq!(host.stop_requests, 0);
+}
+
+#[test]
+fn ctrl_c_cancels_run_when_input_is_empty() {
+    let mut app = App::new();
+    let mut host = HostSpy::with_next_run_id(99);
+
+    app.mode = Mode::Running { run_id: 99 };
+    app.on_control_c(&mut host);
+
+    assert_eq!(host.cancelled_runs, vec![99]);
+    assert_eq!(app.mode, Mode::Idle);
+}
+
+#[test]
+fn ctrl_c_exits_when_idle_and_input_is_empty() {
+    let mut app = App::new();
+    let mut host = HostSpy::default();
+
+    app.on_control_c(&mut host);
+
+    assert!(app.should_exit);
+    assert_eq!(host.stop_requests, 1);
+    assert_eq!(host.render_requests, 1);
 }

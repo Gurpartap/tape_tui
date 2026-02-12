@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::process::Command;
@@ -13,6 +14,14 @@ use tape_tui::{
 
 use crate::app::{App, HostOps, Message, Mode, Role};
 use crate::runtime::RuntimeController;
+
+struct HistoryUpdateGuard(Arc<AtomicBool>);
+
+impl Drop for HistoryUpdateGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
@@ -105,6 +114,7 @@ pub struct AppComponent {
     app: Arc<Mutex<App>>,
     host: Arc<RuntimeController>,
     editor: Editor,
+    is_applying_history: Arc<AtomicBool>,
     cursor_pos: Option<CursorPos>,
     view_mode: ViewMode,
 }
@@ -114,6 +124,8 @@ impl AppComponent {
         let app_for_change = Arc::clone(&app);
         let app_for_submit = Arc::clone(&app);
         let host_for_submit = Arc::clone(&host);
+        let is_applying_history = Arc::new(AtomicBool::new(false));
+        let history_changer = Arc::clone(&is_applying_history);
 
         let mut editor = Editor::new(
             editor_theme(),
@@ -121,6 +133,10 @@ impl AppComponent {
             EditorOptions::default(),
         );
         editor.set_on_change(Some(Box::new(move |value| {
+            if history_changer.load(Ordering::SeqCst) {
+                return;
+            }
+
             lock_unpoisoned(&app_for_change).on_input_replace(value);
         })));
         editor.set_on_submit(Some(Box::new(move |value| {
@@ -156,6 +172,7 @@ impl AppComponent {
             app,
             host,
             editor,
+            is_applying_history,
             cursor_pos: None,
             view_mode: ViewMode::Plan,
         }
@@ -169,6 +186,12 @@ impl AppComponent {
 
     fn snapshot(&self) -> App {
         lock_unpoisoned(&self.app).clone()
+    }
+
+    fn set_editor_text_with_history_bypass(&mut self, text: &str) {
+        let _guard = HistoryUpdateGuard(Arc::clone(&self.is_applying_history));
+        self.is_applying_history.store(true, Ordering::SeqCst);
+        self.editor.set_text(text);
     }
 }
 
@@ -238,13 +261,44 @@ impl Component for AppComponent {
                     self.with_app_mut(|app, host| app.on_cancel(host));
                 }
                 "ctrl+c" => {
-                    self.with_app_mut(|app, host| app.on_control_c(host));
-                    self.editor.set_text("");
+                    let mut next_input = None;
+                    self.with_app_mut(|app, host| {
+                        app.on_control_c(host);
+                        next_input = Some(app.input.clone());
+                    });
+
+                    if let Some(next_input) = next_input {
+                        self.set_editor_text_with_history_bypass(&next_input);
+                    }
                 }
                 "shift+tab" => {
                     self.view_mode = self.view_mode.next();
                     let mut host = Arc::clone(&self.host);
                     host.request_render();
+                }
+                "up" | "\u{1b}[A" | "\u{1b}OA" => {
+                    let mut next_input = None;
+                    self.with_app_mut(|app, host| {
+                        app.on_input_history_previous();
+                        next_input = Some(app.input.clone());
+                        host.request_render();
+                    });
+
+                    if let Some(next_input) = next_input {
+                        self.set_editor_text_with_history_bypass(&next_input);
+                    }
+                }
+                "down" | "\u{1b}[B" | "\u{1b}OB" => {
+                    let mut next_input = None;
+                    self.with_app_mut(|app, host| {
+                        app.on_input_history_next();
+                        next_input = Some(app.input.clone());
+                        host.request_render();
+                    });
+
+                    if let Some(next_input) = next_input {
+                        self.set_editor_text_with_history_bypass(&next_input);
+                    }
                 }
                 _ => {
                     self.editor.handle_event(event);

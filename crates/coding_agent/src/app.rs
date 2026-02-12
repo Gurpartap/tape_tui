@@ -27,9 +27,67 @@ pub struct Message {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct InputHistory {
-    pub entries: Vec<String>,
-    pub cursor: Option<usize>,
+struct InputHistory {
+    entries: Vec<String>,
+    cursor: Option<usize>,
+    draft: Option<String>,
+}
+
+impl InputHistory {
+    fn entries(&self) -> &[String] {
+        &self.entries
+    }
+
+    fn cursor(&self) -> Option<usize> {
+        self.cursor
+    }
+
+    fn record_entry(&mut self, text: String) {
+        self.entries.push(text);
+        self.cursor = None;
+        self.draft = None;
+    }
+
+    fn reset_navigation(&mut self) {
+        self.cursor = None;
+        self.draft = None;
+    }
+
+    fn previous(&mut self, current_input: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+
+        if self.cursor.is_some_and(|index| index >= self.entries.len()) {
+            self.cursor = None;
+        }
+
+        if self.cursor.is_none() {
+            self.draft = Some(current_input.to_string());
+        }
+
+        let new_cursor = match self.cursor {
+            Some(index) if index > 0 => index - 1,
+            Some(index) => index,
+            None => self.entries.len() - 1,
+        };
+
+        self.cursor = Some(new_cursor);
+        Some(self.entries[new_cursor].clone())
+    }
+
+    fn next(&mut self) -> Option<String> {
+        let current = self.cursor?;
+
+        if current >= self.entries.len() || current + 1 >= self.entries.len() {
+            self.cursor = None;
+            return Some(self.draft.take().unwrap_or_default());
+        }
+
+        let next = current + 1;
+        self.cursor = Some(next);
+        Some(self.entries[next].clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +95,7 @@ pub struct App {
     pub mode: Mode,
     pub input: String,
     pub transcript: Vec<Message>,
-    pub history: InputHistory,
+    history: InputHistory,
     pub should_exit: bool,
     cancelling_run: Option<RunId>,
 }
@@ -66,6 +124,36 @@ impl App {
 
     pub fn on_input_replace(&mut self, text: String) {
         self.input = text;
+        self.history.reset_navigation();
+    }
+
+    /// Returns submitted prompt history in chronological order.
+    pub fn history_entries(&self) -> &[String] {
+        self.history.entries()
+    }
+
+    /// Returns the current history navigation cursor, if active.
+    pub fn history_cursor(&self) -> Option<usize> {
+        self.history.cursor()
+    }
+
+    /// Appends an entry to prompt history and resets any active history navigation state.
+    pub fn push_history_entry(&mut self, text: impl Into<String>) {
+        self.history.record_entry(text.into());
+    }
+
+    /// Moves to the previous history entry and replaces the active input when possible.
+    pub fn on_input_history_previous(&mut self) {
+        if let Some(previous) = self.history.previous(&self.input) {
+            self.input = previous;
+        }
+    }
+
+    /// Moves to the next history entry (or draft) and replaces the active input when possible.
+    pub fn on_input_history_next(&mut self) {
+        if let Some(next) = self.history.next() {
+            self.input = next;
+        }
     }
 
     pub fn on_submit(&mut self, host: &mut dyn HostOps) {
@@ -115,8 +203,7 @@ impl App {
             return;
         }
 
-        self.history.entries.push(prompt.clone());
-        self.history.cursor = None;
+        self.push_history_entry(prompt.clone());
         self.transcript.push(Message {
             role: Role::User,
             content: prompt.clone(),
@@ -161,12 +248,18 @@ impl App {
     }
 
     pub fn on_control_c(&mut self, host: &mut dyn HostOps) {
-        if self.input.trim().is_empty() {
-            self.on_quit(host);
-        } else {
-            self.input.clear();
+        if !self.input.is_empty() {
+            self.on_input_replace(String::new());
             host.request_render();
+            return;
         }
+
+        if matches!(self.mode, Mode::Running { .. }) {
+            self.on_cancel(host);
+            return;
+        }
+
+        self.on_quit(host);
     }
 
     pub fn on_quit(&mut self, host: &mut dyn HostOps) {
@@ -194,26 +287,27 @@ impl App {
     }
 
     pub fn on_run_chunk(&mut self, run_id: RunId, chunk: &str) {
-        if !self.is_active_run(run_id) {
+        if !self.is_active_run(run_id) && !self.is_cancelling(run_id) {
             return;
         }
 
-        if self.is_cancelling(run_id) {
-            return;
-        }
+        let stream_active = !self.is_cancelling(run_id);
 
         if let Some(message) = self
             .transcript
             .iter_mut()
             .rev()
-            .find(|message| message.role == Role::Assistant && message.streaming && message.run_id == Some(run_id))
+            .find(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
         {
             message.content.push_str(chunk);
+            if !stream_active {
+                message.streaming = false;
+            }
         } else {
             self.transcript.push(Message {
                 role: Role::Assistant,
                 content: chunk.to_string(),
-                streaming: true,
+                streaming: stream_active,
                 run_id: Some(run_id),
             });
         }
@@ -388,13 +482,156 @@ mod tests {
         app.mode = Mode::Running { run_id: 7 };
         app.transcript.push(assistant_message("seed", false, Some(7)));
         app.transcript.push(assistant_message("newer", true, Some(7)));
+
+        let assistant_count_before = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::Assistant && message.run_id == Some(7))
+            .count();
+
         app.on_run_started(7);
         assert_eq!(
             app.transcript
                 .iter()
                 .filter(|message| message.role == Role::Assistant && message.run_id == Some(7))
                 .count(),
-            1
+            assistant_count_before
         );
+    }
+
+    #[test]
+    fn input_history_up_down_recall() {
+        let mut app = App::new();
+        app.history.entries.push("first command".to_string());
+        app.history.entries.push("second command".to_string());
+        app.history.entries.push("third command".to_string());
+        app.input = "edited".to_string();
+
+        app.on_input_history_previous();
+        assert_eq!(app.input, "third command");
+        assert_eq!(app.history.cursor, Some(2));
+
+        app.on_input_history_previous();
+        assert_eq!(app.input, "second command");
+        assert_eq!(app.history.cursor, Some(1));
+
+        app.on_input_history_previous();
+        assert_eq!(app.input, "first command");
+        assert_eq!(app.history.cursor, Some(0));
+
+        app.on_input_history_previous();
+        assert_eq!(app.input, "first command");
+        assert_eq!(app.history.cursor, Some(0));
+    }
+
+    #[test]
+    fn input_history_down_returns_blank_after_newest() {
+        let mut app = App::new();
+        app.history.entries.push("one".to_string());
+        app.history.entries.push("two".to_string());
+        app.on_input_history_previous();
+        assert_eq!(app.input, "two");
+        assert_eq!(app.history.cursor, Some(1));
+
+        app.on_input_history_next();
+        assert_eq!(app.input, "");
+        assert_eq!(app.history.cursor, None);
+    }
+
+    #[test]
+    fn input_history_down_returns_live_draft_after_newest() {
+        let mut app = App::new();
+        app.input = "editing draft".to_string();
+        app.history.entries.push("foo".to_string());
+        app.history.entries.push("bar".to_string());
+
+        app.on_input_history_previous();
+        assert_eq!(app.input, "bar");
+
+        app.on_input_history_next();
+        assert_eq!(app.input, "editing draft");
+        assert_eq!(app.history.cursor, None);
+        assert!(app.history.draft.is_none());
+    }
+
+    #[test]
+    fn input_history_previous_no_entries_is_noop() {
+        let mut app = App::new();
+        app.input = "draft text".to_string();
+
+        app.on_input_history_previous();
+        assert_eq!(app.input, "draft text");
+        assert_eq!(app.history.cursor, None);
+        assert_eq!(app.history.draft, None);
+    }
+
+    #[test]
+    fn input_history_next_without_active_cursor_is_noop() {
+        let mut app = App::new();
+        app.input = "draft text".to_string();
+        app.history.draft = Some("stale draft".to_string());
+
+        app.on_input_history_next();
+        assert_eq!(app.input, "draft text");
+        assert_eq!(app.history.cursor, None);
+        assert_eq!(app.history.draft, Some("stale draft".to_string()));
+    }
+
+    #[test]
+    fn input_history_previous_sanitizes_stale_cursor() {
+        let mut app = App::new();
+        app.history.entries.push("only".to_string());
+        app.history.cursor = Some(10);
+
+        app.on_input_history_previous();
+
+        assert_eq!(app.input, "only");
+        assert_eq!(app.history.cursor, Some(0));
+    }
+
+    #[test]
+    fn input_history_next_sanitizes_stale_cursor() {
+        let mut app = App::new();
+        app.history.entries.push("only".to_string());
+        app.history.cursor = Some(10);
+
+        app.on_input_history_next();
+
+        assert_eq!(app.input, "");
+        assert_eq!(app.history.cursor, None);
+        assert!(app.history.draft.is_none());
+    }
+
+    #[test]
+    fn input_change_resets_history_cursor() {
+        let mut app = App::new();
+        app.history.cursor = Some(0);
+        app.history.draft = Some("stale draft".to_string());
+        app.on_input_replace("hello".to_string());
+
+        assert_eq!(app.history.cursor, None);
+        assert_eq!(app.history.draft, None);
+        assert_eq!(app.input, "hello");
+    }
+
+    #[test]
+    fn run_chunk_during_cancelling_appends_without_restoring_streaming() {
+        let mut app = App::new();
+        let run_id = 5;
+        app.mode = Mode::Idle;
+        app.cancelling_run = Some(run_id);
+        app.transcript
+            .push(assistant_message("first", false, Some(run_id)));
+
+        app.on_run_chunk(run_id, " second");
+
+        let assistant_messages: Vec<_> = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
+            .collect();
+        assert_eq!(assistant_messages.len(), 1);
+        assert_eq!(assistant_messages[0].content, "first second");
+        assert!(!assistant_messages[0].streaming);
     }
 }
