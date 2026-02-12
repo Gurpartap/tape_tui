@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use tape_tui::core::cursor::CursorPos;
 use tape_tui::core::terminal::Terminal;
-use tape_tui::{Component, Focusable, InputEvent, TUI};
+use tape_tui::{
+    Component, Focusable, InputEvent, SurfaceInputPolicy, SurfaceKind, SurfaceOptions, TUI,
+};
 
 const SOAK_RUNS: usize = 20;
 
@@ -210,6 +212,15 @@ struct ViewportSnapshot {
     max_cursor_column: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibilityToggleSnapshot {
+    root_events: Vec<String>,
+    surface_events: Vec<String>,
+    root_focus_trace: Vec<bool>,
+    surface_focus_trace: Vec<bool>,
+    output: String,
+}
+
 fn max_cursor_column(output: &str) -> usize {
     let bytes = output.as_bytes();
     let mut i = 0;
@@ -357,6 +368,73 @@ fn run_viewport_snapshot() -> ViewportSnapshot {
     }
 }
 
+fn run_visibility_toggle_snapshot() -> VisibilityToggleSnapshot {
+    let terminal = HarnessTerminal::new(10, 3);
+    let probe_terminal = terminal.clone();
+    let mut runtime = TUI::new(terminal);
+
+    runtime
+        .start()
+        .expect("start runtime for visibility-toggle snapshot");
+    probe_terminal.take_writes();
+
+    let root_state = ProbeState::new();
+    let root_component = ProbeComponent::new(
+        vec!["root-0".to_string(), "root-1".to_string()],
+        Some(CursorPos { row: 1, col: 8 }),
+        root_state.clone(),
+    );
+    let root_id = runtime.register_component(root_component);
+    runtime.set_root(vec![root_id]);
+    runtime.set_focus(root_id);
+    runtime.run_once();
+
+    let surface_state = ProbeState::new();
+    let surface_component = ProbeComponent::new(
+        vec!["surface".to_string()],
+        Some(CursorPos { row: 0, col: 6 }),
+        surface_state.clone(),
+    );
+    let surface_id = runtime.register_component(surface_component);
+    let surface_handle = runtime.show_surface(
+        surface_id,
+        Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            ..Default::default()
+        }),
+    );
+    runtime.run_once();
+    probe_terminal.take_writes();
+
+    runtime.handle_input("a");
+    runtime.render_if_needed();
+
+    surface_handle.set_hidden(true);
+    runtime.run_once();
+
+    runtime.handle_input("b");
+    runtime.render_if_needed();
+
+    surface_handle.set_hidden(false);
+    runtime.run_once();
+
+    runtime.handle_input("c");
+    runtime.render_if_needed();
+
+    runtime
+        .stop()
+        .expect("stop runtime for visibility-toggle snapshot");
+
+    VisibilityToggleSnapshot {
+        root_events: root_state.events(),
+        surface_events: surface_state.events(),
+        root_focus_trace: root_state.focus_trace(),
+        surface_focus_trace: surface_state.focus_trace(),
+        output: probe_terminal.take_writes(),
+    }
+}
+
 #[test]
 fn deterministic_focus_routing_and_cursor_clamp_repeat_cleanly() {
     let baseline = run_focus_routing_snapshot();
@@ -402,6 +480,34 @@ fn deterministic_viewport_window_and_cursor_bounds_repeat_cleanly() {
 
     for _ in 1..SOAK_RUNS {
         let rerun = run_viewport_snapshot();
+        assert_eq!(rerun, baseline);
+    }
+}
+
+#[test]
+fn deterministic_visibility_toggle_sequence_remains_stable() {
+    let baseline = run_visibility_toggle_snapshot();
+
+    assert_eq!(baseline.surface_events, vec!["text:a".to_string(), "text:c".to_string()]);
+    assert_eq!(baseline.root_events, vec!["text:b".to_string()]);
+    assert!(
+        baseline.surface_focus_trace.ends_with(&[true, false, true]),
+        "expected stable surface focus sequence, got: {:?}",
+        baseline.surface_focus_trace
+    );
+    assert!(
+        baseline.root_focus_trace.contains(&true),
+        "expected root focus trace to include restored focus, got: {:?}",
+        baseline.root_focus_trace
+    );
+    assert!(
+        baseline.output.contains("surface") && baseline.output.contains("root-"),
+        "expected deterministic output transcript to contain both root and surface bytes: {:?}",
+        baseline.output
+    );
+
+    for _ in 1..SOAK_RUNS {
+        let rerun = run_visibility_toggle_snapshot();
         assert_eq!(rerun, baseline);
     }
 }
