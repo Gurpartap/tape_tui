@@ -2635,6 +2635,47 @@ mod tests {
         }
     }
 
+    enum OverlayMutationAction {
+        Show {
+            overlay_id: crate::runtime::overlay::OverlayId,
+            component_id: ComponentId,
+            options: Option<OverlayOptions>,
+            hidden: bool,
+        },
+        Hide {
+            overlay_id: crate::runtime::overlay::OverlayId,
+        },
+        SetHidden {
+            overlay_id: crate::runtime::overlay::OverlayId,
+            hidden: bool,
+        },
+    }
+
+    struct OverlayMutationCustomCommand {
+        action: OverlayMutationAction,
+    }
+
+    impl CustomCommand for OverlayMutationCustomCommand {
+        fn name(&self) -> &'static str {
+            "overlay_mutation_custom_command"
+        }
+
+        fn apply(self: Box<Self>, ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError> {
+            match self.action {
+                OverlayMutationAction::Show {
+                    overlay_id,
+                    component_id,
+                    options,
+                    hidden,
+                } => ctx.show_overlay(overlay_id, component_id, options, hidden),
+                OverlayMutationAction::Hide { overlay_id } => ctx.hide_overlay(overlay_id),
+                OverlayMutationAction::SetHidden { overlay_id, hidden } => {
+                    ctx.set_overlay_hidden(overlay_id, hidden)
+                }
+            }
+        }
+    }
+
     struct TestComponent {
         inputs: Rc<RefCell<Vec<String>>>,
         wants_release: bool,
@@ -2827,6 +2868,125 @@ mod tests {
         assert!(
             diagnostic.contains("failing_custom_command"),
             "expected command name in diagnostic, got: {diagnostic:?}"
+        );
+    }
+
+    #[test]
+    fn custom_command_overlay_mutation_lifecycle_matches_runtime_overlay_controls() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+        assert!(*root_focus.borrow());
+
+        let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
+        let overlay_focus = Rc::new(RefCell::new(false));
+        let overlay_component =
+            TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
+        let overlay_component_id = runtime.register_component(overlay_component);
+        let overlay_id = crate::runtime::overlay::OverlayId::from_raw(501);
+
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
+            action: OverlayMutationAction::Show {
+                overlay_id,
+                component_id: overlay_component_id,
+                options: None,
+                hidden: false,
+            },
+        })));
+        runtime.run_once();
+
+        assert_eq!(runtime.overlays.entries.len(), 1);
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*overlay_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
+            action: OverlayMutationAction::SetHidden {
+                overlay_id,
+                hidden: true,
+            },
+        })));
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries[0].hidden);
+        assert!(!*overlay_focus.borrow());
+        assert!(*root_focus.borrow());
+
+        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
+            action: OverlayMutationAction::SetHidden {
+                overlay_id,
+                hidden: false,
+            },
+        })));
+        runtime.run_once();
+
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*overlay_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
+            action: OverlayMutationAction::Hide { overlay_id },
+        })));
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries.is_empty());
+        assert!(!*overlay_focus.borrow());
+        assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn custom_command_overlay_mutation_missing_id_emits_runtime_diagnostic() {
+        let terminal = TestTerminal::default();
+        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
+        let diagnostics = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = Rc::clone(&diagnostics);
+        runtime.set_on_diagnostic(Some(Box::new(move |message| {
+            sink.borrow_mut().push(message.to_string());
+        })));
+
+        runtime.start().expect("runtime start");
+        runtime.render_if_needed();
+
+        let missing_overlay_id = crate::runtime::overlay::OverlayId::from_raw(9001);
+        let handle = runtime.runtime_handle();
+        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
+            action: OverlayMutationAction::Hide {
+                overlay_id: missing_overlay_id,
+            },
+        })));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.run_once();
+        }));
+        if cfg!(debug_assertions) {
+            assert!(
+                result.is_err(),
+                "expected debug_assert panic for failing custom command in debug builds"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "expected no panic when debug assertions are disabled"
+            );
+        }
+
+        let diagnostics = diagnostics.borrow();
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = &diagnostics[0];
+        assert!(
+            diagnostic.contains("[tape_tui][error][command.custom.failed]"),
+            "expected custom command failure diagnostic, got: {diagnostic:?}"
+        );
+        assert!(
+            diagnostic.contains("missing overlay id 9001"),
+            "expected missing overlay id details in diagnostic, got: {diagnostic:?}"
         );
     }
 
@@ -4024,6 +4184,221 @@ mod tests {
         assert_eq!(surface_inputs.borrow().as_slice(), &["b".to_string()]);
         assert!(root_inputs.borrow().is_empty());
         assert!(*surface_focus.borrow());
+    }
+
+    #[test]
+    fn surface_handle_show_and_close_follow_visibility_lifecycle() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&root_focus),
+        );
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&surface_focus),
+        );
+        let surface_component_id = runtime.register_component(surface_component);
+        let handle = runtime.show_surface(
+            surface_component_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        assert_eq!(runtime.overlays.entries.len(), 1);
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*surface_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.set_hidden(true);
+        assert!(!runtime.overlays.entries[0].hidden);
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries[0].hidden);
+        assert!(!*surface_focus.borrow());
+        assert!(*root_focus.borrow());
+
+        handle.show();
+        runtime.run_once();
+
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*surface_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.close();
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries.is_empty());
+        assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn runtime_handle_surface_commands_mutate_surface_stack_from_background_path() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&root_focus),
+        );
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component = TestComponent::new(
+            false,
+            Rc::new(RefCell::new(Vec::new())),
+            Rc::clone(&surface_focus),
+        );
+        let surface_component_id = runtime.register_component(surface_component);
+
+        let handle = runtime.runtime_handle();
+        let surface_id = handle.alloc_surface_id();
+        handle.dispatch(Command::ShowSurface {
+            surface_id,
+            component: surface_component_id,
+            options: Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+            hidden: false,
+        });
+        runtime.run_once();
+
+        assert_eq!(runtime.overlays.entries.len(), 1);
+        assert_eq!(runtime.overlays.entries[0].id, surface_id);
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*surface_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.dispatch(Command::SetSurfaceHidden {
+            surface_id,
+            hidden: true,
+        });
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries[0].hidden);
+        assert!(!*surface_focus.borrow());
+        assert!(*root_focus.borrow());
+
+        handle.dispatch(Command::SetSurfaceHidden {
+            surface_id,
+            hidden: false,
+        });
+        runtime.run_once();
+
+        assert!(!runtime.overlays.entries[0].hidden);
+        assert!(*surface_focus.borrow());
+        assert!(!*root_focus.borrow());
+
+        handle.dispatch(Command::HideSurface(surface_id));
+        runtime.run_once();
+
+        assert!(runtime.overlays.entries.is_empty());
+        assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn surface_modal_geometry_matches_overlay_layout_resolution() {
+        let overlay_options = OverlayOptions {
+            width: Some(SizeValue::percent(55.0)),
+            min_width: Some(22),
+            max_height: Some(SizeValue::percent(60.0)),
+            anchor: Some(crate::runtime::overlay::OverlayAnchor::BottomRight),
+            offset_x: Some(-3),
+            offset_y: Some(2),
+            margin: Some(crate::runtime::overlay::OverlayMargin {
+                top: Some(2),
+                right: Some(4),
+                bottom: Some(3),
+                left: Some(1),
+            }),
+            ..Default::default()
+        };
+
+        let overlay_render_options = crate::render::overlay::OverlayOptions::from(&overlay_options);
+        let overlay_layout = crate::render::overlay::resolve_overlay_layout(
+            Some(&overlay_render_options),
+            11,
+            132,
+            48,
+        );
+
+        let surface_options = SurfaceOptions {
+            overlay: overlay_options,
+            kind: SurfaceKind::Modal,
+            input_policy: SurfaceInputPolicy::Capture,
+        };
+        let surface_overlay_options = surface_options.with_lane_reservations(0, 0);
+        let surface_render_options =
+            crate::render::overlay::OverlayOptions::from(&surface_overlay_options);
+        let surface_layout = crate::render::overlay::resolve_overlay_layout(
+            Some(&surface_render_options),
+            11,
+            132,
+            48,
+        );
+
+        assert_eq!(surface_layout, overlay_layout);
+    }
+
+    #[test]
+    fn surface_visibility_and_row_col_semantics_match_overlay_options() {
+        let overlay_options = OverlayOptions {
+            row: Some(SizeValue::percent(40.0)),
+            col: Some(SizeValue::absolute(9)),
+            visibility: OverlayVisibility::MinSize { cols: 90, rows: 30 },
+            ..Default::default()
+        };
+
+        let surface_options = SurfaceOptions::from(overlay_options);
+
+        let visibility_matrix = [
+            (120usize, 40usize, true),
+            (89usize, 40usize, false),
+            (120usize, 29usize, false),
+        ];
+        for (cols, rows, expected) in visibility_matrix {
+            assert_eq!(overlay_options.is_visible(cols, rows), expected);
+            assert_eq!(surface_options.is_visible(cols, rows), expected);
+        }
+
+        let overlay_render_options = crate::render::overlay::OverlayOptions::from(&overlay_options);
+        let overlay_layout = crate::render::overlay::resolve_overlay_layout(
+            Some(&overlay_render_options),
+            7,
+            120,
+            40,
+        );
+
+        let surface_overlay_options = surface_options.with_lane_reservations(0, 0);
+        let surface_render_options =
+            crate::render::overlay::OverlayOptions::from(&surface_overlay_options);
+        let surface_layout = crate::render::overlay::resolve_overlay_layout(
+            Some(&surface_render_options),
+            7,
+            120,
+            40,
+        );
+
+        assert_eq!(surface_layout, overlay_layout);
     }
 
     #[test]
