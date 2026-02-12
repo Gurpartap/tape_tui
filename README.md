@@ -55,6 +55,10 @@ Surfaces are managed layers shown above the root component (drawers/modals/toast
 - a `SurfaceInputPolicy` (`Capture` or `Passthrough`) for deterministic routing
 - a `SurfaceHandle` used to hide/show/close/update options
 
+Canonical lifecycle on the runtime thread is: register component → `tui.show_surface(...)` → mutate
+via `SurfaceHandle`. Background threads can enqueue equivalent mutations through
+`RuntimeHandle::show_surface(...)` / `RuntimeHandle::dispatch(...)`.
+
 Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root).
 
 Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers).
@@ -183,6 +187,16 @@ handle.close();
 ```bash
 cargo test
 cargo test --features unsafe-terminal-access
+```
+
+### Runtime/surface change matrix
+
+When touching runtime, render, or surface behavior, run the dedicated matrix in
+`tests/RUNTIME_VALIDATION_MATRIX.md`, including:
+
+```bash
+cargo test --test legacy_surface_guard
+cargo test --test runtime_deterministic_soak
 ```
 
 ## Run examples
