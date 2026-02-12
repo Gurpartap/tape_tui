@@ -162,13 +162,13 @@ struct PaletteState {
     action: Option<PaletteAction>,
 }
 
-struct PaletteOverlay {
+struct PaletteSurface {
     list: SelectList,
     state: Rc<RefCell<PaletteState>>,
     exit_flag: Rc<RefCell<bool>>,
 }
 
-impl PaletteOverlay {
+impl PaletteSurface {
     fn new(
         state: Rc<RefCell<PaletteState>>,
         exit_flag: Rc<RefCell<bool>>,
@@ -216,7 +216,7 @@ impl PaletteOverlay {
     }
 }
 
-impl Component for PaletteOverlay {
+impl Component for PaletteSurface {
     fn render(&mut self, width: usize) -> Vec<String> {
         let mut lines = Vec::new();
 
@@ -554,7 +554,7 @@ fn main() -> std::io::Result<()> {
                 handle.hide();
                 tui.request_render();
             } else {
-                let palette_surface = PaletteOverlay::new(
+                let palette_surface = PaletteSurface::new(
                     Rc::clone(&palette_state),
                     Rc::clone(&exit_flag),
                     keybindings.clone(),

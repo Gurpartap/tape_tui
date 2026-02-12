@@ -722,7 +722,7 @@ fn sample_command(id: usize) -> String {
 
 fn sample_task_title(id: usize) -> String {
     const TITLES: [&str; 6] = [
-        "stabilize shell overlay",
+        "stabilize shell surface",
         "refactor task dashboard",
         "validate deterministic tick engine",
         "prepare handoff summary",
@@ -1102,7 +1102,7 @@ impl Focusable for SessionDashboard {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OverlayCloseReason {
+enum SurfaceCloseReason {
     Background,
     Handoff,
     Killed,
@@ -1110,21 +1110,21 @@ enum OverlayCloseReason {
 }
 
 #[derive(Default)]
-struct OverlaySignals {
-    close_reason: Option<OverlayCloseReason>,
+struct SurfaceSignals {
+    close_reason: Option<SurfaceCloseReason>,
 }
 
-impl OverlaySignals {
-    fn request_close(&mut self, reason: OverlayCloseReason) {
+impl SurfaceSignals {
+    fn request_close(&mut self, reason: SurfaceCloseReason) {
         self.close_reason = Some(reason);
     }
 
-    fn take_reason(&mut self) -> Option<OverlayCloseReason> {
+    fn take_reason(&mut self) -> Option<SurfaceCloseReason> {
         self.close_reason.take()
     }
 }
 
-struct OverlaySnapshot {
+struct SurfaceSnapshot {
     title: String,
     command: String,
     mode: SessionMode,
@@ -1137,10 +1137,10 @@ struct OverlaySnapshot {
     last_activity: Instant,
 }
 
-struct InteractiveOverlay {
+struct InteractiveSurface {
     store: Arc<Mutex<SessionStore>>,
     session_id: usize,
-    signals: Rc<RefCell<OverlaySignals>>,
+    signals: Rc<RefCell<SurfaceSignals>>,
     input_buffer: String,
     scroll_offset: usize,
     autoscroll: bool,
@@ -1150,11 +1150,11 @@ struct InteractiveOverlay {
     show_menu: bool,
 }
 
-impl InteractiveOverlay {
+impl InteractiveSurface {
     fn new(
         store: Arc<Mutex<SessionStore>>,
         session_id: usize,
-        signals: Rc<RefCell<OverlaySignals>>,
+        signals: Rc<RefCell<SurfaceSignals>>,
     ) -> Self {
         Self {
             store,
@@ -1170,12 +1170,12 @@ impl InteractiveOverlay {
         }
     }
 
-    fn snapshot(&self) -> Option<OverlaySnapshot> {
+    fn snapshot(&self) -> Option<SurfaceSnapshot> {
         let store = self.store.lock().expect("session store lock poisoned");
         let session = store.session(self.session_id)?;
         let task = store.task(session.task_id)?;
 
-        Some(OverlaySnapshot {
+        Some(SurfaceSnapshot {
             title: session.title.clone(),
             command: session.command.clone(),
             mode: session.mode,
@@ -1215,7 +1215,7 @@ impl InteractiveOverlay {
                 }
                 self.signals
                     .borrow_mut()
-                    .request_close(OverlayCloseReason::Background);
+                    .request_close(SurfaceCloseReason::Background);
                 true
             }
             "ctrl+t" => {
@@ -1226,7 +1226,7 @@ impl InteractiveOverlay {
                 }
                 self.signals
                     .borrow_mut()
-                    .request_close(OverlayCloseReason::Handoff);
+                    .request_close(SurfaceCloseReason::Handoff);
                 true
             }
             "ctrl+k" => {
@@ -1236,7 +1236,7 @@ impl InteractiveOverlay {
                 }
                 self.signals
                     .borrow_mut()
-                    .request_close(OverlayCloseReason::Killed);
+                    .request_close(SurfaceCloseReason::Killed);
                 true
             }
             "ctrl+q" => {
@@ -1246,7 +1246,7 @@ impl InteractiveOverlay {
             "escape" => {
                 self.signals
                     .borrow_mut()
-                    .request_close(OverlayCloseReason::Exit);
+                    .request_close(SurfaceCloseReason::Exit);
                 true
             }
             "shift+up" | "pageup" => {
@@ -1277,7 +1277,7 @@ impl InteractiveOverlay {
         }
     }
 
-    fn maybe_take_control(&mut self, snapshot: &OverlaySnapshot) {
+    fn maybe_take_control(&mut self, snapshot: &SurfaceSnapshot) {
         if snapshot.mode == SessionMode::HandsFree {
             let mut store = self.store.lock().expect("session store lock poisoned");
             store.mark_interactive(self.session_id);
@@ -1310,7 +1310,7 @@ impl InteractiveOverlay {
     }
 }
 
-impl Component for InteractiveOverlay {
+impl Component for InteractiveSurface {
     fn render(&mut self, width: usize) -> Vec<String> {
         let content_width = width.saturating_sub(2);
 
@@ -1328,12 +1328,12 @@ impl Component for InteractiveOverlay {
             }
         }
 
-        let overlay_rows = self.viewport_rows.max(8);
+        let surface_rows = self.viewport_rows.max(8);
         let border_lines = 2usize;
         let header_lines = 4usize;
         let footer_lines = if self.show_menu { 4 } else { 3 };
         let chrome = border_lines + header_lines + footer_lines + 1;
-        let body_height = overlay_rows.saturating_sub(chrome).max(4);
+        let body_height = surface_rows.saturating_sub(chrome).max(4);
 
         let mut lines = Vec::new();
 
@@ -1546,7 +1546,7 @@ impl Component for InteractiveOverlay {
     }
 }
 
-impl Focusable for InteractiveOverlay {
+impl Focusable for InteractiveSurface {
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
     }
@@ -1754,8 +1754,8 @@ fn main() -> std::io::Result<()> {
     tui.set_focus(dashboard_id);
     tui.start()?;
 
-    let mut overlay_handle: Option<SurfaceHandle> = None;
-    let mut overlay_signals: Option<Rc<RefCell<OverlaySignals>>> = None;
+    let mut surface_handle: Option<SurfaceHandle> = None;
+    let mut surface_signals: Option<Rc<RefCell<SurfaceSignals>>> = None;
 
     runtime_handle.dispatch(RuntimeCommand::RequestRender);
 
@@ -1766,13 +1766,13 @@ fn main() -> std::io::Result<()> {
             break;
         }
 
-        if let Some(signals) = overlay_signals.as_ref() {
+        if let Some(signals) = surface_signals.as_ref() {
             let reason = signals.borrow_mut().take_reason();
             if reason.is_some() {
-                if let Some(handle) = overlay_handle.take() {
+                if let Some(handle) = surface_handle.take() {
                     handle.hide();
                 }
-                overlay_signals = None;
+                surface_signals = None;
                 tui.request_render();
             }
         }
@@ -1792,17 +1792,17 @@ fn main() -> std::io::Result<()> {
                     };
                     spawn_session_thread(id, Arc::clone(&store), runtime_handle.clone());
                     if mode != SessionMode::Background {
-                        if let Some(handle) = overlay_handle.take() {
+                        if let Some(handle) = surface_handle.take() {
                             handle.hide();
                         }
 
-                        let signals = Rc::new(RefCell::new(OverlaySignals::default()));
+                        let signals = Rc::new(RefCell::new(SurfaceSignals::default()));
                         let surface =
-                            InteractiveOverlay::new(Arc::clone(&store), id, Rc::clone(&signals));
+                            InteractiveSurface::new(Arc::clone(&store), id, Rc::clone(&signals));
                         let surface_id = tui.register_component(surface);
                         let handle = tui.show_surface(surface_id, Some(session_surface_options()));
-                        overlay_handle = Some(handle);
-                        overlay_signals = Some(signals);
+                        surface_handle = Some(handle);
+                        surface_signals = Some(signals);
                     }
                     tui.request_render();
                 }
@@ -1815,17 +1815,17 @@ fn main() -> std::io::Result<()> {
                         )
                     };
                     if should_open {
-                        if let Some(handle) = overlay_handle.take() {
+                        if let Some(handle) = surface_handle.take() {
                             handle.hide();
                         }
 
-                        let signals = Rc::new(RefCell::new(OverlaySignals::default()));
+                        let signals = Rc::new(RefCell::new(SurfaceSignals::default()));
                         let surface =
-                            InteractiveOverlay::new(Arc::clone(&store), id, Rc::clone(&signals));
+                            InteractiveSurface::new(Arc::clone(&store), id, Rc::clone(&signals));
                         let surface_id = tui.register_component(surface);
                         let handle = tui.show_surface(surface_id, Some(session_surface_options()));
-                        overlay_handle = Some(handle);
-                        overlay_signals = Some(signals);
+                        surface_handle = Some(handle);
+                        surface_signals = Some(signals);
                         tui.request_render();
                     }
                 }
@@ -1932,7 +1932,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_scroll_does_not_close_exited_overlay() {
+    fn shift_scroll_does_not_close_exited_surface() {
         let store = Arc::new(Mutex::new(SessionStore::new()));
         let session_id = {
             let mut locked = store.lock().expect("session store lock poisoned");
@@ -1944,12 +1944,12 @@ mod tests {
             session_id
         };
 
-        let signals = Rc::new(RefCell::new(OverlaySignals::default()));
-        let mut overlay =
-            InteractiveOverlay::new(Arc::clone(&store), session_id, Rc::clone(&signals));
+        let signals = Rc::new(RefCell::new(SurfaceSignals::default()));
+        let mut surface =
+            InteractiveSurface::new(Arc::clone(&store), session_id, Rc::clone(&signals));
 
-        assert!(overlay.handle_control("shift+up"));
-        assert!(overlay.handle_control("shift+down"));
+        assert!(surface.handle_control("shift+up"));
+        assert!(surface.handle_control("shift+down"));
         assert_eq!(signals.borrow_mut().take_reason(), None);
     }
 
@@ -1969,9 +1969,9 @@ mod tests {
             session_id
         };
 
-        let signals = Rc::new(RefCell::new(OverlaySignals::default()));
-        let mut overlay =
-            InteractiveOverlay::new(Arc::clone(&store), session_id, Rc::clone(&signals));
+        let signals = Rc::new(RefCell::new(SurfaceSignals::default()));
+        let mut surface =
+            InteractiveSurface::new(Arc::clone(&store), session_id, Rc::clone(&signals));
 
         let body_height_for_viewport = |rows: usize| {
             let border_lines = 2usize;
@@ -1981,16 +1981,16 @@ mod tests {
             rows.saturating_sub(chrome).max(4)
         };
 
-        overlay.set_viewport_size(80, 24);
-        overlay.render(80);
+        surface.set_viewport_size(80, 24);
+        surface.render(80);
         for _ in 0..8 {
-            assert!(overlay.handle_control("shift+up"));
+            assert!(surface.handle_control("shift+up"));
         }
-        overlay.render(80);
-        assert!(overlay.scroll_offset > 0);
+        surface.render(80);
+        assert!(surface.scroll_offset > 0);
 
-        overlay.set_viewport_size(80, 80);
-        overlay.render(80);
+        surface.set_viewport_size(80, 80);
+        surface.render(80);
         let max_offset_large = {
             let locked = store.lock().expect("session store lock poisoned");
             let output_len = locked
@@ -2000,10 +2000,10 @@ mod tests {
                 .len();
             output_len.saturating_sub(body_height_for_viewport(80))
         };
-        assert!(overlay.scroll_offset <= max_offset_large);
+        assert!(surface.scroll_offset <= max_offset_large);
 
-        overlay.set_viewport_size(80, 8);
-        overlay.render(80);
+        surface.set_viewport_size(80, 8);
+        surface.render(80);
         let max_offset_small = {
             let locked = store.lock().expect("session store lock poisoned");
             let output_len = locked
@@ -2013,7 +2013,7 @@ mod tests {
                 .len();
             output_len.saturating_sub(body_height_for_viewport(8))
         };
-        assert!(overlay.scroll_offset <= max_offset_small);
+        assert!(surface.scroll_offset <= max_offset_small);
         assert_eq!(signals.borrow_mut().take_reason(), None);
     }
 
@@ -2053,7 +2053,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_shortcuts_work_without_overlay_flag_state() {
+    fn dashboard_shortcuts_work_without_surface_flag_state() {
         let store = Arc::new(Mutex::new(SessionStore::new()));
         {
             let mut locked = store.lock().expect("session store lock poisoned");

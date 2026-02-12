@@ -1549,7 +1549,7 @@ impl<T: Terminal> TuiRuntime<T> {
             }
         }
 
-        // Components may emit the legacy CURSOR_MARKER APC sequence. Ensure it never
+        // Components may emit the CURSOR_MARKER APC sequence. Ensure it never
         // reaches the renderer/terminal output. If a component didn't provide typed
         // cursor metadata, use the extracted marker position as a fallback.
         let extracted_marker_pos = crate::core::cursor::extract_cursor_marker(&mut lines, height);

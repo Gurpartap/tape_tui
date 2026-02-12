@@ -15,9 +15,8 @@ When changing runtime, rendering, or surface behavior, run this matrix locally b
 - `for i in $(seq 1 20); do cargo test --test runtime_deterministic_soak deterministic_focus_routing_and_cursor_clamp_repeat_cleanly || break; done`
 - `for i in $(seq 1 20); do cargo test --test runtime_deterministic_soak deterministic_visibility_toggle_sequence_remains_stable || break; done`
 
-## Legacy regression guards
+## API regression guards
 
-- `cargo test --test legacy_surface_guard`
 - `rg -n "show_overlay\(|OverlayHandle|OverlayId|OverlayOptions" src/lib.rs src/runtime/mod.rs src/runtime/tui.rs README.md`
 
 ## Notes

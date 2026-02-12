@@ -962,7 +962,7 @@ mod tests {
     //   bracketed_paste_rewrap_preserves_surrounding_input_order,
     //   input_thread_kitty_release_does_not_absorb_following_plain_text,
     //   malformed_tail_then_valid_bytes_preserve_all_input_without_duplicates.
-    // - Legacy smoke: input_thread_flushes_incomplete_escape_after_timeout,
+    // - Broad smoke: input_thread_flushes_incomplete_escape_after_timeout,
     //   input_thread_forwards_split_kitty_press_release_sequences.
 
     #[cfg(unix)]
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    // Legacy smoke test: validates eventual timeout flush at integration level.
+    // Broad smoke test: validates eventual timeout flush at integration level.
     // Comparator-sensitive timing guarantees live in stdin_buffer invariants.
     fn input_thread_flushes_incomplete_escape_after_timeout() {
         let pty = open_pty();
@@ -1518,7 +1518,7 @@ mod tests {
     }
 
     #[test]
-    // Legacy smoke test: validates basic split press/release forwarding.
+    // Broad smoke test: validates basic split press/release forwarding.
     // Do not treat as the sole guard against release-tail absorption.
     // Pair with input_thread_kitty_release_does_not_absorb_following_plain_text.
     fn input_thread_forwards_split_kitty_press_release_sequences() {

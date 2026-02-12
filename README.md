@@ -195,7 +195,6 @@ When touching runtime, render, or surface behavior, run the dedicated matrix in
 `tests/RUNTIME_VALIDATION_MATRIX.md`, including:
 
 ```bash
-cargo test --test legacy_surface_guard
 cargo test --test runtime_deterministic_soak
 ```
 

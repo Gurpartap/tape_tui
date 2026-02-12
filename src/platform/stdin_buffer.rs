@@ -395,7 +395,7 @@ mod tests {
     //   handles_old_mouse_and_ss3_splits, flush_due_never_emits_before_deadline_and_only_once_after,
     //   clear_resets_deadline_without_requiring_flush_due,
     //   malformed_tail_blocks_until_timeout_but_preserves_every_byte.
-    // - Legacy smoke: flush_deadline_and_clear_edge_cases (broad sanity only; not comparator-sensitive).
+    // - Broad smoke: flush_deadline_and_clear_edge_cases (sanity only; not comparator-sensitive).
 
     fn events_to_wire(events: &[StdinEvent]) -> String {
         let mut out = String::new();
@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    // Legacy smoke test: keep for broad flow sanity, but pair with:
+    // Broad smoke test: keep for flow sanity, but pair with:
     // - flush_due_never_emits_before_deadline_and_only_once_after
     // - clear_resets_deadline_without_requiring_flush_due
     fn flush_deadline_and_clear_edge_cases() {
