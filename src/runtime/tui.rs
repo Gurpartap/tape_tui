@@ -1402,39 +1402,26 @@ impl<T: Terminal> TuiRuntime<T> {
             return;
         }
 
-        let Some(target_id) = self.active_input_target() else {
-            return;
-        };
-        let Some(component) = self.components.get_mut(target_id) else {
-            debug_assert!(false, "input target component {:?} missing", target_id);
-            if self.focused == Some(target_id) {
-                self.focused = None;
-            }
-            return;
-        };
+        let (capture_target, fallback_target) = self.input_dispatch_targets();
 
         let mut dispatch_result = DispatchResult::Ignored;
         for event in events {
-            let event_result = if let InputEvent::Key {
-                key_id, event_type, ..
+            if let InputEvent::Key {
+                key_id,
+                event_type: KeyEventType::Press,
+                ..
             } = &event
             {
-                if *event_type == KeyEventType::Press && key_id == "ctrl+shift+d" {
+                if key_id == "ctrl+shift+d" {
                     if let Some(handler) = self.on_debug.as_mut() {
                         handler();
                     }
-                    DispatchResult::Ignored
-                } else if *event_type == KeyEventType::Release && !component.wants_key_release() {
-                    DispatchResult::Ignored
-                } else {
-                    component.handle_event(&event);
-                    DispatchResult::Consumed
+                    continue;
                 }
-            } else {
-                component.handle_event(&event);
-                DispatchResult::Consumed
-            };
+            }
 
+            let event_result =
+                self.dispatch_event_with_bubbling(&event, capture_target, fallback_target);
             if event_result == DispatchResult::Consumed {
                 dispatch_result = DispatchResult::Consumed;
             }
@@ -1443,6 +1430,95 @@ impl<T: Terminal> TuiRuntime<T> {
         if dispatch_result == DispatchResult::Consumed {
             self.request_render();
         }
+    }
+
+    fn input_dispatch_targets(&self) -> (Option<ComponentId>, Option<ComponentId>) {
+        let capture_entry = self.topmost_visible_capture_entry();
+        let capture_target = capture_entry.map(|entry| entry.component_id);
+
+        let fallback_target = if let Some(entry) = capture_entry {
+            entry
+                .pre_focus
+                .filter(|target| Some(*target) != capture_target)
+                .or_else(|| self.focused.filter(|target| Some(*target) != capture_target))
+                .or_else(|| self.root_input_fallback(capture_target))
+        } else {
+            self.focused.or_else(|| self.root_input_fallback(None))
+        };
+
+        (capture_target, fallback_target)
+    }
+
+    fn topmost_visible_capture_entry(&self) -> Option<OverlayEntry> {
+        let columns = self.terminal.columns() as usize;
+        let rows = self.terminal.rows() as usize;
+        self.overlays
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.is_visible(columns, rows)
+                    && entry.input_policy() == SurfaceInputPolicy::Capture
+            })
+            .copied()
+    }
+
+    fn root_input_fallback(&self, excluded: Option<ComponentId>) -> Option<ComponentId> {
+        self.root
+            .iter()
+            .rev()
+            .copied()
+            .find(|component_id| Some(*component_id) != excluded)
+    }
+
+    fn dispatch_event_with_bubbling(
+        &mut self,
+        event: &InputEvent,
+        capture_target: Option<ComponentId>,
+        fallback_target: Option<ComponentId>,
+    ) -> DispatchResult {
+        if let Some(capture_target) = capture_target {
+            let capture_result = self.dispatch_event_to_target(capture_target, event);
+            if capture_result == DispatchResult::Consumed {
+                return DispatchResult::Consumed;
+            }
+        }
+
+        let Some(fallback_target) = fallback_target else {
+            return DispatchResult::Ignored;
+        };
+        if Some(fallback_target) == capture_target {
+            return DispatchResult::Ignored;
+        }
+
+        self.dispatch_event_to_target(fallback_target, event)
+    }
+
+    fn dispatch_event_to_target(
+        &mut self,
+        target_id: ComponentId,
+        event: &InputEvent,
+    ) -> DispatchResult {
+        let Some(component) = self.components.get_mut(target_id) else {
+            debug_assert!(false, "input dispatch target component {:?} missing", target_id);
+            if self.focused == Some(target_id) {
+                self.focused = None;
+            }
+            return DispatchResult::Ignored;
+        };
+
+        if let InputEvent::Key {
+            event_type: KeyEventType::Release,
+            ..
+        } = event
+        {
+            if !component.wants_key_release() {
+                return DispatchResult::Ignored;
+            }
+        }
+
+        component.handle_event(event);
+        DispatchResult::Consumed
     }
 
     pub fn request_render(&mut self) {
@@ -2259,26 +2335,13 @@ impl<T: Terminal> TuiRuntime<T> {
         )
     }
 
-    fn active_input_target(&self) -> Option<ComponentId> {
-        self.topmost_visible_capture_surface().or(self.focused)
-    }
-
     fn dispatch_resize_event(&mut self) {
         let event = InputEvent::Resize {
             columns: self.terminal.columns(),
             rows: self.terminal.rows(),
         };
-        let Some(target_id) = self.active_input_target() else {
-            return;
-        };
-        let Some(component) = self.components.get_mut(target_id) else {
-            debug_assert!(false, "resize target component {:?} missing", target_id);
-            if self.focused == Some(target_id) {
-                self.focused = None;
-            }
-            return;
-        };
-        component.handle_event(&event);
+        let (capture_target, fallback_target) = self.input_dispatch_targets();
+        let _ = self.dispatch_event_with_bubbling(&event, capture_target, fallback_target);
     }
 
     fn reconcile_focus(&mut self) {
@@ -3741,6 +3804,136 @@ mod tests {
         assert!(surface_a_inputs.borrow().is_empty());
         assert!(surface_b_inputs.borrow().is_empty());
         assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn capture_release_ignored_by_surface_bubbles_to_previous_focus() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(true, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_id = runtime.register_component(surface_component);
+        runtime.show_surface(
+            surface_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+
+        runtime.handle_input("\x1b[32;1:3u");
+
+        assert_eq!(
+            root_inputs.borrow().as_slice(),
+            &["\x1b[32;1:3u".to_string()]
+        );
+        assert!(surface_inputs.borrow().is_empty());
+        assert!(*surface_focus.borrow());
+    }
+
+    #[test]
+    fn root_fallback_handles_input_when_focus_is_none() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_a_focus = Rc::new(RefCell::new(false));
+        let root_a_component =
+            TestComponent::new(false, Rc::clone(&root_a_inputs), Rc::clone(&root_a_focus));
+        let (mut runtime, root_a_id) = runtime_with_root(terminal, root_a_component);
+
+        let root_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_b_focus = Rc::new(RefCell::new(false));
+        let root_b_component =
+            TestComponent::new(false, Rc::clone(&root_b_inputs), Rc::clone(&root_b_focus));
+        let root_b_id = runtime.register_component(root_b_component);
+        runtime.set_root(vec![root_a_id, root_b_id]);
+
+        runtime.start().expect("runtime start");
+        runtime.run_once();
+
+        root_a_inputs.borrow_mut().clear();
+        root_b_inputs.borrow_mut().clear();
+
+        runtime.handle_input("z");
+
+        assert!(root_a_inputs.borrow().is_empty());
+        assert_eq!(root_b_inputs.borrow().as_slice(), &["z".to_string()]);
+    }
+
+    #[test]
+    fn visibility_transition_preserves_deterministic_capture_routing() {
+        let terminal = TestTerminal::new(20, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component =
+            TestComponent::new(false, Rc::clone(&surface_inputs), Rc::clone(&surface_focus));
+        let surface_id = runtime.register_component(surface_component);
+        runtime.show_surface(
+            surface_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                overlay: OverlayOptions {
+                    visibility: OverlayVisibility::MinCols(10),
+                    ..Default::default()
+                },
+            }),
+        );
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        runtime.handle_input("a");
+        assert_eq!(surface_inputs.borrow().as_slice(), &["a".to_string()]);
+        assert!(root_inputs.borrow().is_empty());
+
+        runtime.terminal.columns = 5;
+        runtime.wake.signal_resize();
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        runtime.handle_input("b");
+        assert_eq!(root_inputs.borrow().as_slice(), &["b".to_string()]);
+        assert!(surface_inputs.borrow().is_empty());
+        assert!(*root_focus.borrow());
+
+        runtime.terminal.columns = 20;
+        runtime.wake.signal_resize();
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_inputs.borrow_mut().clear();
+        runtime.handle_input("c");
+        assert_eq!(surface_inputs.borrow().as_slice(), &["c".to_string()]);
+        assert!(root_inputs.borrow().is_empty());
+        assert!(*surface_focus.borrow());
     }
 
     #[test]
