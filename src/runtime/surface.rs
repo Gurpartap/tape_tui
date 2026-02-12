@@ -4,8 +4,8 @@
 //! They provide deterministic lifecycle, visibility, input policy, and lane semantics
 //! while preserving inline-first rendering behavior.
 
+use crate::render::overlay as render_overlay;
 use crate::runtime::component_registry::ComponentId;
-use crate::runtime::overlay::OverlayId;
 
 /// Stable identifier for a surface owned by a single runtime instance.
 #[repr(transparent)]
@@ -20,18 +20,6 @@ impl SurfaceId {
 
     pub(crate) fn from_raw(raw: u64) -> Self {
         Self(raw)
-    }
-}
-
-impl From<OverlayId> for SurfaceId {
-    fn from(value: OverlayId) -> Self {
-        Self::from_raw(value.raw())
-    }
-}
-
-impl From<SurfaceId> for OverlayId {
-    fn from(value: SurfaceId) -> Self {
-        OverlayId::from_raw(value.raw())
     }
 }
 
@@ -173,6 +161,59 @@ impl SurfaceLayoutOptions {
                 cols,
                 rows: min_rows,
             } => columns >= cols && rows >= min_rows,
+        }
+    }
+}
+
+impl From<SurfaceSizeValue> for render_overlay::SizeValue {
+    fn from(value: SurfaceSizeValue) -> Self {
+        match value {
+            SurfaceSizeValue::Absolute(value) => Self::Absolute(value),
+            SurfaceSizeValue::Percent(value) => Self::Percent(value),
+        }
+    }
+}
+
+impl From<SurfaceAnchor> for render_overlay::OverlayAnchor {
+    fn from(anchor: SurfaceAnchor) -> Self {
+        match anchor {
+            SurfaceAnchor::Center => Self::Center,
+            SurfaceAnchor::TopLeft => Self::TopLeft,
+            SurfaceAnchor::TopRight => Self::TopRight,
+            SurfaceAnchor::BottomLeft => Self::BottomLeft,
+            SurfaceAnchor::BottomRight => Self::BottomRight,
+            SurfaceAnchor::TopCenter => Self::TopCenter,
+            SurfaceAnchor::BottomCenter => Self::BottomCenter,
+            SurfaceAnchor::LeftCenter => Self::LeftCenter,
+            SurfaceAnchor::RightCenter => Self::RightCenter,
+        }
+    }
+}
+
+impl From<SurfaceMargin> for render_overlay::OverlayMargin {
+    fn from(margin: SurfaceMargin) -> Self {
+        Self {
+            top: margin.top,
+            right: margin.right,
+            bottom: margin.bottom,
+            left: margin.left,
+        }
+    }
+}
+
+impl From<&SurfaceLayoutOptions> for render_overlay::OverlayOptions {
+    fn from(options: &SurfaceLayoutOptions) -> Self {
+        Self {
+            width: options.width.map(Into::into),
+            min_width: options.min_width,
+            max_height: options.max_height.map(Into::into),
+            anchor: options.anchor.map(Into::into),
+            offset_x: options.offset_x,
+            offset_y: options.offset_y,
+            row: options.row.map(Into::into),
+            col: options.col.map(Into::into),
+            margin: options.margin.map(Into::into),
+            visible: None,
         }
     }
 }
@@ -410,9 +451,9 @@ impl SurfaceState {
     }
 }
 
-/// Convenience helper to build default overlay-compatible surface options.
-pub fn overlay_compatible_options(overlay: SurfaceLayoutOptions) -> SurfaceOptions {
-    SurfaceOptions::from(overlay)
+/// Convenience helper to build surface options from a layout configuration.
+pub fn surface_options_from_layout(layout: SurfaceLayoutOptions) -> SurfaceOptions {
+    SurfaceOptions::from(layout)
 }
 
 /// Convenience helper to create surface options from visibility-only defaults.
@@ -425,7 +466,7 @@ pub fn visibility_only_surface_options(visibility: SurfaceVisibility) -> Surface
 #[cfg(test)]
 mod tests {
     use super::{
-        overlay_compatible_options, SurfaceAnchor, SurfaceInputPolicy, SurfaceKind,
+        surface_options_from_layout, SurfaceAnchor, SurfaceInputPolicy, SurfaceKind,
         SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
     };
 
@@ -500,15 +541,15 @@ mod tests {
     }
 
     #[test]
-    fn overlay_alias_round_trip_preserves_layout_resolution() {
-        let overlay = crate::runtime::overlay::OverlayOptions {
-            width: Some(crate::runtime::overlay::SizeValue::percent(55.0)),
+    fn layout_round_trip_preserves_resolution() {
+        let layout = SurfaceLayoutOptions {
+            width: Some(SurfaceSizeValue::percent(55.0)),
             min_width: Some(24),
-            max_height: Some(crate::runtime::overlay::SizeValue::percent(60.0)),
-            anchor: Some(crate::runtime::overlay::OverlayAnchor::BottomRight),
+            max_height: Some(SurfaceSizeValue::percent(60.0)),
+            anchor: Some(SurfaceAnchor::BottomRight),
             offset_x: Some(-2),
             offset_y: Some(1),
-            margin: Some(crate::runtime::overlay::OverlayMargin {
+            margin: Some(SurfaceMargin {
                 top: Some(2),
                 right: Some(3),
                 bottom: Some(1),
@@ -517,26 +558,18 @@ mod tests {
             ..Default::default()
         };
 
-        let overlay_render = crate::render::overlay::OverlayOptions::from(&overlay);
-        let expected = crate::render::overlay::resolve_overlay_layout(
-            Some(&overlay_render),
-            9,
-            120,
-            40,
-        );
+        let layout_render = crate::render::overlay::OverlayOptions::from(&layout);
+        let expected =
+            crate::render::overlay::resolve_overlay_layout(Some(&layout_render), 9, 120, 40);
 
-        let surface_options = overlay_compatible_options(overlay);
+        let surface_options = surface_options_from_layout(layout);
         let layout_options = surface_options.with_lane_reservations(0, 0);
         let surface_render = crate::render::overlay::OverlayOptions::from(&layout_options);
-        let actual = crate::render::overlay::resolve_overlay_layout(
-            Some(&surface_render),
-            9,
-            120,
-            40,
-        );
+        let actual =
+            crate::render::overlay::resolve_overlay_layout(Some(&surface_render), 9, 120, 40);
 
         assert_eq!(actual, expected);
-        let round_trip_overlay = crate::runtime::overlay::OverlayOptions::from(surface_options);
-        assert_eq!(round_trip_overlay, overlay);
+        let round_trip_layout = SurfaceLayoutOptions::from(surface_options);
+        assert_eq!(round_trip_layout, layout);
     }
 }

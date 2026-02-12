@@ -14,11 +14,10 @@ use tape_tui::{
     FuzzyMatch, Image, ImageDimensions, ImageOptions, ImageProtocol, ImageRenderOptions,
     ImageTheme, Input, InputEvent, Key, KeyEventType, KeyId, Loader, Markdown, MarkdownTheme,
     ProcessTerminal, SelectItem, SelectList, SelectListTheme, SettingItem, SettingsList,
-    SettingsListTheme, SlashCommand, Spacer, StdinBuffer, StdinBufferEventMap,
-    StdinBufferOptions, SurfaceAnchor, SurfaceHandle, SurfaceId, SurfaceInputPolicy, SurfaceKind,
-    SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
-    Terminal, TerminalCapabilities, Text, TruncatedText, CURSOR_MARKER, DEFAULT_EDITOR_KEYBINDINGS,
-    TUI,
+    SettingsListTheme, SlashCommand, Spacer, StdinBuffer, StdinBufferEventMap, StdinBufferOptions,
+    SurfaceAnchor, SurfaceHandle, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions,
+    SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility, Terminal,
+    TerminalCapabilities, Text, TruncatedText, CURSOR_MARKER, DEFAULT_EDITOR_KEYBINDINGS, TUI,
 };
 
 #[test]

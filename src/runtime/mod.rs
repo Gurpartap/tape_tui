@@ -3,17 +3,13 @@
 pub mod component_registry;
 pub mod ime;
 mod inline_viewport;
-pub mod overlay;
 pub mod surface;
 pub mod tui;
 
 pub use component_registry::ComponentId;
-pub use overlay::{
-    OverlayAnchor, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility, SizeValue,
-};
 pub use surface::{
-    SurfaceAnchor, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions,
-    SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
+    SurfaceAnchor, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions, SurfaceMargin,
+    SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
 };
 pub use tui::{
     Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle, SurfaceHandle,

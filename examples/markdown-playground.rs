@@ -560,11 +560,8 @@ fn main() -> std::io::Result<()> {
                     keybindings.clone(),
                 );
                 let surface_id = tui.register_component(palette_surface);
-                let handle = render_handle.show_surface(
-                    surface_id,
-                    Some(palette_surface_options()),
-                    false,
-                );
+                let handle =
+                    render_handle.show_surface(surface_id, Some(palette_surface_options()), false);
                 palette_handle = Some(handle);
             }
         }

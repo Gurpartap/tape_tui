@@ -78,14 +78,13 @@ pub use crate::core::cursor::CURSOR_MARKER;
 pub use crate::render::{Frame, Line, Span};
 /// Stable component identifier type.
 pub use crate::runtime::component_registry::ComponentId;
-/// Handles used to mutate shown overlay/surface layers at runtime.
-pub use crate::runtime::tui::{OverlayHandle, SurfaceHandle};
-/// Runtime, overlay, and surface option/model types.
+/// Handle used to mutate shown surface layers at runtime.
+pub use crate::runtime::tui::SurfaceHandle;
+/// Runtime and surface option/model types.
 pub use crate::runtime::{
-    CustomCommand, CustomCommandCtx, CustomCommandError, OverlayAnchor, OverlayId, OverlayMargin,
-    OverlayOptions, OverlayVisibility, SizeValue, SurfaceAnchor, SurfaceId, SurfaceInputPolicy,
-    SurfaceKind, SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue,
-    SurfaceVisibility,
+    CustomCommand, CustomCommandCtx, CustomCommandError, SurfaceAnchor, SurfaceId,
+    SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions,
+    SurfaceSizeValue, SurfaceVisibility,
 };
 
 /// Alias for the main runtime type.

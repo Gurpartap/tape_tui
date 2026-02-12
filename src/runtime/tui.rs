@@ -22,7 +22,6 @@ use crate::render::Frame;
 use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::ime::position_hardware_cursor;
 use crate::runtime::inline_viewport::InlineViewportState;
-use crate::runtime::overlay::{OverlayId, OverlayOptions};
 use crate::runtime::surface::{
     SurfaceEntry as OverlayEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions,
     SurfaceRenderEntry as OverlayRenderEntry, SurfaceState as OverlayState,
@@ -117,14 +116,6 @@ pub struct TuiRuntime<T: Terminal> {
     panic_hook_guard: Option<crate::platform::PanicHookGuard>,
 }
 
-/// Handle used to mutate a legacy overlay entry.
-///
-/// Internally overlays are represented as surfaces with default capture/modal behavior.
-pub struct OverlayHandle {
-    id: OverlayId,
-    runtime: RuntimeHandle,
-}
-
 /// Handle used to mutate a shown surface entry.
 pub struct SurfaceHandle {
     id: SurfaceId,
@@ -181,7 +172,6 @@ impl<'a, T: Terminal> Drop for TerminalGuard<'a, T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CustomCommandError {
     MissingComponentId(ComponentId),
-    MissingOverlayId(OverlayId),
     MissingSurfaceId(SurfaceId),
     InvalidState(String),
     Message(String),
@@ -192,9 +182,6 @@ impl std::fmt::Display for CustomCommandError {
         match self {
             Self::MissingComponentId(component_id) => {
                 write!(f, "missing component id {}", component_id.raw())
-            }
-            Self::MissingOverlayId(overlay_id) => {
-                write!(f, "missing overlay id {}", overlay_id.raw())
             }
             Self::MissingSurfaceId(surface_id) => {
                 write!(f, "missing surface id {}", surface_id.raw())
@@ -219,19 +206,6 @@ pub trait CustomCommand: Send + 'static {
 trait CustomCommandRuntimeOps {
     fn terminal(&mut self, op: TerminalOp) -> bool;
     fn focus_set(&mut self, target: Option<ComponentId>) -> Result<bool, CustomCommandError>;
-    fn show_overlay(
-        &mut self,
-        overlay_id: OverlayId,
-        component_id: ComponentId,
-        options: Option<OverlayOptions>,
-        hidden: bool,
-    ) -> Result<bool, CustomCommandError>;
-    fn hide_overlay(&mut self, overlay_id: OverlayId) -> Result<bool, CustomCommandError>;
-    fn set_overlay_hidden(
-        &mut self,
-        overlay_id: OverlayId,
-        hidden: bool,
-    ) -> Result<bool, CustomCommandError>;
     fn show_surface(
         &mut self,
         surface_id: SurfaceId,
@@ -292,40 +266,6 @@ impl<'a> CustomCommandCtx<'a> {
 
     pub fn focus_set(&mut self, target: Option<ComponentId>) -> Result<(), CustomCommandError> {
         if self.runtime.focus_set(target)? {
-            self.request_render();
-        }
-        Ok(())
-    }
-
-    pub fn show_overlay(
-        &mut self,
-        overlay_id: OverlayId,
-        component_id: ComponentId,
-        options: Option<OverlayOptions>,
-        hidden: bool,
-    ) -> Result<(), CustomCommandError> {
-        if self
-            .runtime
-            .show_overlay(overlay_id, component_id, options, hidden)?
-        {
-            self.request_render();
-        }
-        Ok(())
-    }
-
-    pub fn hide_overlay(&mut self, overlay_id: OverlayId) -> Result<(), CustomCommandError> {
-        if self.runtime.hide_overlay(overlay_id)? {
-            self.request_render();
-        }
-        Ok(())
-    }
-
-    pub fn set_overlay_hidden(
-        &mut self,
-        overlay_id: OverlayId,
-        hidden: bool,
-    ) -> Result<(), CustomCommandError> {
-        if self.runtime.set_overlay_hidden(overlay_id, hidden)? {
             self.request_render();
         }
         Ok(())
@@ -406,17 +346,6 @@ pub enum Command {
     RootPush(ComponentId),
     FocusSet(ComponentId),
     FocusClear,
-    ShowOverlay {
-        overlay_id: OverlayId,
-        component: ComponentId,
-        options: Option<OverlayOptions>,
-        hidden: bool,
-    },
-    HideOverlay(OverlayId),
-    SetOverlayHidden {
-        overlay_id: OverlayId,
-        hidden: bool,
-    },
     ShowSurface {
         surface_id: SurfaceId,
         component: ComponentId,
@@ -446,26 +375,6 @@ impl std::fmt::Debug for Command {
             Self::RootPush(component_id) => f.debug_tuple("RootPush").field(component_id).finish(),
             Self::FocusSet(component_id) => f.debug_tuple("FocusSet").field(component_id).finish(),
             Self::FocusClear => write!(f, "FocusClear"),
-            Self::ShowOverlay {
-                overlay_id,
-                component,
-                options,
-                hidden,
-            } => f
-                .debug_struct("ShowOverlay")
-                .field("overlay_id", overlay_id)
-                .field("component", component)
-                .field("options", options)
-                .field("hidden", hidden)
-                .finish(),
-            Self::HideOverlay(overlay_id) => {
-                f.debug_tuple("HideOverlay").field(overlay_id).finish()
-            }
-            Self::SetOverlayHidden { overlay_id, hidden } => f
-                .debug_struct("SetOverlayHidden")
-                .field("overlay_id", overlay_id)
-                .field("hidden", hidden)
-                .finish(),
             Self::ShowSurface {
                 surface_id,
                 component,
@@ -731,10 +640,6 @@ impl RuntimeHandle {
         self.wake.alloc_surface_id()
     }
 
-    pub fn alloc_overlay_id(&self) -> OverlayId {
-        OverlayId::from(self.alloc_surface_id())
-    }
-
     pub fn show_surface(
         &self,
         component_id: ComponentId,
@@ -750,20 +655,6 @@ impl RuntimeHandle {
         });
         SurfaceHandle {
             id,
-            runtime: self.clone(),
-        }
-    }
-
-    pub fn show_overlay(
-        &self,
-        component_id: ComponentId,
-        options: Option<OverlayOptions>,
-        hidden: bool,
-    ) -> OverlayHandle {
-        let surface_options = options.map(SurfaceOptions::from);
-        let handle = self.show_surface(component_id, surface_options, hidden);
-        OverlayHandle {
-            id: OverlayId::from(handle.id),
             runtime: self.clone(),
         }
     }
@@ -802,20 +693,6 @@ impl SurfaceHandle {
     }
 }
 
-impl OverlayHandle {
-    pub fn hide(&self) {
-        self.runtime
-            .dispatch(Command::HideSurface(SurfaceId::from(self.id)));
-    }
-
-    pub fn set_hidden(&self, hidden: bool) {
-        self.runtime.dispatch(Command::SetSurfaceHidden {
-            surface_id: SurfaceId::from(self.id),
-            hidden,
-        });
-    }
-}
-
 impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
     fn terminal(&mut self, op: TerminalOp) -> bool {
         self.apply_terminal_op(op)
@@ -829,57 +706,6 @@ impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
         }
         self.set_focused(target);
         Ok(true)
-    }
-
-    fn show_overlay(
-        &mut self,
-        overlay_id: OverlayId,
-        component_id: ComponentId,
-        options: Option<OverlayOptions>,
-        hidden: bool,
-    ) -> Result<bool, CustomCommandError> {
-        if self.components.get_mut(component_id).is_none() {
-            return Err(CustomCommandError::MissingComponentId(component_id));
-        }
-        if self.apply_show_overlay(overlay_id, component_id, options, hidden) {
-            Ok(true)
-        } else {
-            Err(CustomCommandError::InvalidState(
-                "failed to show overlay".to_string(),
-            ))
-        }
-    }
-
-    fn hide_overlay(&mut self, overlay_id: OverlayId) -> Result<bool, CustomCommandError> {
-        let surface_id = SurfaceId::from(overlay_id);
-        if !self.overlays.contains(surface_id) {
-            return Err(CustomCommandError::MissingOverlayId(overlay_id));
-        }
-        if self.apply_hide_overlay(overlay_id) {
-            Ok(true)
-        } else {
-            Err(CustomCommandError::InvalidState(
-                "failed to hide overlay".to_string(),
-            ))
-        }
-    }
-
-    fn set_overlay_hidden(
-        &mut self,
-        overlay_id: OverlayId,
-        hidden: bool,
-    ) -> Result<bool, CustomCommandError> {
-        let surface_id = SurfaceId::from(overlay_id);
-        if !self.overlays.contains(surface_id) {
-            return Err(CustomCommandError::MissingOverlayId(overlay_id));
-        }
-        if self.apply_set_overlay_hidden(overlay_id, hidden) {
-            Ok(true)
-        } else {
-            Err(CustomCommandError::InvalidState(
-                "overlay hidden state unchanged".to_string(),
-            ))
-        }
     }
 
     fn show_surface(
@@ -1260,31 +1086,10 @@ impl<T: Terminal> TuiRuntime<T> {
         }
     }
 
-    /// Show a legacy overlay.
-    ///
-    /// Overlays are represented internally as capture/modal surfaces for
-    /// compatibility with existing callers.
-    pub fn show_overlay(
-        &mut self,
-        component: ComponentId,
-        options: Option<OverlayOptions>,
-    ) -> OverlayHandle {
-        let surface_options = options.map(SurfaceOptions::from);
-        let handle = self.show_surface(component, surface_options);
-        OverlayHandle {
-            id: OverlayId::from(handle.id),
-            runtime: self.runtime_handle(),
-        }
-    }
-
     pub fn hide_surface(&mut self) {
         if let Some(surface) = self.overlays.entries.last().copied() {
             self.dispatch_focus_overlay_command(Command::HideSurface(surface.id));
         }
-    }
-
-    pub fn hide_overlay(&mut self) {
-        self.hide_surface();
     }
 
     pub fn has_surface(&self) -> bool {
@@ -1292,10 +1097,6 @@ impl<T: Terminal> TuiRuntime<T> {
             self.terminal.columns() as usize,
             self.terminal.rows() as usize,
         )
-    }
-
-    pub fn has_overlay(&self) -> bool {
-        self.has_surface()
     }
 
     fn dispatch_focus_overlay_command(&mut self, command: Command) {
@@ -1576,7 +1377,10 @@ impl<T: Terminal> TuiRuntime<T> {
             entry
                 .pre_focus
                 .filter(|target| Some(*target) != capture_target)
-                .or_else(|| self.focused.filter(|target| Some(*target) != capture_target))
+                .or_else(|| {
+                    self.focused
+                        .filter(|target| Some(*target) != capture_target)
+                })
                 .or_else(|| self.root_input_fallback(capture_target))
         } else {
             self.focused.or_else(|| self.root_input_fallback(None))
@@ -1636,7 +1440,11 @@ impl<T: Terminal> TuiRuntime<T> {
         event: &InputEvent,
     ) -> DispatchResult {
         let Some(component) = self.components.get_mut(target_id) else {
-            debug_assert!(false, "input dispatch target component {:?} missing", target_id);
+            debug_assert!(
+                false,
+                "input dispatch target component {:?} missing",
+                target_id
+            );
             if self.focused == Some(target_id) {
                 self.focused = None;
             }
@@ -1866,26 +1674,6 @@ impl<T: Terminal> TuiRuntime<T> {
                     self.set_focused(None);
                     render_requested = true;
                 }
-                Command::ShowOverlay {
-                    overlay_id,
-                    component,
-                    options,
-                    hidden,
-                } => {
-                    if self.apply_show_overlay(overlay_id, component, options, hidden) {
-                        render_requested = true;
-                    }
-                }
-                Command::HideOverlay(overlay_id) => {
-                    if self.apply_hide_overlay(overlay_id) {
-                        render_requested = true;
-                    }
-                }
-                Command::SetOverlayHidden { overlay_id, hidden } => {
-                    if self.apply_set_overlay_hidden(overlay_id, hidden) {
-                        render_requested = true;
-                    }
-                }
                 Command::ShowSurface {
                     surface_id,
                     component,
@@ -2060,23 +1848,6 @@ impl<T: Terminal> TuiRuntime<T> {
         Some(result)
     }
 
-    fn apply_show_overlay(
-        &mut self,
-        overlay_id: OverlayId,
-        component: ComponentId,
-        options: Option<OverlayOptions>,
-        hidden: bool,
-    ) -> bool {
-        self.apply_show_surface_internal(
-            SurfaceId::from(overlay_id),
-            component,
-            options.map(SurfaceOptions::from),
-            hidden,
-            "command.show_overlay.missing_component_id",
-            "show overlay",
-        )
-    }
-
     fn apply_show_surface(
         &mut self,
         surface_id: SurfaceId,
@@ -2136,14 +1907,6 @@ impl<T: Terminal> TuiRuntime<T> {
         true
     }
 
-    fn apply_hide_overlay(&mut self, overlay_id: OverlayId) -> bool {
-        self.apply_hide_surface_internal(
-            SurfaceId::from(overlay_id),
-            "command.hide_overlay.missing_overlay_id",
-            "hide overlay",
-        )
-    }
-
     fn apply_hide_surface(&mut self, surface_id: SurfaceId) -> bool {
         self.apply_hide_surface_internal(
             surface_id,
@@ -2174,15 +1937,6 @@ impl<T: Terminal> TuiRuntime<T> {
             self.restore_focus_after_overlay_loss(removed.pre_focus);
         }
         true
-    }
-
-    fn apply_set_overlay_hidden(&mut self, overlay_id: OverlayId, hidden: bool) -> bool {
-        self.apply_set_surface_hidden_internal(
-            SurfaceId::from(overlay_id),
-            hidden,
-            "command.set_overlay_hidden.missing_overlay_id",
-            "set overlay hidden",
-        )
     }
 
     fn apply_set_surface_hidden(&mut self, surface_id: SurfaceId, hidden: bool) -> bool {
@@ -2587,16 +2341,18 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 mod tests {
     use super::{
         find_cell_size_response, CoalesceBudget, Command, ComponentId, CrashCleanup, CustomCommand,
-        CustomCommandCtx, CustomCommandError, OverlayOptions, RuntimeHandle, TerminalOp,
-        TuiRuntime,
+        CustomCommandCtx, CustomCommandError, RuntimeHandle, TerminalOp, TuiRuntime,
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
     use crate::core::output::TerminalCmd;
     use crate::core::terminal::Terminal;
     use crate::core::terminal_image::get_cell_dimensions;
-    use crate::runtime::overlay::{OverlayVisibility, SizeValue};
-    use crate::runtime::surface::{SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions};
+    use crate::runtime::surface::{
+        SurfaceAnchor as OverlayAnchor, SurfaceId, SurfaceInputPolicy, SurfaceKind,
+        SurfaceLayoutOptions as OverlayOptions, SurfaceMargin as OverlayMargin, SurfaceOptions,
+        SurfaceSizeValue as SizeValue, SurfaceVisibility as OverlayVisibility,
+    };
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -2765,47 +2521,6 @@ mod tests {
             Err(CustomCommandError::Message(
                 "intentional custom command failure".to_string(),
             ))
-        }
-    }
-
-    enum OverlayMutationAction {
-        Show {
-            overlay_id: crate::runtime::overlay::OverlayId,
-            component_id: ComponentId,
-            options: Option<OverlayOptions>,
-            hidden: bool,
-        },
-        Hide {
-            overlay_id: crate::runtime::overlay::OverlayId,
-        },
-        SetHidden {
-            overlay_id: crate::runtime::overlay::OverlayId,
-            hidden: bool,
-        },
-    }
-
-    struct OverlayMutationCustomCommand {
-        action: OverlayMutationAction,
-    }
-
-    impl CustomCommand for OverlayMutationCustomCommand {
-        fn name(&self) -> &'static str {
-            "overlay_mutation_custom_command"
-        }
-
-        fn apply(self: Box<Self>, ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError> {
-            match self.action {
-                OverlayMutationAction::Show {
-                    overlay_id,
-                    component_id,
-                    options,
-                    hidden,
-                } => ctx.show_overlay(overlay_id, component_id, options, hidden),
-                OverlayMutationAction::Hide { overlay_id } => ctx.hide_overlay(overlay_id),
-                OverlayMutationAction::SetHidden { overlay_id, hidden } => {
-                    ctx.set_overlay_hidden(overlay_id, hidden)
-                }
-            }
         }
     }
 
@@ -3054,125 +2769,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_command_overlay_mutation_lifecycle_matches_runtime_overlay_controls() {
-        let terminal = TestTerminal::new(80, 24);
-
-        let root_inputs = Rc::new(RefCell::new(Vec::new()));
-        let root_focus = Rc::new(RefCell::new(false));
-        let root_component =
-            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
-        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
-        runtime.start().expect("runtime start");
-        runtime.set_focus(root_id);
-        runtime.run_once();
-        assert!(*root_focus.borrow());
-
-        let overlay_inputs = Rc::new(RefCell::new(Vec::new()));
-        let overlay_focus = Rc::new(RefCell::new(false));
-        let overlay_component =
-            TestComponent::new(false, Rc::clone(&overlay_inputs), Rc::clone(&overlay_focus));
-        let overlay_component_id = runtime.register_component(overlay_component);
-        let overlay_id = crate::runtime::overlay::OverlayId::from_raw(501);
-
-        let handle = runtime.runtime_handle();
-        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
-            action: OverlayMutationAction::Show {
-                overlay_id,
-                component_id: overlay_component_id,
-                options: None,
-                hidden: false,
-            },
-        })));
-        runtime.run_once();
-
-        assert_eq!(runtime.overlays.entries.len(), 1);
-        assert!(!runtime.overlays.entries[0].hidden);
-        assert!(*overlay_focus.borrow());
-        assert!(!*root_focus.borrow());
-
-        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
-            action: OverlayMutationAction::SetHidden {
-                overlay_id,
-                hidden: true,
-            },
-        })));
-        runtime.run_once();
-
-        assert!(runtime.overlays.entries[0].hidden);
-        assert!(!*overlay_focus.borrow());
-        assert!(*root_focus.borrow());
-
-        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
-            action: OverlayMutationAction::SetHidden {
-                overlay_id,
-                hidden: false,
-            },
-        })));
-        runtime.run_once();
-
-        assert!(!runtime.overlays.entries[0].hidden);
-        assert!(*overlay_focus.borrow());
-        assert!(!*root_focus.borrow());
-
-        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
-            action: OverlayMutationAction::Hide { overlay_id },
-        })));
-        runtime.run_once();
-
-        assert!(runtime.overlays.entries.is_empty());
-        assert!(!*overlay_focus.borrow());
-        assert!(*root_focus.borrow());
-    }
-
-    #[test]
-    fn custom_command_overlay_mutation_missing_id_emits_runtime_diagnostic() {
-        let terminal = TestTerminal::default();
-        let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
-        let diagnostics = Rc::new(RefCell::new(Vec::<String>::new()));
-        let sink = Rc::clone(&diagnostics);
-        runtime.set_on_diagnostic(Some(Box::new(move |message| {
-            sink.borrow_mut().push(message.to_string());
-        })));
-
-        runtime.start().expect("runtime start");
-        runtime.render_if_needed();
-
-        let missing_overlay_id = crate::runtime::overlay::OverlayId::from_raw(9001);
-        let handle = runtime.runtime_handle();
-        handle.dispatch(Command::Custom(Box::new(OverlayMutationCustomCommand {
-            action: OverlayMutationAction::Hide {
-                overlay_id: missing_overlay_id,
-            },
-        })));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.run_once();
-        }));
-        if cfg!(debug_assertions) {
-            assert!(
-                result.is_err(),
-                "expected debug_assert panic for failing custom command in debug builds"
-            );
-        } else {
-            assert!(
-                result.is_ok(),
-                "expected no panic when debug assertions are disabled"
-            );
-        }
-
-        let diagnostics = diagnostics.borrow();
-        assert_eq!(diagnostics.len(), 1);
-        let diagnostic = &diagnostics[0];
-        assert!(
-            diagnostic.contains("[tape_tui][error][command.custom.failed]"),
-            "expected custom command failure diagnostic, got: {diagnostic:?}"
-        );
-        assert!(
-            diagnostic.contains("missing overlay id 9001"),
-            "expected missing overlay id details in diagnostic, got: {diagnostic:?}"
-        );
-    }
-
-    #[test]
     fn custom_command_surface_mutation_lifecycle_supports_visibility_and_option_updates() {
         let terminal = TestTerminal::new(80, 24);
 
@@ -3351,17 +2947,15 @@ mod tests {
         handle.dispatch(Command::RootSet(vec![missing_component_id]));
         handle.dispatch(Command::RootPush(missing_component_id));
         handle.dispatch(Command::FocusSet(missing_component_id));
-        handle.dispatch(Command::ShowOverlay {
-            overlay_id: crate::runtime::overlay::OverlayId::from_raw(77),
+        handle.dispatch(Command::ShowSurface {
+            surface_id: SurfaceId::from_raw(77),
             component: missing_component_id,
             options: None,
             hidden: false,
         });
-        handle.dispatch(Command::HideOverlay(
-            crate::runtime::overlay::OverlayId::from_raw(42),
-        ));
-        handle.dispatch(Command::SetOverlayHidden {
-            overlay_id: crate::runtime::overlay::OverlayId::from_raw(55),
+        handle.dispatch(Command::HideSurface(SurfaceId::from_raw(42)));
+        handle.dispatch(Command::SetSurfaceHidden {
+            surface_id: SurfaceId::from_raw(55),
             hidden: true,
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3386,16 +2980,16 @@ mod tests {
             "expected focus target missing component diagnostic, got: {diagnostics:?}"
         );
         assert!(
-            diagnostics.contains("command.show_overlay.missing_component_id"),
-            "expected show-overlay missing component diagnostic, got: {diagnostics:?}"
+            diagnostics.contains("command.show_surface.missing_component_id"),
+            "expected show-surface missing component diagnostic, got: {diagnostics:?}"
         );
         assert!(
-            diagnostics.contains("command.hide_overlay.missing_overlay_id"),
-            "expected hide-overlay missing id diagnostic, got: {diagnostics:?}"
+            diagnostics.contains("command.hide_surface.missing_surface_id"),
+            "expected hide-surface missing id diagnostic, got: {diagnostics:?}"
         );
         assert!(
-            diagnostics.contains("command.set_overlay_hidden.missing_overlay_id"),
-            "expected set-overlay-hidden missing id diagnostic, got: {diagnostics:?}"
+            diagnostics.contains("command.set_surface_hidden.missing_surface_id"),
+            "expected set-surface-hidden missing id diagnostic, got: {diagnostics:?}"
         );
 
         assert_eq!(
@@ -4662,10 +4256,10 @@ mod tests {
             width: Some(SizeValue::percent(55.0)),
             min_width: Some(22),
             max_height: Some(SizeValue::percent(60.0)),
-            anchor: Some(crate::runtime::overlay::OverlayAnchor::BottomRight),
+            anchor: Some(OverlayAnchor::BottomRight),
             offset_x: Some(-3),
             offset_y: Some(2),
-            margin: Some(crate::runtime::overlay::OverlayMargin {
+            margin: Some(OverlayMargin {
                 top: Some(2),
                 right: Some(4),
                 bottom: Some(3),
@@ -4797,7 +4391,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_handle_mutations_apply_only_when_commands_are_drained() {
+    fn surface_handle_mutations_apply_only_when_commands_are_drained() {
         let terminal = TestTerminal::new(80, 24);
 
         let root_focus = Rc::new(RefCell::new(false));
@@ -4812,30 +4406,30 @@ mod tests {
         runtime.run_once();
         assert!(*root_focus.borrow());
 
-        let overlay_focus = Rc::new(RefCell::new(false));
-        let overlay_component = TestComponent::new(
+        let surface_focus = Rc::new(RefCell::new(false));
+        let surface_component = TestComponent::new(
             false,
             Rc::new(RefCell::new(Vec::new())),
-            Rc::clone(&overlay_focus),
+            Rc::clone(&surface_focus),
         );
-        let overlay_id = runtime.register_component(overlay_component);
-        let handle = runtime.show_overlay(overlay_id, None);
+        let surface_component_id = runtime.register_component(surface_component);
+        let handle = runtime.show_surface(surface_component_id, None);
         runtime.run_once();
         assert_eq!(runtime.overlays.entries.len(), 1);
-        assert!(*overlay_focus.borrow());
+        assert!(*surface_focus.borrow());
         assert!(!*root_focus.borrow());
 
         handle.set_hidden(true);
 
-        // OverlayHandle must enqueue commands instead of mutating runtime state inline.
+        // SurfaceHandle must enqueue commands instead of mutating runtime state inline.
         assert_eq!(runtime.overlays.entries.len(), 1);
         assert!(!runtime.overlays.entries[0].hidden);
-        assert!(*overlay_focus.borrow());
+        assert!(*surface_focus.borrow());
         assert!(!*root_focus.borrow());
 
         runtime.run_once();
         assert!(runtime.overlays.entries[0].hidden);
-        assert!(!*overlay_focus.borrow());
+        assert!(!*surface_focus.borrow());
         assert!(*root_focus.borrow());
 
         handle.hide();
@@ -4846,33 +4440,36 @@ mod tests {
     }
 
     #[test]
-    fn command_show_overlay_uses_runtime_overlay_options_type() {
+    fn command_show_surface_uses_runtime_surface_options_type() {
         let terminal = TestTerminal::default();
         let (mut runtime, _root_id) = runtime_with_root(terminal, DummyComponent::default());
-        let overlay_component_id = runtime.register_component(DummyComponent::default());
-        let overlay_id = crate::runtime::overlay::OverlayId::from_raw(99);
-        let options = OverlayOptions {
-            width: Some(SizeValue::absolute(12)),
+        let surface_component_id = runtime.register_component(DummyComponent::default());
+        let surface_id = SurfaceId::from_raw(99);
+        let options = SurfaceOptions {
+            overlay: OverlayOptions {
+                width: Some(SizeValue::absolute(12)),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
-        let command = Command::ShowOverlay {
-            overlay_id,
-            component: overlay_component_id,
+        let command = Command::ShowSurface {
+            surface_id,
+            component: surface_component_id,
             options: Some(options),
             hidden: false,
         };
 
         match command {
-            Command::ShowOverlay {
-                overlay_id: seen_id,
+            Command::ShowSurface {
+                surface_id: seen_id,
                 options: Some(seen_options),
                 ..
             } => {
-                assert_eq!(seen_id, overlay_id);
+                assert_eq!(seen_id, surface_id);
                 assert_eq!(seen_options, options);
             }
-            _ => panic!("expected show-overlay command"),
+            _ => panic!("expected show-surface command"),
         }
     }
 
