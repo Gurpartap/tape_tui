@@ -136,3 +136,28 @@ fn slash_cancel_cancels_active_run_or_reports_idle_state() {
     app.on_submit(&mut host);
     assert_eq!(host.cancelled_runs, vec![7]);
 }
+
+#[test]
+fn sending_message_while_running_is_non_failing() {
+    let mut app = App::new();
+    let mut host = HostSpy::with_next_run_id(11);
+
+    app.on_input_replace("run while running".to_string());
+    app.on_submit(&mut host);
+    assert_eq!(app.mode, Mode::Running { run_id: 11 });
+    assert_eq!(host.started_prompts.len(), 1);
+
+    app.on_input_replace("another message".to_string());
+    app.on_submit(&mut host);
+
+    assert_eq!(
+        app.transcript
+            .last()
+            .expect("system message exists")
+            .content,
+        "Run already in progress. Use /cancel to stop it."
+    );
+    assert_eq!(app.mode, Mode::Running { run_id: 11 });
+    assert_eq!(host.started_prompts.len(), 1);
+    assert_eq!(host.render_requests, 2);
+}

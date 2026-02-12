@@ -238,7 +238,8 @@ impl Component for AppComponent {
                     self.with_app_mut(|app, host| app.on_cancel(host));
                 }
                 "ctrl+c" => {
-                    self.with_app_mut(|app, host| app.on_quit(host));
+                    self.with_app_mut(|app, host| app.on_control_c(host));
+                    self.editor.set_text("");
                 }
                 "shift+tab" => {
                     self.view_mode = self.view_mode.next();

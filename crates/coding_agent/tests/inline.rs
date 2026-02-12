@@ -178,6 +178,37 @@ fn escape_key_cancels_active_run() {
 }
 
 #[test]
+fn escape_key_stops_streaming_immediately() {
+    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(BlockingBackend));
+
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "long run");
+    support::inject_input(&terminal_trace, "\r");
+
+    let started = run_until(&mut tui, Duration::from_secs(2), || {
+        matches!(support::lock_unpoisoned(&app).mode, Mode::Running { .. })
+    });
+    assert!(started, "run did not enter running mode");
+
+    support::inject_input(&terminal_trace, "\x1b");
+
+    let stopped = run_until(&mut tui, Duration::from_secs(2), || {
+        let app = support::lock_unpoisoned(&app);
+        app.transcript.iter().any(|message| {
+            message.role == Role::Assistant && message.content == "working..." && !message.streaming
+        })
+    });
+    assert!(
+        stopped,
+        "escape key did not immediately stop streaming assistant text"
+    );
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
 fn normal_flow_stays_inline_without_alternate_screen_sequences() {
     let (mut tui, app, terminal_trace) = setup_runtime();
 
