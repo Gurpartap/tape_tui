@@ -11,7 +11,10 @@ pub use component_registry::ComponentId;
 pub use overlay::{
     OverlayAnchor, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility, SizeValue,
 };
-pub use surface::{SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions};
+pub use surface::{
+    SurfaceAnchor, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLayoutOptions,
+    SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
+};
 pub use tui::{
     Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle, SurfaceHandle,
     TerminalOp,

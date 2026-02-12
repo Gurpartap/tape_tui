@@ -1,6 +1,6 @@
-//! Runtime-owned overlay identifiers and options.
+//! Runtime-owned overlay identifiers and legacy layout aliases.
 //!
-//! Overlays are legacy-compatible wrappers over runtime surfaces.
+//! Overlay geometry types are compatibility aliases to the surface-native layout model.
 //! New host integrations should prefer `runtime::surface` APIs.
 
 use crate::render::overlay as render_overlay;
@@ -21,147 +21,16 @@ impl OverlayId {
     }
 }
 
-/// Dimension value represented as absolute cells or percent of terminal size.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SizeValue {
-    /// Absolute size in terminal cells.
-    Absolute(usize),
-    /// Relative size in percent (`0.0..=100.0` is typical).
-    Percent(f32),
-}
-
-impl SizeValue {
-    /// Creates an absolute size.
-    pub fn absolute(value: usize) -> Self {
-        Self::Absolute(value)
-    }
-
-    /// Creates a percentage-based size.
-    pub fn percent(value: f32) -> Self {
-        Self::Percent(value)
-    }
-}
-
-/// Overlay anchoring positions inside the available terminal area.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayAnchor {
-    /// Centered horizontally and vertically.
-    Center,
-    /// Top-left corner.
-    TopLeft,
-    /// Top-right corner.
-    TopRight,
-    /// Bottom-left corner.
-    BottomLeft,
-    /// Bottom-right corner.
-    BottomRight,
-    /// Top edge, horizontally centered.
-    TopCenter,
-    /// Bottom edge, horizontally centered.
-    BottomCenter,
-    /// Left edge, vertically centered.
-    LeftCenter,
-    /// Right edge, vertically centered.
-    RightCenter,
-}
-
-/// Optional non-negative margins around overlay layout bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OverlayMargin {
-    /// Top margin in cells.
-    pub top: Option<usize>,
-    /// Right margin in cells.
-    pub right: Option<usize>,
-    /// Bottom margin in cells.
-    pub bottom: Option<usize>,
-    /// Left margin in cells.
-    pub left: Option<usize>,
-}
-
-impl OverlayMargin {
-    /// Creates a uniform margin on all sides.
-    pub fn uniform(value: usize) -> Self {
-        Self {
-            top: Some(value),
-            right: Some(value),
-            bottom: Some(value),
-            left: Some(value),
-        }
-    }
-}
-
-/// Visibility policy for showing overlays at a given terminal size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayVisibility {
-    /// Always visible.
-    Always,
-    /// Visible only when terminal columns are at least this value.
-    MinCols(usize),
-    /// Visible only when both dimensions satisfy minimum requirements.
-    MinSize { cols: usize, rows: usize },
-}
-
-impl Default for OverlayVisibility {
-    fn default() -> Self {
-        Self::Always
-    }
-}
-
-/// Runtime-level overlay layout and visibility options.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct OverlayOptions {
-    /// Preferred width.
-    pub width: Option<SizeValue>,
-    /// Lower bound for width after resolving `width`.
-    pub min_width: Option<usize>,
-    /// Maximum rendered height.
-    pub max_height: Option<SizeValue>,
-    /// Anchor used when `row`/`col` are not explicitly set.
-    pub anchor: Option<OverlayAnchor>,
-    /// Horizontal offset applied after resolving anchor/position.
-    pub offset_x: Option<i32>,
-    /// Vertical offset applied after resolving anchor/position.
-    pub offset_y: Option<i32>,
-    /// Explicit row position.
-    pub row: Option<SizeValue>,
-    /// Explicit column position.
-    pub col: Option<SizeValue>,
-    /// Optional margins inside the terminal bounds.
-    pub margin: Option<OverlayMargin>,
-    /// Visibility policy evaluated per render.
-    pub visibility: OverlayVisibility,
-}
-
-impl Default for OverlayOptions {
-    fn default() -> Self {
-        Self {
-            width: None,
-            min_width: None,
-            max_height: None,
-            anchor: None,
-            offset_x: None,
-            offset_y: None,
-            row: None,
-            col: None,
-            margin: None,
-            visibility: OverlayVisibility::Always,
-        }
-    }
-}
-
-impl OverlayOptions {
-    /// Returns whether this overlay should be visible at the given terminal size.
-    pub fn is_visible(&self, columns: usize, rows: usize) -> bool {
-        match self.visibility {
-            OverlayVisibility::Always => true,
-            OverlayVisibility::MinCols(min_cols) => columns >= min_cols,
-            OverlayVisibility::MinSize {
-                cols,
-                rows: min_rows,
-            } => columns >= cols && rows >= min_rows,
-        }
-    }
-}
+/// Compatibility alias for surface-native size values.
+pub type SizeValue = crate::runtime::surface::SurfaceSizeValue;
+/// Compatibility alias for surface-native anchor values.
+pub type OverlayAnchor = crate::runtime::surface::SurfaceAnchor;
+/// Compatibility alias for surface-native margins.
+pub type OverlayMargin = crate::runtime::surface::SurfaceMargin;
+/// Compatibility alias for surface-native visibility rules.
+pub type OverlayVisibility = crate::runtime::surface::SurfaceVisibility;
+/// Compatibility alias for surface-native layout options.
+pub type OverlayOptions = crate::runtime::surface::SurfaceLayoutOptions;
 
 /// Returns visibility for optional overlay options (`true` when `None`).
 pub fn is_overlay_visible(options: Option<&OverlayOptions>, columns: usize, rows: usize) -> bool {

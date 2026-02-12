@@ -83,8 +83,9 @@ pub use crate::runtime::tui::{OverlayHandle, SurfaceHandle};
 /// Runtime, overlay, and surface option/model types.
 pub use crate::runtime::{
     CustomCommand, CustomCommandCtx, CustomCommandError, OverlayAnchor, OverlayId, OverlayMargin,
-    OverlayOptions, OverlayVisibility, SizeValue, SurfaceId, SurfaceInputPolicy, SurfaceKind,
-    SurfaceOptions,
+    OverlayOptions, OverlayVisibility, SizeValue, SurfaceAnchor, SurfaceId, SurfaceInputPolicy,
+    SurfaceKind, SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue,
+    SurfaceVisibility,
 };
 
 /// Alias for the main runtime type.

@@ -16,7 +16,8 @@ use tape_tui::{
     OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, OverlayVisibility,
     ProcessTerminal, SelectItem, SelectList, SelectListTheme, SettingItem, SettingsList,
     SettingsListTheme, SizeValue, SlashCommand, Spacer, StdinBuffer, StdinBufferEventMap,
-    StdinBufferOptions, SurfaceHandle, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions,
+    StdinBufferOptions, SurfaceAnchor, SurfaceHandle, SurfaceId, SurfaceInputPolicy, SurfaceKind,
+    SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
     Terminal, TerminalCapabilities, Text, TruncatedText, CURSOR_MARKER, DEFAULT_EDITOR_KEYBINDINGS,
     TUI,
 };
