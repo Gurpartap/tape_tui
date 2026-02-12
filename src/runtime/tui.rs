@@ -23,8 +23,8 @@ use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::ime::position_hardware_cursor;
 use crate::runtime::inline_viewport::InlineViewportState;
 use crate::runtime::surface::{
-    SurfaceEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceMutation, SurfaceOptions,
-    SurfaceRenderEntry, SurfaceState,
+    measure_visible_surfaces, SurfaceEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind,
+    SurfaceMeasurement, SurfaceMutation, SurfaceOptions, SurfaceRenderEntry, SurfaceState,
 };
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
@@ -2495,19 +2495,29 @@ impl<T: Terminal> TuiRuntime<T> {
         )
     }
 
+    fn measured_visible_surface_snapshot(
+        &self,
+        width: usize,
+        height: usize,
+    ) -> Vec<(SurfaceRenderEntry, SurfaceMeasurement)> {
+        let entries = self.visible_surface_snapshot();
+        let measurements = measure_visible_surfaces(&entries, width, height);
+        entries.into_iter().zip(measurements).collect()
+    }
+
     fn composite_surface_lines(
         &mut self,
         lines: Vec<String>,
         width: usize,
         height: usize,
     ) -> (Vec<String>, Option<CursorPos>) {
-        let surface_entries = self.visible_surface_snapshot();
+        let measured_entries = self.measured_visible_surface_snapshot(width, height);
         let mut rendered: Vec<(RenderedSurface, Option<CursorPos>)> = Vec::new();
 
         let mut reserved_top = 0usize;
         let mut reserved_bottom = 0usize;
 
-        for entry in surface_entries {
+        for (entry, measurement) in measured_entries {
             let surface_options = entry.options.unwrap_or_default();
             let layout_options =
                 surface_options.with_lane_reservations(reserved_top, reserved_bottom);
@@ -2545,7 +2555,7 @@ impl<T: Terminal> TuiRuntime<T> {
 
             let lane_height = surface_lines.len();
             apply_lane_reservations(
-                surface_options.kind,
+                measurement.kind,
                 lane_height,
                 height,
                 &mut reserved_top,

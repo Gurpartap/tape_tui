@@ -239,6 +239,24 @@ impl Default for SurfaceKind {
     }
 }
 
+/// Deterministic compositing lane used for two-pass sizing negotiation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SurfaceLane {
+    Top,
+    Bottom,
+    Floating,
+}
+
+impl SurfaceLane {
+    pub(crate) fn from_kind(kind: SurfaceKind) -> Self {
+        match kind {
+            SurfaceKind::Toast => Self::Top,
+            SurfaceKind::AttachmentRow | SurfaceKind::Drawer => Self::Bottom,
+            SurfaceKind::Modal | SurfaceKind::Corner => Self::Floating,
+        }
+    }
+}
+
 /// Input routing policy for visible surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceInputPolicy {
@@ -435,6 +453,66 @@ pub(crate) struct SurfaceRenderEntry {
     pub(crate) options: Option<SurfaceOptions>,
 }
 
+/// Deterministic first-pass measurement output for a visible surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SurfaceMeasurement {
+    pub(crate) component_id: ComponentId,
+    pub(crate) stack_index: usize,
+    pub(crate) kind: SurfaceKind,
+    pub(crate) lane: SurfaceLane,
+    pub(crate) preferred_width: usize,
+    pub(crate) preferred_max_height: Option<usize>,
+}
+
+/// Resolve deterministic first-pass measurement inputs for visible surfaces.
+pub(crate) fn measure_visible_surfaces(
+    entries: &[SurfaceRenderEntry],
+    terminal_cols: usize,
+    terminal_rows: usize,
+) -> Vec<SurfaceMeasurement> {
+    let terminal_cols = terminal_cols.max(1);
+    let terminal_rows = terminal_rows.max(1);
+
+    entries
+        .iter()
+        .enumerate()
+        .map(|(stack_index, entry)| {
+            let options = entry.options.unwrap_or_default();
+            let layout = options.layout;
+
+            let mut preferred_width = resolve_measurement_size(layout.width, terminal_cols)
+                .unwrap_or_else(|| 80.min(terminal_cols));
+            if let Some(min_width) = layout.min_width {
+                preferred_width = preferred_width.max(min_width);
+            }
+            preferred_width = preferred_width.clamp(1, terminal_cols);
+
+            let preferred_max_height = resolve_measurement_size(layout.max_height, terminal_rows)
+                .map(|height| height.clamp(1, terminal_rows));
+
+            SurfaceMeasurement {
+                component_id: entry.component_id,
+                stack_index,
+                kind: options.kind,
+                lane: SurfaceLane::from_kind(options.kind),
+                preferred_width,
+                preferred_max_height,
+            }
+        })
+        .collect()
+}
+
+fn resolve_measurement_size(value: Option<SurfaceSizeValue>, reference: usize) -> Option<usize> {
+    match value {
+        None => None,
+        Some(SurfaceSizeValue::Absolute(value)) => Some(value),
+        Some(SurfaceSizeValue::Percent(percent)) => {
+            let percent = percent.max(0.0);
+            Some(((reference as f32) * (percent / 100.0)).floor() as usize)
+        }
+    }
+}
+
 /// Ordered runtime surface stack.
 #[derive(Default)]
 pub(crate) struct SurfaceState {
@@ -546,9 +624,10 @@ pub fn visibility_only_surface_options(visibility: SurfaceVisibility) -> Surface
 #[cfg(test)]
 mod tests {
     use super::{
-        surface_options_from_layout, SurfaceAnchor, SurfaceEntry, SurfaceId, SurfaceInputPolicy,
-        SurfaceKind, SurfaceLayoutOptions, SurfaceMargin, SurfaceOptions, SurfaceSizeValue,
-        SurfaceState, SurfaceVisibility,
+        measure_visible_surfaces, surface_options_from_layout, SurfaceAnchor, SurfaceEntry,
+        SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceLane, SurfaceLayoutOptions,
+        SurfaceMargin, SurfaceOptions, SurfaceRenderEntry, SurfaceSizeValue, SurfaceState,
+        SurfaceVisibility,
     };
     use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
     use crate::Component;
@@ -564,6 +643,80 @@ mod tests {
         assert!(layout.is_visible(120, 40));
         assert!(!layout.is_visible(79, 24));
         assert!(!layout.is_visible(80, 23));
+    }
+
+    #[test]
+    fn measurement_pass_resolves_lane_and_size_inputs_deterministically() {
+        let component_ids = build_component_ids(4);
+        let entries = vec![
+            SurfaceRenderEntry {
+                component_id: component_ids[0],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Toast,
+                    layout: SurfaceLayoutOptions {
+                        width: Some(SurfaceSizeValue::percent(50.0)),
+                        max_height: Some(SurfaceSizeValue::percent(40.0)),
+                        min_width: Some(12),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[1],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Drawer,
+                    layout: SurfaceLayoutOptions {
+                        width: Some(SurfaceSizeValue::absolute(999)),
+                        max_height: Some(SurfaceSizeValue::absolute(99)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[2],
+                options: Some(SurfaceOptions {
+                    kind: SurfaceKind::Corner,
+                    layout: SurfaceLayoutOptions {
+                        width: Some(SurfaceSizeValue::percent(-10.0)),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            },
+            SurfaceRenderEntry {
+                component_id: component_ids[3],
+                options: None,
+            },
+        ];
+
+        let baseline = measure_visible_surfaces(&entries, 30, 10);
+        let rerun = measure_visible_surfaces(&entries, 30, 10);
+
+        assert_eq!(rerun, baseline);
+        assert_eq!(baseline.len(), 4);
+
+        assert_eq!(baseline[0].stack_index, 0);
+        assert_eq!(baseline[0].lane, SurfaceLane::Top);
+        assert_eq!(baseline[0].preferred_width, 15);
+        assert_eq!(baseline[0].preferred_max_height, Some(4));
+
+        assert_eq!(baseline[1].stack_index, 1);
+        assert_eq!(baseline[1].lane, SurfaceLane::Bottom);
+        assert_eq!(baseline[1].preferred_width, 30);
+        assert_eq!(baseline[1].preferred_max_height, Some(10));
+
+        assert_eq!(baseline[2].stack_index, 2);
+        assert_eq!(baseline[2].lane, SurfaceLane::Floating);
+        assert_eq!(baseline[2].preferred_width, 1);
+        assert_eq!(baseline[2].preferred_max_height, None);
+
+        assert_eq!(baseline[3].stack_index, 3);
+        assert_eq!(baseline[3].kind, SurfaceKind::Modal);
+        assert_eq!(baseline[3].lane, SurfaceLane::Floating);
+        assert_eq!(baseline[3].preferred_width, 30);
+        assert_eq!(baseline[3].preferred_max_height, None);
     }
 
     #[test]
