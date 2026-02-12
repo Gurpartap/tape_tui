@@ -3638,6 +3638,99 @@ mod tests {
     }
 
     #[test]
+    fn input_routing_precedence_tracks_topmost_visible_capture_surface() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_id = runtime.register_component(surface_a_component);
+        let surface_a = runtime.show_surface(
+            surface_a_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_id = runtime.register_component(surface_b_component);
+        let surface_b = runtime.show_surface(
+            surface_b_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+        runtime.handle_input("1");
+
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["1".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
+        assert!(*surface_b_focus.borrow());
+
+        surface_b.set_hidden(true);
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+        runtime.handle_input("2");
+
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["2".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
+        assert!(*surface_a_focus.borrow());
+
+        surface_a.update_options(Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            overlay: OverlayOptions {
+                visibility: OverlayVisibility::MinCols(120),
+                ..Default::default()
+            },
+        }));
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+        runtime.handle_input("3");
+
+        assert_eq!(root_inputs.borrow().as_slice(), &["3".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+        assert!(surface_b_inputs.borrow().is_empty());
+        assert!(*root_focus.borrow());
+    }
+
+    #[test]
     fn surface_passthrough_does_not_steal_input_from_root() {
         let terminal = TestTerminal::new(80, 24);
 

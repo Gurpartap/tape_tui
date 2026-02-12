@@ -1968,7 +1968,72 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_accepts_return_key_for_attach() {
+    fn inline_scroll_offset_clamps_after_session_exit_and_resize() {
+        let store = Arc::new(Mutex::new(SessionStore::new()));
+        let session_id = {
+            let mut locked = store.lock().expect("session store lock poisoned");
+            let session_id = locked.create_session(SessionMode::Interactive);
+            if let Some(session) = locked.session_mut(session_id) {
+                session.state = SessionState::Exited { code: 0 };
+                session.mode = SessionMode::Background;
+                for index in 0..32 {
+                    session.push_output(format!("[tail] line {index}"));
+                }
+            }
+            session_id
+        };
+
+        let signals = Rc::new(RefCell::new(OverlaySignals::default()));
+        let mut overlay =
+            InteractiveOverlay::new(Arc::clone(&store), session_id, Rc::clone(&signals));
+
+        let body_height_for_rows = |rows: usize| {
+            let overlay_rows = ((rows as f32) * OVERLAY_HEIGHT_PERCENT / 100.0).floor() as usize;
+            let border_lines = 2usize;
+            let header_lines = 4usize;
+            let footer_lines = 3usize;
+            let chrome = border_lines + header_lines + footer_lines + 1;
+            overlay_rows.saturating_sub(chrome).max(4)
+        };
+
+        overlay.set_terminal_rows(24);
+        overlay.render(80);
+        for _ in 0..8 {
+            assert!(overlay.handle_control("shift+up"));
+        }
+        overlay.render(80);
+        assert!(overlay.scroll_offset > 0);
+
+        overlay.set_terminal_rows(80);
+        overlay.render(80);
+        let max_offset_large = {
+            let locked = store.lock().expect("session store lock poisoned");
+            let output_len = locked
+                .session(session_id)
+                .expect("session should exist")
+                .output
+                .len();
+            output_len.saturating_sub(body_height_for_rows(80))
+        };
+        assert!(overlay.scroll_offset <= max_offset_large);
+
+        overlay.set_terminal_rows(8);
+        overlay.render(80);
+        let max_offset_small = {
+            let locked = store.lock().expect("session store lock poisoned");
+            let output_len = locked
+                .session(session_id)
+                .expect("session should exist")
+                .output
+                .len();
+            output_len.saturating_sub(body_height_for_rows(8))
+        };
+        assert!(overlay.scroll_offset <= max_offset_small);
+        assert_eq!(signals.borrow_mut().take_reason(), None);
+    }
+
+    #[test]
+    fn dashboard_accepts_enter_and_return_for_attach() {
         let store = Arc::new(Mutex::new(SessionStore::new()));
         let session_id = {
             let mut locked = store.lock().expect("session store lock poisoned");
@@ -1979,15 +2044,55 @@ mod tests {
         let exit_flag = Rc::new(RefCell::new(false));
         let mut dashboard = SessionDashboard::new(Arc::clone(&store), Rc::clone(&state), exit_flag);
 
-        let snapshot = {
-            let locked = store.lock().expect("session store lock poisoned");
-            locked.snapshot()
-        };
-
-        dashboard.handle_press("return", &snapshot);
+        dashboard.handle_event(&InputEvent::Key {
+            raw: "\r".to_string(),
+            key_id: "enter".to_string(),
+            event_type: KeyEventType::Press,
+        });
         assert_eq!(
             state.borrow().action,
             Some(DashboardAction::OpenSession(session_id))
         );
+
+        state.borrow_mut().action = None;
+
+        dashboard.handle_event(&InputEvent::Key {
+            raw: "\r".to_string(),
+            key_id: "return".to_string(),
+            event_type: KeyEventType::Press,
+        });
+        assert_eq!(
+            state.borrow().action,
+            Some(DashboardAction::OpenSession(session_id))
+        );
+    }
+
+    #[test]
+    fn dashboard_does_not_leak_attach_input_when_overlay_active() {
+        let store = Arc::new(Mutex::new(SessionStore::new()));
+        {
+            let mut locked = store.lock().expect("session store lock poisoned");
+            locked.create_session(SessionMode::Interactive);
+        }
+
+        let state = Rc::new(RefCell::new(DashboardState {
+            action: None,
+            overlay_active: true,
+        }));
+        let exit_flag = Rc::new(RefCell::new(false));
+        let mut dashboard = SessionDashboard::new(Arc::clone(&store), Rc::clone(&state), exit_flag);
+
+        dashboard.handle_event(&InputEvent::Key {
+            raw: "\r".to_string(),
+            key_id: "enter".to_string(),
+            event_type: KeyEventType::Press,
+        });
+        dashboard.handle_event(&InputEvent::Text {
+            raw: "n".to_string(),
+            text: "n".to_string(),
+            event_type: KeyEventType::Press,
+        });
+
+        assert_eq!(state.borrow().action, None);
     }
 }
