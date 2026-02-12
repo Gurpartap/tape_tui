@@ -315,19 +315,175 @@ fn spinner_glyph() -> String {
 
 fn render_message_lines(message: &Message, width: usize, lines: &mut Vec<String>) {
     let role_prefix = message_role_prefix(message);
+    let markdown_lines = render_markdown_lines(&message.content);
 
     if message.content.is_empty() {
         append_wrapped_text(lines, width, "", &format!("{role_prefix}: "), "  ");
         return;
     }
 
-    for (index, line) in message.content.split('\n').enumerate() {
+    for (index, line) in markdown_lines.iter().enumerate() {
         let prefix = if index == 0 {
             format!("{role_prefix}: ")
         } else {
             "  ".to_string()
         };
         append_wrapped_text(lines, width, line, &prefix, "  ");
+    }
+}
+
+fn render_markdown_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+
+    for line in text.split('\n') {
+        let rendered = render_markdown_line(line, &mut in_code_block);
+        lines.push(rendered);
+    }
+
+    lines
+}
+
+fn render_markdown_line(line: &str, in_code_block: &mut bool) -> String {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("```") {
+        *in_code_block = !*in_code_block;
+        return magenta(trimmed);
+    }
+
+    if *in_code_block {
+        return magenta(line);
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("###### ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("·"), bold(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("##### ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("◦"), bold(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("#### ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("•"), bold(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("### ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("»"), bold(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("## ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("›"), bold(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("# ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{}", indent, bold(rest));
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("- ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("•"), render_inline_markdown(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("* ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("•"), render_inline_markdown(rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("+ ") {
+        let indent = " ".repeat(line.len() - trimmed.len());
+        return format!("{}{} {}", indent, cyan("•"), render_inline_markdown(rest));
+    }
+
+    render_inline_markdown(line)
+}
+
+fn render_inline_markdown(text: &str) -> String {
+    let mut output = String::new();
+    let mut index = 0;
+
+    while index < text.len() {
+        let remaining = &text[index..];
+
+        if remaining.starts_with("**") {
+            if let Some(end) = remaining[2..].find("**") {
+                let inner = &remaining[2..2 + end];
+                output.push_str(&bold(&render_inline_markdown(inner)));
+                index += end + 4;
+                continue;
+            }
+        }
+
+        if remaining.starts_with("`") {
+            if let Some(end) = remaining[1..].find('`') {
+                let inner = &remaining[1..1 + end];
+                output.push_str(&yellow(inner));
+                index += end + 2;
+                continue;
+            }
+        }
+
+        if remaining.starts_with("__") {
+            if let Some(end) = remaining[2..].find("__") {
+                let inner = &remaining[2..2 + end];
+                output.push_str(&underline(&render_inline_markdown(inner)));
+                index += end + 4;
+                continue;
+            }
+        }
+
+        let ch = match remaining.chars().next() {
+            Some(ch) => ch,
+            None => break,
+        };
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+
+    output
+}
+
+fn underline(text: &str) -> String {
+    ansi_wrap(text, "\x1b[4m", "\x1b[24m")
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    use super::*;
+
+    fn text_without_ansi(text: &str) -> String {
+        strip_ansi(text)
+    }
+
+    #[test]
+    fn bold_markdown_is_styled() {
+        let rendered = render_inline_markdown("alpha **bold** omega");
+        assert!(rendered.contains("\x1b[1m"));
+        assert_eq!(text_without_ansi(&rendered), "alpha bold omega");
+    }
+
+    #[test]
+    fn inline_code_markdown_is_styled() {
+        let rendered = render_inline_markdown("run `ls` now");
+        assert!(rendered.contains("\x1b[33m"));
+        assert_eq!(text_without_ansi(&rendered), "run ls now");
+    }
+
+    #[test]
+    fn markdown_lines_track_code_block_state() {
+        let rendered = render_markdown_lines("```rust\nlet x = 1;\n```");
+        assert_eq!(rendered.len(), 3);
+        assert!(rendered[0].contains("```"));
+        assert!(rendered[1].contains("let x = 1;"));
+        assert!(rendered[2].contains("```"));
+    }
+
+    #[test]
+    fn markdown_heading_and_list_are_rendered() {
+        let mut heading_mode = false;
+        let heading = render_markdown_line("### Title", &mut heading_mode);
+        assert!(heading.contains("»"));
+        let mut list_mode = false;
+        let bullet = render_markdown_line("- item", &mut list_mode);
+        assert!(text_without_ansi(&bullet).contains("• item"));
     }
 }
 
