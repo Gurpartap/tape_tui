@@ -2156,15 +2156,13 @@ impl<T: Terminal> TuiRuntime<T> {
                 resolve_overlay_layout(render_options.as_ref(), surface_lines.len(), width, height);
 
             let lane_height = surface_lines.len();
-            match surface_options.kind {
-                SurfaceKind::Toast => {
-                    reserved_top = reserved_top.saturating_add(lane_height);
-                }
-                SurfaceKind::AttachmentRow | SurfaceKind::Drawer => {
-                    reserved_bottom = reserved_bottom.saturating_add(lane_height);
-                }
-                SurfaceKind::Modal | SurfaceKind::Corner => {}
-            }
+            apply_lane_reservations(
+                surface_options.kind,
+                lane_height,
+                height,
+                &mut reserved_top,
+                &mut reserved_bottom,
+            );
 
             rendered.push((
                 RenderedOverlay {
@@ -2179,7 +2177,7 @@ impl<T: Terminal> TuiRuntime<T> {
 
         let mut min_lines_needed = lines.len();
         for (overlay, _) in rendered.iter() {
-            min_lines_needed = min_lines_needed.max(overlay.row + overlay.lines.len());
+            min_lines_needed = min_lines_needed.max(overlay.row.saturating_add(overlay.lines.len()));
         }
         let working_height = self.renderer.max_lines_rendered().max(min_lines_needed);
         let viewport_start = working_height.saturating_sub(height);
@@ -2276,6 +2274,29 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 }
 
+fn apply_lane_reservations(
+    kind: SurfaceKind,
+    lane_height: usize,
+    viewport_height: usize,
+    reserved_top: &mut usize,
+    reserved_bottom: &mut usize,
+) {
+    let bounded_lane_height = lane_height.min(viewport_height);
+    match kind {
+        SurfaceKind::Toast => {
+            *reserved_top = reserved_top
+                .saturating_add(bounded_lane_height)
+                .min(viewport_height);
+        }
+        SurfaceKind::AttachmentRow | SurfaceKind::Drawer => {
+            *reserved_bottom = reserved_bottom
+                .saturating_add(bounded_lane_height)
+                .min(viewport_height);
+        }
+        SurfaceKind::Modal | SurfaceKind::Corner => {}
+    }
+}
+
 impl<T: Terminal> Drop for TuiRuntime<T> {
     fn drop(&mut self) {
         if self.stopped {
@@ -2349,8 +2370,9 @@ fn is_partial_cell_size(buffer: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        find_cell_size_response, CoalesceBudget, Command, ComponentId, CrashCleanup, CustomCommand,
-        CustomCommandCtx, CustomCommandError, RuntimeHandle, TerminalOp, TuiRuntime,
+        apply_lane_reservations, find_cell_size_response, CoalesceBudget, Command, ComponentId,
+        CrashCleanup, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle,
+        TerminalOp, TuiRuntime,
     };
     use crate::core::component::Component;
     use crate::core::cursor::CursorPos;
@@ -4465,6 +4487,97 @@ mod tests {
             output.ends_with("\x1b[1A\x1b[4G\x1b[?25l"),
             "expected lower overlay cursor to remain winner when top overlay has no cursor, got: {output:?}"
         );
+    }
+
+    #[test]
+    fn lane_reservation_helper_bounds_to_viewport_height() {
+        let mut reserved_top = 0usize;
+        let mut reserved_bottom = 0usize;
+
+        apply_lane_reservations(
+            SurfaceKind::Toast,
+            9,
+            2,
+            &mut reserved_top,
+            &mut reserved_bottom,
+        );
+        assert_eq!(reserved_top, 2);
+        assert_eq!(reserved_bottom, 0);
+
+        apply_lane_reservations(
+            SurfaceKind::AttachmentRow,
+            7,
+            2,
+            &mut reserved_top,
+            &mut reserved_bottom,
+        );
+        assert_eq!(reserved_top, 2);
+        assert_eq!(reserved_bottom, 2);
+
+        apply_lane_reservations(
+            SurfaceKind::Drawer,
+            5,
+            2,
+            &mut reserved_top,
+            &mut reserved_bottom,
+        );
+        assert_eq!(reserved_top, 2);
+        assert_eq!(reserved_bottom, 2);
+
+        apply_lane_reservations(
+            SurfaceKind::Modal,
+            99,
+            2,
+            &mut reserved_top,
+            &mut reserved_bottom,
+        );
+        assert_eq!(reserved_top, 2);
+        assert_eq!(reserved_bottom, 2);
+    }
+
+    #[test]
+    fn tiny_terminal_toast_lane_compositing_preserves_transcript_prefix_order() {
+        let terminal = TestTerminal::new(12, 2);
+        let root_component = StaticLinesComponent {
+            lines: vec![
+                "root-0".to_string(),
+                "root-1".to_string(),
+                "root-2".to_string(),
+                "root-3".to_string(),
+            ],
+            cursor: None,
+        };
+        let (mut runtime, _root_id) = runtime_with_root(terminal, root_component);
+
+        let toast_a_id = runtime.register_component(StaticLinesComponent {
+            lines: vec!["toast-a".to_string()],
+            cursor: None,
+        });
+        let toast_b_id = runtime.register_component(StaticLinesComponent {
+            lines: vec!["toast-b".to_string()],
+            cursor: None,
+        });
+
+        let toast_options = SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Passthrough,
+            kind: SurfaceKind::Toast,
+            overlay: OverlayOptions {
+                width: Some(SizeValue::absolute(7)),
+                ..Default::default()
+            },
+        };
+
+        runtime.show_surface(toast_a_id, Some(toast_options));
+        runtime.show_surface(toast_b_id, Some(toast_options));
+
+        let (lines, _cursor) = runtime.render_root(12, 2);
+        let (composited, _overlay_cursor) = runtime.composite_surface_lines(lines, 12, 2);
+
+        assert_eq!(composited.len(), 4);
+        assert_eq!(composited[0], "root-0");
+        assert_eq!(composited[1], "root-1");
+        assert!(composited[2].contains("toast-a"), "{composited:?}");
+        assert!(composited[3].contains("toast-b"), "{composited:?}");
     }
 
     #[test]
