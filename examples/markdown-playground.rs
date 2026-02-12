@@ -560,8 +560,8 @@ fn main() -> std::io::Result<()> {
                     keybindings.clone(),
                 );
                 let surface_id = tui.register_component(palette_surface);
-                let handle =
-                    render_handle.show_surface(surface_id, Some(palette_surface_options()), false);
+                // Canonical in-thread lifecycle: register component, show surface, keep handle.
+                let handle = tui.show_surface(surface_id, Some(palette_surface_options()));
                 palette_handle = Some(handle);
             }
         }

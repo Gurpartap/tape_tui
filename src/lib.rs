@@ -6,7 +6,8 @@
 //! # Public API Overview
 //! - Build widgets and compose them into a runtime via [`TUI`].
 //! - Parse/inspect input with key and event helpers.
-//! - Work with overlay/surface options and handles for layered UIs.
+//! - Manage layered UI using surface lifecycle primitives (`show_surface`, [`SurfaceHandle`],
+//!   [`SurfaceOptions`]).
 //! - Use text and width helpers for ANSI-safe formatting.
 //!
 //! # Runtime Alias

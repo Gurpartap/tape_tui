@@ -117,6 +117,13 @@ pub struct TuiRuntime<T: Terminal> {
 }
 
 /// Handle used to mutate a shown surface entry.
+///
+/// Canonical lifecycle:
+/// 1. create a component,
+/// 2. show it via [`TuiRuntime::show_surface`] (or [`RuntimeHandle::show_surface`] from another
+///    thread),
+/// 3. mutate visibility/options through this handle,
+/// 4. remove it with [`SurfaceHandle::hide`] / [`SurfaceHandle::close`].
 pub struct SurfaceHandle {
     id: SurfaceId,
     runtime: RuntimeHandle,
@@ -640,6 +647,9 @@ impl RuntimeHandle {
         self.wake.alloc_surface_id()
     }
 
+    /// Queue showing a surface from a background/context handle.
+    ///
+    /// Prefer [`TuiRuntime::show_surface`] when you are already on the runtime thread.
     pub fn show_surface(
         &self,
         component_id: ComponentId,
@@ -1068,6 +1078,9 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     /// Show a surface using runtime surface semantics.
+    ///
+    /// This is the canonical in-thread API for layered UI. Use the returned [`SurfaceHandle`] to
+    /// hide/show the surface or update its options without re-registering the component.
     pub fn show_surface(
         &mut self,
         component: ComponentId,
@@ -1086,12 +1099,16 @@ impl<T: Terminal> TuiRuntime<T> {
         }
     }
 
+    /// Hide (remove) the current topmost surface, if any.
+    ///
+    /// For targeted lifecycle control of a specific surface, use [`SurfaceHandle::hide`].
     pub fn hide_surface(&mut self) {
         if let Some(surface) = self.overlays.entries.last().copied() {
             self.dispatch_focus_overlay_command(Command::HideSurface(surface.id));
         }
     }
 
+    /// Returns `true` when at least one visible surface is currently active.
     pub fn has_surface(&self) -> bool {
         self.overlays.has_visible(
             self.terminal.columns() as usize,
@@ -1934,7 +1951,10 @@ impl<T: Terminal> TuiRuntime<T> {
             self.emit_runtime_diagnostic(
                 "error",
                 missing_id_code,
-                format!("{action_label} references missing id {}", surface_id.raw()),
+                format!(
+                    "{action_label} references missing surface id {}",
+                    surface_id.raw()
+                ),
             );
             return false;
         };
@@ -1968,7 +1988,10 @@ impl<T: Terminal> TuiRuntime<T> {
             self.emit_runtime_diagnostic(
                 "error",
                 missing_id_code,
-                format!("{action_label} references missing id {}", surface_id.raw()),
+                format!(
+                    "{action_label} references missing surface id {}",
+                    surface_id.raw()
+                ),
             );
             return false;
         };
