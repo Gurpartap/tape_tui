@@ -432,6 +432,10 @@ pub enum Command {
         surface_id: SurfaceId,
         options: Option<SurfaceOptions>,
     },
+    BringSurfaceToFront(SurfaceId),
+    SendSurfaceToBack(SurfaceId),
+    RaiseSurface(SurfaceId),
+    LowerSurface(SurfaceId),
     SurfaceTransaction {
         mutations: Vec<SurfaceTransactionMutation>,
     },
@@ -477,6 +481,20 @@ impl std::fmt::Debug for Command {
                 .field("surface_id", surface_id)
                 .field("options", options)
                 .finish(),
+            Self::BringSurfaceToFront(surface_id) => f
+                .debug_tuple("BringSurfaceToFront")
+                .field(surface_id)
+                .finish(),
+            Self::SendSurfaceToBack(surface_id) => f
+                .debug_tuple("SendSurfaceToBack")
+                .field(surface_id)
+                .finish(),
+            Self::RaiseSurface(surface_id) => {
+                f.debug_tuple("RaiseSurface").field(surface_id).finish()
+            }
+            Self::LowerSurface(surface_id) => {
+                f.debug_tuple("LowerSurface").field(surface_id).finish()
+            }
             Self::SurfaceTransaction { mutations } => f
                 .debug_struct("SurfaceTransaction")
                 .field("mutations", mutations)
@@ -738,6 +756,26 @@ impl RuntimeHandle {
             id,
             runtime: self.clone(),
         }
+    }
+
+    /// Move an existing surface to the top of the stack.
+    pub fn bring_surface_to_front(&self, surface_id: SurfaceId) {
+        self.dispatch(Command::BringSurfaceToFront(surface_id));
+    }
+
+    /// Move an existing surface to the bottom of the stack.
+    pub fn send_surface_to_back(&self, surface_id: SurfaceId) {
+        self.dispatch(Command::SendSurfaceToBack(surface_id));
+    }
+
+    /// Move an existing surface one position toward the top of the stack.
+    pub fn raise_surface(&self, surface_id: SurfaceId) {
+        self.dispatch(Command::RaiseSurface(surface_id));
+    }
+
+    /// Move an existing surface one position toward the bottom of the stack.
+    pub fn lower_surface(&self, surface_id: SurfaceId) {
+        self.dispatch(Command::LowerSurface(surface_id));
     }
 
     /// Queue an ordered transaction of surface lifecycle mutations.
@@ -1822,6 +1860,26 @@ impl<T: Terminal> TuiRuntime<T> {
                         surface_id,
                         options,
                     }) {
+                        render_requested = true;
+                    }
+                }
+                Command::BringSurfaceToFront(surface_id) => {
+                    if self.apply_surface_mutation(SurfaceMutation::BringToFront { surface_id }) {
+                        render_requested = true;
+                    }
+                }
+                Command::SendSurfaceToBack(surface_id) => {
+                    if self.apply_surface_mutation(SurfaceMutation::SendToBack { surface_id }) {
+                        render_requested = true;
+                    }
+                }
+                Command::RaiseSurface(surface_id) => {
+                    if self.apply_surface_mutation(SurfaceMutation::Raise { surface_id }) {
+                        render_requested = true;
+                    }
+                }
+                Command::LowerSurface(surface_id) => {
+                    if self.apply_surface_mutation(SurfaceMutation::Lower { surface_id }) {
                         render_requested = true;
                     }
                 }
@@ -3313,6 +3371,10 @@ mod tests {
             surface_id: SurfaceId::from_raw(55),
             hidden: true,
         });
+        handle.dispatch(Command::BringSurfaceToFront(SurfaceId::from_raw(56)));
+        handle.dispatch(Command::SendSurfaceToBack(SurfaceId::from_raw(57)));
+        handle.dispatch(Command::RaiseSurface(SurfaceId::from_raw(58)));
+        handle.dispatch(Command::LowerSurface(SurfaceId::from_raw(59)));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             runtime.run_once();
         }));
@@ -3345,6 +3407,22 @@ mod tests {
         assert!(
             diagnostics.contains("command.set_surface_hidden.missing_surface_id"),
             "expected set-surface-hidden missing id diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.bring_surface_to_front.missing_surface_id"),
+            "expected bring-to-front missing id diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.send_surface_to_back.missing_surface_id"),
+            "expected send-to-back missing id diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.raise_surface.missing_surface_id"),
+            "expected raise-surface missing id diagnostic, got: {diagnostics:?}"
+        );
+        assert!(
+            diagnostics.contains("command.lower_surface.missing_surface_id"),
+            "expected lower-surface missing id diagnostic, got: {diagnostics:?}"
         );
 
         assert_eq!(
@@ -4810,6 +4888,172 @@ mod tests {
 
         assert!(runtime.surfaces.entries.is_empty());
         assert!(*root_focus.borrow());
+    }
+
+    #[test]
+    fn runtime_handle_reorder_helpers_drive_capture_precedence() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_component_id = runtime.register_component(surface_a_component);
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_component_id = runtime.register_component(surface_b_component);
+
+        let capture_options = Some(SurfaceOptions {
+            input_policy: SurfaceInputPolicy::Capture,
+            kind: SurfaceKind::Modal,
+            ..Default::default()
+        });
+
+        let handle = runtime.runtime_handle();
+        let surface_a = handle.show_surface(surface_a_component_id, capture_options, false);
+        let surface_b = handle.show_surface(surface_b_component_id, capture_options, false);
+        runtime.run_once();
+
+        let clear_inputs = || {
+            root_inputs.borrow_mut().clear();
+            surface_a_inputs.borrow_mut().clear();
+            surface_b_inputs.borrow_mut().clear();
+        };
+
+        clear_inputs();
+        runtime.handle_input("0");
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["0".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+
+        handle.lower_surface(surface_b.id);
+        runtime.run_once();
+        clear_inputs();
+        runtime.handle_input("1");
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["1".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+
+        handle.raise_surface(surface_b.id);
+        runtime.run_once();
+        clear_inputs();
+        runtime.handle_input("2");
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["2".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+
+        handle.send_surface_to_back(surface_b.id);
+        runtime.run_once();
+        clear_inputs();
+        runtime.handle_input("3");
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["3".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+
+        handle.bring_surface_to_front(surface_b.id);
+        runtime.run_once();
+        clear_inputs();
+        runtime.handle_input("4");
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["4".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
+
+        assert_eq!(
+            runtime
+                .surfaces
+                .entries
+                .iter()
+                .map(|entry| entry.id.raw())
+                .collect::<Vec<_>>(),
+            vec![surface_a.id.raw(), surface_b.id.raw()]
+        );
+    }
+
+    #[test]
+    fn reorder_commands_apply_before_input_within_same_tick() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_id = runtime.register_component(surface_a_component);
+        let surface_a = runtime.show_surface(
+            surface_a_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_id = runtime.register_component(surface_b_component);
+        let surface_b = runtime.show_surface(
+            surface_b_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+        runtime.run_once();
+
+        root_inputs.borrow_mut().clear();
+        surface_a_inputs.borrow_mut().clear();
+        surface_b_inputs.borrow_mut().clear();
+
+        let handle = runtime.runtime_handle();
+        handle.lower_surface(surface_b.id);
+        runtime.wake.enqueue_input("z".to_string());
+
+        runtime.run_once();
+
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["z".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
+        assert_eq!(
+            runtime
+                .surfaces
+                .entries
+                .iter()
+                .map(|entry| entry.id.raw())
+                .collect::<Vec<_>>(),
+            vec![surface_b.id.raw(), surface_a.id.raw()]
+        );
     }
 
     #[test]
