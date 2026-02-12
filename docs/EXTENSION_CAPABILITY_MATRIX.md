@@ -15,7 +15,7 @@ The goal is a crisp, auditable map of what extensions can do or access today.
 | Observe runtime diagnostics | No dedicated runtime diagnostic hook | `TuiRuntime::set_on_diagnostic(..)` | Rust exposes structured runtime warnings/errors for invalid IDs and custom command failures. |
 | Define a custom component | `Component` interface | `Component` trait | Both require `render` and input handling hooks. |
 | Focus handling and IME cursor marker | `Focusable`, `CURSOR_MARKER` | `Focusable`, `CURSOR_MARKER` | Equivalent concept. |
-| Overlay creation and management | `OverlayOptions`, `OverlayHandle`, `TUI.showOverlay()` | Not exported | Rust runtime/public API is surface-only; overlay lifecycle entrypoints are intentionally absent. |
+| Overlay creation and management (TS API) | `OverlayOptions`, `OverlayHandle`, `TUI.showOverlay()` | Not exported | Rust runtime/public API is surface-only; legacy overlay lifecycle entrypoints are intentionally absent. |
 | Surface creation and management | No first-class surface API | `SurfaceOptions`, `SurfaceHandle`, `SurfaceKind`, `SurfaceInputPolicy`, `TuiRuntime::show_surface()` | Rust provides the canonical transient-layer API for host/extension composition. |
 | Surface input arbitration semantics | Implicit transient-layer event flow | Runtime-managed capture-first arbitration with internal `Consumed`/`Ignored` bubbling to deterministic fallback targets | Passthrough surfaces do not own input; ignored capture events bubble to pre-focus/focused/root fallback targets. |
 | Surface positioning types | `OverlayAnchor`, `OverlayMargin`, `SizeValue` | `SurfaceAnchor`, `SurfaceMargin`, `SurfaceSizeValue` (+ `SurfaceKind` lane defaults) | Rust preserves geometry semantics while using surface-native type names. |

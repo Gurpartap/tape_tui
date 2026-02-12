@@ -208,6 +208,8 @@ Render scheduling is **coalesced**: `run_blocking_once()` waits for an event, th
 
 The `DiffRenderer` keeps `previous_lines` and only emits ANSI cursor-move + rewrite sequences for lines that changed. On width changes, it does a full clear. All renders are wrapped in synchronized output (`CSI ?2026 h/l`) to prevent flicker.
 
+It also includes a deterministic insert-before optimization for transcript growth above the previous viewport. That path activates only when strict safety checks pass (stable width/state bookkeeping, cursor safety, no surface composition, no image lines, and pure insertion-before shape). When eligible, the renderer emits a bounded scroll-loop + viewport repaint sequence; otherwise it falls back to the baseline full-redraw behavior.
+
 ### 5. Surface Compositing
 
 Surfaces are a managed stack on top of the root component.
@@ -242,8 +244,7 @@ Z-order mutations are available through three coherent paths:
 - SurfaceHandle ergonomics (`bring_to_front`, `send_to_back`, `raise`, `lower`) that enqueue commands and apply at tick boundaries.
 
 Transaction non-goals remain explicit in architecture scope:
-- transaction payloads do not yet include z-order mutation variants,
-- no insert-before viewport fast path.
+- transaction payloads do not yet include z-order mutation variants.
 
 ### 6. Input Pipeline
 

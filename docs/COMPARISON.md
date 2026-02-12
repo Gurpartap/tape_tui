@@ -7,7 +7,7 @@ Comparison of the Rust `tape_tui` port against the TypeScript reference at `pi-m
 | Metric | TypeScript (reference) | Rust (port) |
 |--------|----------------------|-------------|
 | Source LOC | ~9,500 | ~18,700 |
-| Test coverage footprint | ~6,500 LOC (17 test files) | `cargo test -- --list`: 245 tests; `cargo test --features unsafe-terminal-access -- --list`: 246 tests |
+| Test coverage footprint | ~6,500 LOC (17 test files) | `cargo test`: 278 tests; `cargo test --features unsafe-terminal-access`: 279 tests |
 | Dependencies | `get-east-asian-width`, `Intl.Segmenter`, Node stdlib | 6 crates (libc, signal-hook, unicode-*, emojis, markdown) |
 | Files | 23 source files | 30 source files |
 
@@ -74,7 +74,13 @@ The Rust runtime now emits structured diagnostics for mutation-path failures (fo
 
 The Rust runtime now centralizes inline viewport anchoring/clamp bookkeeping in a dedicated runtime helper (`runtime/inline_viewport.rs`) and recomputes it deterministically on resize/content updates. The TypeScript reference keeps this logic distributed in runtime/app paths.
 
-### 11. Atomic Surface Transaction Commands ★
+### 11. Deterministic Insert-Before Viewport Fast Path ★★
+
+The Rust renderer now includes a dedicated insert-before optimization for transcript growth above the active viewport. Activation is guarded by explicit deterministic preconditions (stable width, bookkeeping/cursor safety, no surface composition, no image lines, and pure insertion-before shape checks). When the preconditions pass, the renderer emits a bounded scroll-loop + viewport repaint sequence; when any precondition fails, it falls back to the baseline full-redraw path.
+
+This gives the port a performance and churn-stability advantage for transcript-prepend workloads while preserving visible-output parity and deterministic cursor behavior.
+
+### 12. Atomic Surface Transaction Commands ★
 
 The Rust runtime exposes an explicit transaction command path (`SurfaceTransactionMutation` +
 `Command::SurfaceTransaction`) and ergonomic runtime/runtime-handle/custom-command entrypoints for
@@ -83,7 +89,7 @@ reconciliation/render decision stage and ordered diagnostics for mixed valid/inv
 payloads. The TypeScript reference does not expose an equivalent first-class transaction payload for
 surface lifecycle operations.
 
-### 12. Deterministic Two-Pass Surface Budgeting ★★
+### 13. Deterministic Two-Pass Surface Budgeting ★★
 
 The Rust runtime now performs visible-surface sizing with an explicit measure → allocate → render
 flow. In constrained terminals, lane reservations are allocated deterministically and clamped to
@@ -100,7 +106,7 @@ pass without this explicit runtime negotiation stage.
 
 This is the most significant gap. The TS reference has **6,500 LOC** of dedicated test files covering:
 - `editor.test.ts` (2,628 LOC) — exhaustive cursor/selection/edit/undo tests
-- `overlay-options.test.ts` (538 LOC) — all anchor/margin/percent/clamp combinations
+- `overlay-options.test.ts` (538 LOC) — exhaustive overlay anchor/margin/percent/clamp combinations
 - `stdin-buffer.test.ts` (422 LOC) — partial sequence, paste, timeout edge cases
 - `autocomplete.test.ts` (375 LOC) — prefix parsing, quoting, completion application
 - `keys.test.ts` (343 LOC) — Kitty + legacy + ambiguity rules
@@ -137,10 +143,10 @@ The Rust runtime uses a `ComponentId` + registry model for ownership-safe mutati
 | Width calculation | `get-east-asian-width` + `Intl.Segmenter` + LRU cache | `unicode-width` + `unicode-segmentation` + `emojis` crate | Different implementations, both correct. TS uses a 512-entry cache; Rust doesn't (but Rust is faster baseline). |
 | Markdown parser | `marked` (not visible in deps, probably workspace) | `markdown` crate | Different parsers, potentially different edge cases. |
 | ANSI tracker | `AnsiCodeTracker` class with mutable state | Inline in `text/slice.rs` + `text/ansi.rs` | Same granularity of SGR tracking. |
-| Surface compositing | Single-pass overlay layout/compositing in transient-layer path | Two-pass runtime negotiation (measure + allocate) before compositing | Rust adds surface kinds (`Modal`, `Drawer`, `Corner`, `Toast`, `AttachmentRow`) plus deterministic lane-budget allocation and clamped constrained-size behavior. |
-| Transient-layer visibility API | `OverlayOptions.visible(termWidth, termHeight)` callback can decide visibility dynamically | `SurfaceVisibility` enum-based checks (`Always`, `MinCols`, `MinSize`) on `SurfaceLayoutOptions` | **Current divergence:** Rust uses deterministic enum-based visibility rules instead of a user callback. |
-| Input routing with transient layers | Overlay event handling done through TS runtime layering/focus mechanics | Deterministic capture-first arbitration with internal `Consumed`/`Ignored` bubbling to pre-focus/focused/root fallback targets | Rust now has explicit `SurfaceInputPolicy::{Capture, Passthrough}` semantics for host/extension composition. |
-| Surface lifecycle batching | Sequential overlay operations | Explicit ordered transaction payloads (`SurfaceTransactionMutation`) plus single-op APIs | Rust adds first-class atomic batching while preserving single-op paths. |
+| Surface compositing | Single-pass overlay layout/compositing in the TS runtime path | Two-pass runtime negotiation (measure + allocate) before compositing | Rust adds surface kinds (`Modal`, `Drawer`, `Corner`, `Toast`, `AttachmentRow`) plus deterministic lane-budget allocation and clamped constrained-size behavior. |
+| Overlay visibility API (TS) | TS callback-based visibility via `OverlayOptions.visible(termWidth, termHeight)` | `SurfaceVisibility` enum-based checks (`Always`, `MinCols`, `MinSize`) on `SurfaceLayoutOptions` | **Current divergence:** Rust uses deterministic enum-based visibility rules instead of a user callback. |
+| Input routing with overlays/transient layers | TS overlay event handling via runtime layering/focus mechanics | Deterministic capture-first arbitration with internal `Consumed`/`Ignored` bubbling to pre-focus/focused/root fallback targets | Rust now has explicit `SurfaceInputPolicy::{Capture, Passthrough}` semantics for host/extension composition. |
+| Surface lifecycle batching | Sequential overlay operations in TS | Explicit ordered transaction payloads (`SurfaceTransactionMutation`) plus single-op APIs | Rust adds first-class atomic batching while preserving single-op paths. |
 | Kitty keyboard protocol | Same query → detect → enable flow | Ported faithfully | Same flag 1+2+4 semantics, same base-layout-key fallback logic. |
 | Image support | Kitty + iTerm2 detection/encoding | Ported faithfully | Both detect via env vars. |
 | Render scheduling boundary | `process.nextTick` microtask boundary | Bounded, non-blocking coalescing window in `run_blocking_once()` | Semantic difference; both coalesce. |

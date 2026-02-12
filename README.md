@@ -11,6 +11,7 @@ This crate started as a Rust port of the TypeScript `pi-tui` library and has sin
 - **Inline-first** transcript rendering (scrollback preserved)
 - **Deterministic output** via a single terminal output gate (`OutputGate::flush(..)`)
 - ANSI **diff renderer** (fast repaints without clearing the whole screen)
+- Deterministic inline insert-before fast path (safe eligibility + strict fallback)
 - **Surface stack** (drawers/modals/toasts/etc.) with explicit input routing policies
 - Deterministic two-pass surface size negotiation (measure → allocate → render)
 - Deterministic surface z-order controls (`bring_to_front`, `send_to_back`, `raise`, `lower`)
@@ -66,7 +67,7 @@ or raw `RuntimeHandle::dispatch(...)`.
 
 Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root).
 
-Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers). Internally, geometry resolution and compositing are surface-native (`render::surface`) with no overlay compatibility layer.
+Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers). Internally, geometry resolution and compositing are fully surface-native (`render::surface`).
 
 Two-pass sizing contract for visible surfaces:
 1. **Measure pass:** derive deterministic per-surface constraints from `SurfaceOptions` (`SurfaceKind` lane + layout width/height constraints).
@@ -100,8 +101,14 @@ Transactions compose with existing APIs (single-op commands, `SurfaceHandle`, cu
 instead of replacing them.
 
 Current non-goals for transaction semantics:
-- transaction payloads do not currently include z-order mutation variants (use handle/runtime z-order commands),
-- no viewport insert-before fast path.
+- transaction payloads do not currently include z-order mutation variants (use handle/runtime z-order commands).
+
+Inline insert-before fast path contract (renderer optimization):
+- activates only under deterministic safety checks (stable width, no surfaces, no image lines,
+  cursor/bookkeeping safety, and pure insertion before the previous viewport),
+- emits an optimized scroll-loop + viewport repaint sequence when eligible,
+- falls back to the baseline full-redraw path whenever any precondition fails,
+- preserves baseline visible semantics while keeping output routed through the same output gate.
 
 ### Single output gate (invariant)
 
