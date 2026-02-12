@@ -815,6 +815,26 @@ impl SurfaceHandle {
             options,
         });
     }
+
+    /// Move this surface to the top of the z-order stack.
+    pub fn bring_to_front(&self) {
+        self.runtime.bring_surface_to_front(self.id);
+    }
+
+    /// Move this surface to the bottom of the z-order stack.
+    pub fn send_to_back(&self) {
+        self.runtime.send_surface_to_back(self.id);
+    }
+
+    /// Move this surface one step toward the top of the z-order stack.
+    pub fn raise(&self) {
+        self.runtime.raise_surface(self.id);
+    }
+
+    /// Move this surface one step toward the bottom of the z-order stack.
+    pub fn lower(&self) {
+        self.runtime.lower_surface(self.id);
+    }
 }
 
 impl<T: Terminal> CustomCommandRuntimeOps for TuiRuntime<T> {
@@ -6301,6 +6321,145 @@ mod tests {
 
         runtime.run_once();
         assert!(runtime.surfaces.entries.is_empty());
+    }
+
+    #[test]
+    fn surface_handle_reorder_methods_queue_commands_and_apply_deterministically() {
+        let terminal = TestTerminal::new(80, 24);
+
+        let root_inputs = Rc::new(RefCell::new(Vec::new()));
+        let root_focus = Rc::new(RefCell::new(false));
+        let root_component =
+            TestComponent::new(false, Rc::clone(&root_inputs), Rc::clone(&root_focus));
+        let (mut runtime, root_id) = runtime_with_root(terminal, root_component);
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.run_once();
+
+        let surface_a_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_a_focus = Rc::new(RefCell::new(false));
+        let surface_a_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_a_inputs),
+            Rc::clone(&surface_a_focus),
+        );
+        let surface_a_id = runtime.register_component(surface_a_component);
+        let surface_a = runtime.show_surface(
+            surface_a_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+
+        let surface_b_inputs = Rc::new(RefCell::new(Vec::new()));
+        let surface_b_focus = Rc::new(RefCell::new(false));
+        let surface_b_component = TestComponent::new(
+            false,
+            Rc::clone(&surface_b_inputs),
+            Rc::clone(&surface_b_focus),
+        );
+        let surface_b_id = runtime.register_component(surface_b_component);
+        let surface_b = runtime.show_surface(
+            surface_b_id,
+            Some(SurfaceOptions {
+                input_policy: SurfaceInputPolicy::Capture,
+                kind: SurfaceKind::Modal,
+                ..Default::default()
+            }),
+        );
+
+        runtime.run_once();
+
+        let stack_order = |runtime: &TuiRuntime<TestTerminal>| {
+            runtime
+                .surfaces
+                .entries
+                .iter()
+                .map(|entry| entry.id.raw())
+                .collect::<Vec<_>>()
+        };
+        let clear_inputs = || {
+            root_inputs.borrow_mut().clear();
+            surface_a_inputs.borrow_mut().clear();
+            surface_b_inputs.borrow_mut().clear();
+        };
+
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_b.id.raw()]
+        );
+
+        clear_inputs();
+        runtime.handle_input("0");
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["0".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+
+        surface_a.bring_to_front();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_b.id.raw()]
+        );
+        runtime.run_once();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_b.id.raw(), surface_a.id.raw()]
+        );
+
+        clear_inputs();
+        runtime.handle_input("1");
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["1".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+
+        surface_a.send_to_back();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_b.id.raw(), surface_a.id.raw()]
+        );
+        runtime.run_once();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_b.id.raw()]
+        );
+
+        clear_inputs();
+        runtime.handle_input("2");
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["2".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+
+        surface_a.raise();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_b.id.raw()]
+        );
+        runtime.run_once();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_b.id.raw(), surface_a.id.raw()]
+        );
+
+        clear_inputs();
+        runtime.handle_input("3");
+        assert_eq!(surface_a_inputs.borrow().as_slice(), &["3".to_string()]);
+        assert!(surface_b_inputs.borrow().is_empty());
+
+        surface_a.lower();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_b.id.raw(), surface_a.id.raw()]
+        );
+        runtime.run_once();
+        assert_eq!(
+            stack_order(&runtime),
+            vec![surface_a.id.raw(), surface_b.id.raw()]
+        );
+
+        clear_inputs();
+        runtime.handle_input("4");
+        assert_eq!(surface_b_inputs.borrow().as_slice(), &["4".to_string()]);
+        assert!(surface_a_inputs.borrow().is_empty());
+        assert!(root_inputs.borrow().is_empty());
     }
 
     #[test]
