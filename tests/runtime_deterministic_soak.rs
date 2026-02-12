@@ -191,6 +191,81 @@ impl Focusable for ProbeComponent {
     }
 }
 
+#[derive(Clone)]
+struct TranscriptState {
+    lines: Arc<Mutex<Vec<String>>>,
+    cursor_col: Arc<Mutex<usize>>,
+}
+
+impl TranscriptState {
+    fn new(lines: Vec<String>, cursor_col: usize) -> Self {
+        Self {
+            lines: Arc::new(Mutex::new(lines)),
+            cursor_col: Arc::new(Mutex::new(cursor_col)),
+        }
+    }
+
+    fn prepend_lines(&self, new_lines: &[&str]) {
+        let mut lines = self
+            .lines
+            .lock()
+            .expect("lock transcript lines for prepend");
+        for line in new_lines.iter().rev() {
+            lines.insert(0, (*line).to_string());
+        }
+    }
+
+    fn line_count(&self) -> usize {
+        self.lines
+            .lock()
+            .expect("lock transcript lines for count")
+            .len()
+    }
+
+    fn set_cursor_col(&self, cursor_col: usize) {
+        let mut col = self.cursor_col.lock().expect("lock cursor col for update");
+        *col = cursor_col;
+    }
+
+    fn cursor_col(&self) -> usize {
+        *self
+            .cursor_col
+            .lock()
+            .expect("lock cursor col for snapshot")
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .expect("lock transcript lines for snapshot")
+            .clone()
+    }
+}
+
+struct TranscriptComponent {
+    state: TranscriptState,
+}
+
+impl TranscriptComponent {
+    fn new(state: TranscriptState) -> Self {
+        Self { state }
+    }
+}
+
+impl Component for TranscriptComponent {
+    fn render(&mut self, _width: usize) -> Vec<String> {
+        self.state.lines()
+    }
+
+    fn cursor_pos(&self) -> Option<CursorPos> {
+        let row = self.state.line_count().saturating_sub(1);
+        Some(CursorPos {
+            row,
+            col: self.state.cursor_col(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FocusRoutingSnapshot {
     root_events: Vec<String>,
@@ -203,6 +278,12 @@ struct FocusRoutingSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ViewportSnapshot {
+    output: String,
+    max_cursor_column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineInsertBeforeSnapshot {
     output: String,
     max_cursor_column: usize,
 }
@@ -369,6 +450,51 @@ fn run_viewport_snapshot() -> ViewportSnapshot {
     }
 }
 
+fn run_inline_insert_before_snapshot() -> InlineInsertBeforeSnapshot {
+    let terminal = HarnessTerminal::new(8, 3);
+    let probe_terminal = terminal.clone();
+    let mut runtime = TUI::new(terminal);
+
+    runtime
+        .start()
+        .expect("start runtime for inline insert-before snapshot");
+    probe_terminal.take_writes();
+
+    let transcript_state = TranscriptState::new(
+        vec![
+            "line-0".to_string(),
+            "line-1".to_string(),
+            "line-2".to_string(),
+            "line-3".to_string(),
+            "line-4".to_string(),
+            "line-5".to_string(),
+        ],
+        42,
+    );
+
+    let root_component = TranscriptComponent::new(transcript_state.clone());
+    let root_id = runtime.register_component(root_component);
+    runtime.set_root(vec![root_id]);
+    runtime.set_focus(root_id);
+    runtime.render_now();
+    probe_terminal.take_writes();
+
+    transcript_state.prepend_lines(&["history-a", "history-b"]);
+    transcript_state.set_cursor_col(42);
+
+    runtime.render_now();
+    let output = probe_terminal.take_writes();
+
+    runtime
+        .stop()
+        .expect("stop runtime for inline insert-before snapshot");
+
+    InlineInsertBeforeSnapshot {
+        max_cursor_column: max_cursor_column(&output),
+        output,
+    }
+}
+
 fn run_visibility_toggle_snapshot() -> VisibilityToggleSnapshot {
     let terminal = HarnessTerminal::new(10, 3);
     let probe_terminal = terminal.clone();
@@ -481,6 +607,28 @@ fn deterministic_viewport_window_and_cursor_bounds_repeat_cleanly() {
 
     for _ in 1..SOAK_RUNS {
         let rerun = run_viewport_snapshot();
+        assert_eq!(rerun, baseline);
+    }
+}
+
+#[test]
+fn deterministic_inline_insert_before_growth_preserves_history_and_cursor_bounds() {
+    let baseline = run_inline_insert_before_snapshot();
+
+    assert!(
+        baseline.output.contains("history-a") && baseline.output.contains("history-b"),
+        "expected inline transcript growth output to include prepended history lines: {:?}",
+        baseline.output
+    );
+    assert!(
+        baseline.max_cursor_column <= 8,
+        "cursor column exceeded terminal width after insert-before growth: {}\noutput={:?}",
+        baseline.max_cursor_column,
+        baseline.output
+    );
+
+    for _ in 1..SOAK_RUNS {
+        let rerun = run_inline_insert_before_snapshot();
         assert_eq!(rerun, baseline);
     }
 }

@@ -762,6 +762,36 @@ mod tests {
     }
 
     #[test]
+    fn prepend_growth_keeps_tail_viewport_cursor_clamp_deterministic() {
+        let mut renderer = DiffRenderer::new();
+        let height = 3;
+
+        let base_lines: Vec<String> = (0..6).map(|i| format!("line-{i}")).collect();
+        renderer.render(base_lines.clone().into(), 80, height, false, false);
+
+        let mut grown_lines = vec!["history-a".to_string(), "history-b".to_string()];
+        grown_lines.extend(base_lines);
+        let output = cmds_to_bytes(renderer.render(grown_lines.into(), 80, height, false, false));
+
+        assert!(
+            output.contains("history-a") && output.contains("history-b"),
+            "expected emitted bytes to include prepended history lines, got: {output:?}"
+        );
+        assert_eq!(renderer.previous_lines_len(), 8);
+        assert_eq!(renderer.max_lines_rendered(), 8);
+
+        let viewport_top = renderer.max_lines_rendered().saturating_sub(height);
+        renderer.apply_out_of_band_move_by(-1000, height);
+        assert_eq!(renderer.hardware_cursor_row(), viewport_top);
+
+        renderer.apply_out_of_band_move_by(1000, height);
+        assert_eq!(
+            renderer.hardware_cursor_row(),
+            viewport_top + height.saturating_sub(1)
+        );
+    }
+
+    #[test]
     fn reset_for_external_clear_screen_causes_next_render_to_behave_like_first_render() {
         let mut renderer = DiffRenderer::new();
 
