@@ -21,6 +21,7 @@ use crate::render::renderer::DiffRenderer;
 use crate::render::Frame;
 use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::ime::position_hardware_cursor;
+use crate::runtime::inline_viewport::InlineViewportState;
 use crate::runtime::overlay::{OverlayId, OverlayOptions};
 use crate::runtime::surface::{
     SurfaceEntry as OverlayEntry, SurfaceId, SurfaceInputPolicy, SurfaceKind, SurfaceOptions,
@@ -105,6 +106,7 @@ pub struct TuiRuntime<T: Terminal> {
     stopped: bool,
     wake: Arc<RuntimeWake>,
     coalesce_budget: CoalesceBudget,
+    inline_viewport: InlineViewportState,
     input_buffer: String,
     cell_size_query_pending: bool,
     kitty_keyboard_enabled: bool,
@@ -847,6 +849,7 @@ impl<T: Terminal> TuiRuntime<T> {
             stopped: true,
             wake: Arc::new(RuntimeWake::default()),
             coalesce_budget: CoalesceBudget::default(),
+            inline_viewport: InlineViewportState::default(),
             input_buffer: String::new(),
             cell_size_query_pending: false,
             kitty_keyboard_enabled: false,
@@ -1588,13 +1591,6 @@ impl<T: Terminal> TuiRuntime<T> {
             }
         }
 
-        if let Some(pos) = cursor_pos {
-            let viewport_top = lines.len().saturating_sub(height);
-            if pos.row < viewport_top || pos.row >= lines.len() {
-                cursor_pos = None;
-            }
-        }
-
         // Components may emit the legacy CURSOR_MARKER APC sequence. Ensure it never
         // reaches the renderer/terminal output. If a component didn't provide typed
         // cursor metadata, use the extracted marker position as a fallback.
@@ -1608,6 +1604,10 @@ impl<T: Terminal> TuiRuntime<T> {
         if cursor_pos.is_none() {
             cursor_pos = extracted_marker_pos;
         }
+
+        self.inline_viewport.note_terminal_height(height);
+        self.inline_viewport.update_total_lines(lines.len());
+        cursor_pos = self.inline_viewport.clamp_cursor(cursor_pos);
 
         // Clamp cursor column to the terminal width to avoid emitting huge `CSI n G` moves.
         if let Some(mut pos) = cursor_pos {
@@ -2336,9 +2336,12 @@ impl<T: Terminal> TuiRuntime<T> {
     }
 
     fn dispatch_resize_event(&mut self) {
+        let rows = self.terminal.rows();
+        self.inline_viewport.note_terminal_height(rows as usize);
+
         let event = InputEvent::Resize {
             columns: self.terminal.columns(),
-            rows: self.terminal.rows(),
+            rows,
         };
         let (capture_target, fallback_target) = self.input_dispatch_targets();
         let _ = self.dispatch_event_with_bubbling(&event, capture_target, fallback_target);

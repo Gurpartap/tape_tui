@@ -2,6 +2,7 @@
 
 pub mod component_registry;
 pub mod ime;
+mod inline_viewport;
 pub mod overlay;
 pub mod surface;
 pub mod tui;
