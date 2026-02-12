@@ -12,6 +12,7 @@ This crate started as a Rust port of the TypeScript `pi-tui` library and has sin
 - **Deterministic output** via a single terminal output gate (`OutputGate::flush(..)`)
 - ANSI **diff renderer** (fast repaints without clearing the whole screen)
 - **Surface stack** (drawers/modals/toasts/etc.) with explicit input routing policies
+- Deterministic surface z-order controls (`bring_to_front`, `send_to_back`, `raise`, `lower`)
 - **Atomic surface transactions** for ordered multi-mutation lifecycle updates in one runtime command boundary
 - Deterministic capture-first bubbling (`Consumed`/`Ignored`) with focused/root fallback
 - Runtime-owned inline viewport state (tail anchor + resize clamp)
@@ -54,15 +55,23 @@ Surfaces are managed layers shown above the root component (drawers/modals/toast
 
 - a `SurfaceKind` (lane defaults)
 - a `SurfaceInputPolicy` (`Capture` or `Passthrough`) for deterministic routing
-- a `SurfaceHandle` used to hide/show/close/update options
+- a `SurfaceHandle` used to hide/show/close/update options/z-order
 
 Canonical lifecycle on the runtime thread is: register component → `tui.show_surface(...)` → mutate
-via `SurfaceHandle`. Background threads can enqueue equivalent mutations through
-`RuntimeHandle::show_surface(...)` / `RuntimeHandle::dispatch(...)`.
+via `SurfaceHandle` (`set_hidden`, `update_options`, `bring_to_front`, `send_to_back`, `raise`, `lower`).
+Background threads can enqueue equivalent mutations through `RuntimeHandle::show_surface(...)`,
+`RuntimeHandle::{bring_surface_to_front, send_surface_to_back, raise_surface, lower_surface}`,
+or raw `RuntimeHandle::dispatch(...)`.
 
 Runtime input arbitration is deterministic: the topmost visible capture surface is tried first; ignored events then bubble to a deterministic fallback target (previous focus/focused/root).
 
 Surface lifecycle control is available across all runtime mutation paths: direct runtime calls, `SurfaceHandle`, `RuntimeHandle::dispatch(..)` command flow, and custom commands (`CustomCommandCtx` surface mutation helpers). Internally, geometry resolution and compositing are surface-native (`render::surface`) with no overlay compatibility layer.
+
+Z-order mutation contract:
+- `bring_to_front` / `send_to_back` perform absolute repositioning,
+- `raise` / `lower` perform one-step adjacent swaps,
+- edge operations are deterministic no-ops,
+- hidden surfaces can be reordered without becoming input owners until visible.
 
 #### Atomic surface transactions
 
@@ -80,7 +89,7 @@ Transactions compose with existing APIs (single-op commands, `SurfaceHandle`, cu
 instead of replacing them.
 
 Current non-goals for transaction semantics:
-- no z-order control expansion,
+- transaction payloads do not currently include z-order mutation variants (use handle/runtime z-order commands),
 - no two-pass size negotiation,
 - no viewport insert-before fast path.
 

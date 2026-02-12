@@ -214,9 +214,11 @@ Each surface has:
 - **Input policy**: `Capture` or `Passthrough` for deterministic routing
 - **Surface kind**: `Modal`, `Drawer`, `Corner`, `Toast`, `AttachmentRow` for lane defaults
 - **Focus management**: `pre_focus` saves the previously focused component for restoration
+- **Z-order controls**: deterministic `bring_to_front`, `send_to_back`, `raise`, `lower` mutations
 - **Compositing**: surfaces are spliced into the base frame line-by-line using `extract_segments()` + `slice_with_width()` from the text engine
 
 Input dispatch uses an internal `Consumed`/`Ignored` result model. Runtime arbitration is capture-first, then deterministic fallback (pre-focus/focused/root) when a capture target ignores an event.
+Visible/hidden status gates input ownership even after reorder mutations; hidden surfaces can be reordered without becoming capture winners.
 
 Surface lifecycle now also supports atomic transaction commands: an ordered list of
 `SurfaceTransactionMutation` entries can be applied in one command boundary. The runtime applies
@@ -224,8 +226,13 @@ entries in-order, performs focus reconciliation after the ordered apply stage, a
 once for the transaction boundary when any effective state changed. Invalid targets emit ordered
 runtime diagnostics (`command.surface_transaction.*`) while valid entries still apply.
 
+Z-order mutations are available through three coherent paths:
+- raw runtime commands (`Command::{BringSurfaceToFront, SendSurfaceToBack, RaiseSurface, LowerSurface}`),
+- background-safe RuntimeHandle helpers (`bring_surface_to_front`, `send_surface_to_back`, `raise_surface`, `lower_surface`),
+- SurfaceHandle ergonomics (`bring_to_front`, `send_to_back`, `raise`, `lower`) that enqueue commands and apply at tick boundaries.
+
 Transaction non-goals remain explicit in architecture scope:
-- no z-order feature expansion,
+- transaction payloads do not yet include z-order mutation variants,
 - no two-pass size negotiation,
 - no insert-before viewport fast path.
 
