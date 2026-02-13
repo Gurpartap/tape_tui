@@ -24,9 +24,7 @@ impl SseStreamParser {
                 }
 
                 if let Ok(value) = serde_json::from_str::<Value>(&payload) {
-                    if let Some(event) = map_event(value) {
-                        events.push(event);
-                    }
+                    events.extend(map_event(value));
                 }
             }
         }
@@ -73,8 +71,14 @@ fn extract_data_payload(frame: &[u8]) -> Option<String> {
     }
 }
 
-fn map_event(value: Value) -> Option<CodexStreamEvent> {
-    let event_type = value.get("type")?.as_str()?.to_owned();
+fn map_event(value: Value) -> Vec<CodexStreamEvent> {
+    let Some(event_type) = value
+        .get("type")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+    else {
+        return Vec::new();
+    };
 
     match event_type.as_str() {
         "response.output_text.delta" => {
@@ -82,18 +86,18 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
                 .get("delta")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            Some(CodexStreamEvent::OutputTextDelta {
+            vec![CodexStreamEvent::OutputTextDelta {
                 delta: delta.to_owned(),
-            })
+            }]
         }
         "response.reasoning_summary_text.delta" => {
             let delta = value
                 .get("delta")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            Some(CodexStreamEvent::ReasoningSummaryTextDelta {
+            vec![CodexStreamEvent::ReasoningSummaryTextDelta {
                 delta: delta.to_owned(),
-            })
+            }]
         }
         "response.output_item.done" => {
             let id = value
@@ -106,7 +110,42 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
                 .and_then(|item| item.get("status"))
                 .and_then(|value| value.as_str())
                 .and_then(CodexResponseStatus::parse);
-            Some(CodexStreamEvent::OutputItemDone { id, status })
+
+            let mut events = vec![CodexStreamEvent::OutputItemDone {
+                id: id.clone(),
+                status,
+            }];
+
+            if value
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(|value| value.as_str())
+                == Some("function_call")
+            {
+                let call_id = value
+                    .get("item")
+                    .and_then(|item| item.get("call_id"))
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string);
+                let tool_name = value
+                    .get("item")
+                    .and_then(|item| item.get("name"))
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string);
+                let arguments = value
+                    .get("item")
+                    .and_then(|item| item.get("arguments"))
+                    .cloned();
+
+                events.push(CodexStreamEvent::ToolCallRequested {
+                    id,
+                    call_id,
+                    tool_name,
+                    arguments,
+                });
+            }
+
+            events
         }
         "response.completed" | "response.done" => {
             let status = value
@@ -116,7 +155,7 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
                 .and_then(CodexResponseStatus::parse);
 
             // Keep alias handling explicit so callers receive normalized completion.
-            Some(CodexStreamEvent::ResponseCompleted { status })
+            vec![CodexStreamEvent::ResponseCompleted { status }]
         }
         "response.failed" => {
             let message = value
@@ -126,7 +165,7 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
                 .and_then(|value| value.as_str())
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string);
-            Some(CodexStreamEvent::ResponseFailed { message })
+            vec![CodexStreamEvent::ResponseFailed { message }]
         }
         "error" => {
             let code = value
@@ -146,12 +185,12 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
                         None
                     }
                 });
-            Some(CodexStreamEvent::Error { code, message })
+            vec![CodexStreamEvent::Error { code, message }]
         }
-        _ => Some(CodexStreamEvent::Unknown {
+        _ => vec![CodexStreamEvent::Unknown {
             event_type,
             payload: value,
-        }),
+        }],
     }
 }
 

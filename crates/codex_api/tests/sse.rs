@@ -47,6 +47,54 @@ fn sse_parser_maps_done_alias_and_failed() {
 }
 
 #[test]
+fn sse_parser_maps_function_call_output_item_to_tool_call_event() {
+    let payload = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+    );
+
+    let events = SseStreamParser::parse_frames(payload);
+    assert_eq!(events.len(), 3);
+
+    assert!(matches!(
+        events.first(),
+        Some(CodexStreamEvent::OutputItemDone { id: Some(id), .. }) if id == "fc_1"
+    ));
+    assert!(matches!(
+        events.get(1),
+        Some(CodexStreamEvent::ToolCallRequested {
+            id: Some(id),
+            call_id: Some(call_id),
+            tool_name: Some(tool_name),
+            arguments: Some(serde_json::Value::String(arguments)),
+        }) if id == "fc_1"
+            && call_id == "call_1"
+            && tool_name == "read"
+            && arguments == "{\"path\":\"README.md\"}"
+    ));
+}
+
+#[test]
+fn sse_parser_preserves_malformed_function_call_payload_for_explicit_handling() {
+    let payload = concat!(
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"name\":\"bash\",\"arguments\":42}}\n\n"
+    );
+
+    let events = SseStreamParser::parse_frames(payload);
+    assert_eq!(events.len(), 2);
+
+    assert!(matches!(
+        events.get(1),
+        Some(CodexStreamEvent::ToolCallRequested {
+            id: Some(id),
+            call_id: None,
+            tool_name: Some(tool_name),
+            arguments: Some(serde_json::Value::Number(number)),
+        }) if id == "fc_2" && tool_name == "bash" && number.as_i64() == Some(42)
+    ));
+}
+
+#[test]
 fn sse_parser_keeps_unknown_typed_events_and_ignores_malformed() {
     let payload = concat!(
         "data: {\"type\":\"unknown.event\",\"foo\":\"bar\"}\n\n",

@@ -51,6 +51,14 @@ pub enum CodexStreamEvent {
         id: Option<String>,
         status: Option<CodexResponseStatus>,
     },
+    /// Normalized function-tool call event extracted from output item payloads.
+    #[serde(rename = "response.output_item.function_call")]
+    ToolCallRequested {
+        id: Option<String>,
+        call_id: Option<String>,
+        tool_name: Option<String>,
+        arguments: Option<Value>,
+    },
     #[serde(rename = "response.completed")]
     ResponseCompleted {
         #[serde(skip_serializing_if = "Option::is_none")]
