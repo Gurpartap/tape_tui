@@ -25,4 +25,31 @@ This crate ports code from OpenAI Codex `codex-rs/apply-patch`.
    - local `Cargo.toml`
    - `NOTICE`
    - `LICENSE` (Apache-2.0 text)
-3. Additional local integration tests added in `tests/engine.rs` to cover parse/apply success, malformed patches, context mismatch failure, and add/delete/update path handling.
+3. Local integration regressions in `tests/engine.rs` now cover:
+   - parse/apply success and malformed patch failure,
+   - deterministic multi-operation summary ordering,
+   - move-overwrite semantics,
+   - trailing newline normalization,
+   - partial-success persistence when later hunks fail.
+
+## Deferred integration backlog (explicitly locked for this issue-closure cycle)
+
+The following parity/features are intentionally deferred and must not be partially implemented in this cycle:
+
+1. Safety approval orchestration parity with upstream patch approval workflows.
+2. Shell/unified command interception that rewrites shell/exec apply_patch invocations into dedicated apply_patch runtime flow.
+3. Freeform/custom apply_patch mode (non-JSON function-call path).
+4. Broader Codex-native tool surface expansion beyond the current v1 mapping.
+
+## Readiness note for current issue-closure scope
+
+Safe now:
+- deterministic parser + verification behavior and explicit failure surfaces are covered by engine and wrapper tests,
+- host wrapper execution semantics are regression-tested for ordering, path safety, non-mutating verification failures, and repeated-apply predictability,
+- runtime stale-run/cancel invariants are explicitly validated with apply_patch-specific contract tests.
+
+Still deferred:
+- approval/sandbox parity orchestration,
+- shell/unified interception,
+- freeform apply_patch mode,
+- additional tool-surface expansions.

@@ -1577,6 +1577,47 @@ mod tests {
     }
 
     #[test]
+    fn normalize_run_messages_backfills_orphan_tool_call_before_user_boundary() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::UserText {
+                text: "turn-2 user".to_string(),
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+                RunMessage::UserText {
+                    text: "turn-2 user".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn normalize_run_messages_backfills_orphan_tool_call_at_end_of_history() {
         let normalized = normalize_run_messages_for_codex(vec![
             RunMessage::UserText {
@@ -1703,6 +1744,122 @@ mod tests {
                     call_id: "call_0".to_string(),
                     tool_name: "write".to_string(),
                     content: json!("ok"),
+                    is_error: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_tool_result_remaps_to_canonical_id_via_raw_id_queue() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: " call id! | item id! ".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "call id! | item id!".to_string(),
+                tool_name: "read".to_string(),
+                content: json!("file contents"),
+                is_error: false,
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call_id|fc_item_id".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call_id|fc_item_id".to_string(),
+                    tool_name: "read".to_string(),
+                    content: json!("file contents"),
+                    is_error: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_repeated_same_raw_call_id_across_turns_works() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "repeat!".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "repeat!".to_string(),
+                tool_name: "read".to_string(),
+                content: json!("first"),
+                is_error: false,
+            },
+            RunMessage::AssistantText {
+                text: "turn-1 assistant".to_string(),
+            },
+            RunMessage::UserText {
+                text: "turn-2 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "repeat!".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "repeat!".to_string(),
+                tool_name: "write".to_string(),
+                content: json!("second"),
+                is_error: false,
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "repeat".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "repeat".to_string(),
+                    tool_name: "read".to_string(),
+                    content: json!("first"),
+                    is_error: false,
+                },
+                RunMessage::AssistantText {
+                    text: "turn-1 assistant".to_string(),
+                },
+                RunMessage::UserText {
+                    text: "turn-2 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "repeat".to_string(),
+                    tool_name: "write".to_string(),
+                    arguments: json!({ "path": "README.md", "content": "updated" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "repeat".to_string(),
+                    tool_name: "write".to_string(),
+                    content: json!("second"),
                     is_error: false,
                 },
             ]
