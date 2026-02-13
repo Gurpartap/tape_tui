@@ -2,8 +2,7 @@ use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use coding_agent::app::App;
-use coding_agent::provider::RunProvider;
-use coding_agent::providers::MockProvider;
+use coding_agent::providers;
 use coding_agent::runtime::RuntimeController;
 use coding_agent::tools::BuiltinToolExecutor;
 use coding_agent::tui::AppComponent;
@@ -16,7 +15,7 @@ fn main() -> io::Result<()> {
     let mut tui = TUI::new(terminal);
     let runtime_handle = tui.runtime_handle();
 
-    let provider: Arc<dyn RunProvider> = Arc::new(MockProvider::default());
+    let provider = providers::provider_from_env().map_err(io::Error::other)?;
     let workspace_root = std::env::current_dir()?;
     let tools = BuiltinToolExecutor::new(workspace_root).map_err(io::Error::other)?;
 
