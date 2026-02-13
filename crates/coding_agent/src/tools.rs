@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -52,15 +53,6 @@ enum PatchMutation {
         destination_path: PathBuf,
         content: String,
     },
-}
-
-impl PatchMutation {
-    fn sort_key(&self) -> String {
-        match self {
-            Self::Add { path, .. } | Self::Delete { path } => path.to_string_lossy().to_string(),
-            Self::Update { source_path, .. } => source_path.to_string_lossy().to_string(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +329,7 @@ impl BuiltinToolExecutor {
         }
 
         let mut mutations = Vec::new();
+        let mut planned_existing_paths: HashSet<PathBuf> = HashSet::new();
         for (path, change) in action.changes() {
             let mutation = match change {
                 ApplyPatchFileChange::Add { content } => {
@@ -347,19 +340,23 @@ impl BuiltinToolExecutor {
                         }
                     };
 
+                    planned_existing_paths.insert(path.clone());
                     PatchMutation::Add {
                         path: resolved,
                         content: content.clone(),
                     }
                 }
                 ApplyPatchFileChange::Delete { .. } => {
-                    let resolved = match self.resolve_patch_existing_path(path) {
+                    let resolved = match self
+                        .resolve_patch_existing_or_planned_path(path, &planned_existing_paths)
+                    {
                         Ok(path) => path,
                         Err(error) => {
                             return ToolOutput::fail(self.map_apply_patch_path_error(error));
                         }
                     };
 
+                    planned_existing_paths.remove(path);
                     PatchMutation::Delete { path: resolved }
                 }
                 ApplyPatchFileChange::Update {
@@ -367,7 +364,9 @@ impl BuiltinToolExecutor {
                     new_content,
                     ..
                 } => {
-                    let source_path = match self.resolve_patch_existing_path(path) {
+                    let source_path = match self
+                        .resolve_patch_existing_or_planned_path(path, &planned_existing_paths)
+                    {
                         Ok(path) => path,
                         Err(error) => {
                             return ToolOutput::fail(self.map_apply_patch_path_error(error));
@@ -384,6 +383,15 @@ impl BuiltinToolExecutor {
                         None => source_path.clone(),
                     };
 
+                    if let Some(move_path) = move_path {
+                        if move_path != path {
+                            planned_existing_paths.remove(path);
+                        }
+                        planned_existing_paths.insert(move_path.clone());
+                    } else {
+                        planned_existing_paths.insert(path.clone());
+                    }
+
                     PatchMutation::Update {
                         source_path,
                         destination_path,
@@ -395,40 +403,51 @@ impl BuiltinToolExecutor {
             mutations.push(mutation);
         }
 
-        mutations.sort_by_key(PatchMutation::sort_key);
-
         let mut added = Vec::new();
         let mut modified = Vec::new();
         let mut deleted = Vec::new();
+        let mut writes_started = false;
 
         for mutation in mutations {
             match mutation {
                 PatchMutation::Add { path, content } => {
                     if let Some(parent) = path.parent() {
                         if let Err(error) = fs::create_dir_all(parent) {
-                            return ToolOutput::fail(format!(
-                                "apply_patch io failure while creating parent directory {}: {error}",
-                                parent.display()
+                            return ToolOutput::fail(self.format_apply_patch_io_failure(
+                                format!(
+                                    "apply_patch io failure while creating parent directory {}: {error}",
+                                    parent.display()
+                                ),
+                                writes_started,
                             ));
                         }
+                        writes_started = true;
                     }
 
                     if let Err(error) = fs::write(&path, content) {
-                        return ToolOutput::fail(format!(
-                            "apply_patch io failure while writing {}: {error}",
-                            path.display()
+                        return ToolOutput::fail(self.format_apply_patch_io_failure(
+                            format!(
+                                "apply_patch io failure while writing {}: {error}",
+                                path.display()
+                            ),
+                            writes_started,
                         ));
                     }
+                    writes_started = true;
 
                     added.push(path);
                 }
                 PatchMutation::Delete { path } => {
                     if let Err(error) = fs::remove_file(&path) {
-                        return ToolOutput::fail(format!(
-                            "apply_patch io failure while deleting {}: {error}",
-                            path.display()
+                        return ToolOutput::fail(self.format_apply_patch_io_failure(
+                            format!(
+                                "apply_patch io failure while deleting {}: {error}",
+                                path.display()
+                            ),
+                            writes_started,
                         ));
                     }
+                    writes_started = true;
 
                     deleted.push(path);
                 }
@@ -439,27 +458,39 @@ impl BuiltinToolExecutor {
                 } => {
                     if let Some(parent) = destination_path.parent() {
                         if let Err(error) = fs::create_dir_all(parent) {
-                            return ToolOutput::fail(format!(
-                                "apply_patch io failure while creating parent directory {}: {error}",
-                                parent.display()
+                            return ToolOutput::fail(self.format_apply_patch_io_failure(
+                                format!(
+                                    "apply_patch io failure while creating parent directory {}: {error}",
+                                    parent.display()
+                                ),
+                                writes_started,
                             ));
                         }
+                        writes_started = true;
                     }
 
                     if let Err(error) = fs::write(&destination_path, content) {
-                        return ToolOutput::fail(format!(
-                            "apply_patch io failure while writing {}: {error}",
-                            destination_path.display()
+                        return ToolOutput::fail(self.format_apply_patch_io_failure(
+                            format!(
+                                "apply_patch io failure while writing {}: {error}",
+                                destination_path.display()
+                            ),
+                            writes_started,
                         ));
                     }
+                    writes_started = true;
 
                     if source_path != destination_path {
                         if let Err(error) = fs::remove_file(&source_path) {
-                            return ToolOutput::fail(format!(
-                                "apply_patch io failure while removing source {}: {error}",
-                                source_path.display()
+                            return ToolOutput::fail(self.format_apply_patch_io_failure(
+                                format!(
+                                    "apply_patch io failure while removing source {}: {error}",
+                                    source_path.display()
+                                ),
+                                writes_started,
                             ));
                         }
+                        writes_started = true;
                     }
 
                     modified.push(destination_path);
@@ -527,6 +558,18 @@ impl BuiltinToolExecutor {
         self.resolve_existing_path(path.to_string_lossy().as_ref())
     }
 
+    fn resolve_patch_existing_or_planned_path(
+        &self,
+        path: &Path,
+        planned_existing_paths: &HashSet<PathBuf>,
+    ) -> Result<PathBuf, String> {
+        if planned_existing_paths.contains(path) && !path.exists() {
+            self.resolve_write_path(path.to_string_lossy().as_ref())
+        } else {
+            self.resolve_patch_existing_path(path)
+        }
+    }
+
     fn resolve_patch_write_target(&self, path: &Path) -> Result<PathBuf, String> {
         if path.exists() {
             let canonical = path
@@ -558,6 +601,16 @@ impl BuiltinToolExecutor {
             format!("apply_patch path escape rejected: {error}")
         } else {
             format!("apply_patch path validation failed: {error}")
+        }
+    }
+
+    fn format_apply_patch_io_failure(&self, message: String, writes_started: bool) -> String {
+        if writes_started {
+            format!(
+                "{message}\napply_patch warning: patch may be partially applied; filesystem writes completed before this failure"
+            )
+        } else {
+            message
         }
     }
 

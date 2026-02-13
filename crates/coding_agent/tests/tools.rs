@@ -193,12 +193,17 @@ fn apply_patch_fails_with_explicit_parse_error_on_malformed_patch() {
 }
 
 #[test]
-fn apply_patch_rejects_path_escape_outside_workspace() {
-    let workspace = tempdir().expect("temp workspace");
-    let mut executor = new_executor(workspace.path());
+fn apply_patch_rejects_path_escape_outside_workspace_without_mutating_workspace_files() {
+    let outer = tempdir().expect("outer tempdir");
+    let workspace_root = outer.path().join("workspace");
+    fs::create_dir_all(&workspace_root).expect("create workspace root");
 
+    let tracked_file = workspace_root.join("tracked.txt");
+    fs::write(&tracked_file, "safe\n").expect("seed tracked file");
+
+    let mut executor = new_executor(&workspace_root);
     let result = executor.execute(ToolCall::ApplyPatch {
-        input: "*** Begin Patch\n*** Add File: ../escape.txt\n+forbidden\n*** End Patch"
+        input: "*** Begin Patch\n*** Update File: tracked.txt\n@@\n-safe\n+unsafe\n*** Add File: ../escape.txt\n+forbidden\n*** End Patch"
             .to_string(),
     });
 
@@ -208,17 +213,26 @@ fn apply_patch_rejects_path_escape_outside_workspace() {
         "{}",
         result.content
     );
+
+    assert_eq!(
+        fs::read_to_string(&tracked_file).expect("read tracked file"),
+        "safe\n"
+    );
+    assert!(
+        !outer.path().join("escape.txt").exists(),
+        "path escape should not create a file outside workspace"
+    );
 }
 
 #[test]
-fn apply_patch_fails_with_explicit_context_mismatch() {
+fn apply_patch_context_mismatch_is_non_mutating_even_with_prior_valid_hunks() {
     let workspace = tempdir().expect("temp workspace");
     let file_path = workspace.path().join("context.txt");
     fs::write(&file_path, "line-1\nline-2\n").expect("write seed file");
 
     let mut executor = new_executor(workspace.path());
     let result = executor.execute(ToolCall::ApplyPatch {
-        input: "*** Begin Patch\n*** Update File: context.txt\n@@\n-missing-line\n+replacement\n*** End Patch"
+        input: "*** Begin Patch\n*** Update File: context.txt\n@@\n-line-1\n+line-one\n*** Update File: context.txt\n@@\n-missing-line\n+replacement\n*** End Patch"
             .to_string(),
     });
 
@@ -227,5 +241,83 @@ fn apply_patch_fails_with_explicit_context_mismatch() {
         result.content.contains("apply_patch context mismatch"),
         "{}",
         result.content
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read context file"),
+        "line-1\nline-2\n"
+    );
+}
+
+#[test]
+fn apply_patch_preserves_order_for_same_file_multi_hunk_updates() {
+    let workspace = tempdir().expect("temp workspace");
+    let file_path = workspace.path().join("ordered.txt");
+    fs::write(&file_path, "alpha\nbeta\n").expect("seed ordered file");
+
+    let mut executor = new_executor(workspace.path());
+    let result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Update File: ordered.txt\n@@\n-alpha\n+ALPHA\n*** Update File: ordered.txt\n@@\n-ALPHA\n+ALPHA!\n*** End Patch"
+            .to_string(),
+    });
+
+    assert!(result.ok, "{}", result.content);
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read ordered file"),
+        "ALPHA!\nbeta\n"
+    );
+}
+
+#[test]
+fn apply_patch_preserves_move_then_follow_up_update_order() {
+    let workspace = tempdir().expect("temp workspace");
+    let source_path = workspace.path().join("old.txt");
+    let destination_path = workspace.path().join("moved.txt");
+    fs::write(&source_path, "start\n").expect("seed source file");
+
+    let mut executor = new_executor(workspace.path());
+    let result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Update File: old.txt\n*** Move to: moved.txt\n@@\n-start\n+middle\n*** Update File: moved.txt\n@@\n-middle\n+done\n*** End Patch"
+            .to_string(),
+    });
+
+    assert!(result.ok, "{}", result.content);
+    assert!(!source_path.exists(), "source should be removed after move");
+    assert_eq!(
+        fs::read_to_string(&destination_path).expect("read moved file"),
+        "done\n"
+    );
+}
+
+#[test]
+fn apply_patch_io_failure_reports_partial_mutation_when_writes_started() {
+    let workspace = tempdir().expect("temp workspace");
+    let source_path = workspace.path().join("source.txt");
+    fs::write(&source_path, "before\n").expect("seed update source");
+    fs::create_dir_all(workspace.path().join("dir")).expect("create directory destination");
+
+    let mut executor = new_executor(workspace.path());
+    let result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Add File: created.txt\n+hello\n*** Update File: source.txt\n*** Move to: dir\n@@\n-before\n+after\n*** End Patch"
+            .to_string(),
+    });
+
+    assert!(!result.ok);
+    assert!(
+        result
+            .content
+            .contains("apply_patch io failure while writing"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("apply_patch warning: patch may be partially applied"),
+        "{}",
+        result.content
+    );
+    assert!(
+        workspace.path().join("created.txt").exists(),
+        "first mutation should remain on disk when later IO fails"
     );
 }

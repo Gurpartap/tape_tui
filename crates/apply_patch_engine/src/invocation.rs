@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use tree_sitter::Parser;
@@ -11,7 +12,9 @@ use tree_sitter_bash::LANGUAGE as BASH;
 use crate::parser::parse_patch;
 use crate::parser::Hunk;
 use crate::parser::ParseError;
+#[cfg(test)]
 use crate::unified_diff_from_chunks;
+use crate::unified_diff_from_contents;
 use crate::ApplyPatchAction;
 use crate::ApplyPatchArgs;
 use crate::ApplyPatchError;
@@ -127,6 +130,31 @@ pub fn maybe_parse_apply_patch(argv: &[String]) -> MaybeApplyPatch {
     }
 }
 
+fn read_file_from_virtual_state(
+    virtual_files: &HashMap<PathBuf, Option<String>>,
+    path: &Path,
+) -> std::result::Result<String, ApplyPatchError> {
+    if let Some(content) = virtual_files.get(path) {
+        return match content {
+            Some(content) => Ok(content.clone()),
+            None => Err(ApplyPatchError::IoError(IoError {
+                context: format!("Failed to read {}", path.display()),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "file was deleted earlier in this patch",
+                ),
+            })),
+        };
+    }
+
+    std::fs::read_to_string(path).map_err(|source| {
+        ApplyPatchError::IoError(IoError {
+            context: format!("Failed to read {}", path.display()),
+            source,
+        })
+    })
+}
+
 /// cwd must be an absolute path so that we can resolve relative paths in the
 /// patch.
 pub fn maybe_parse_apply_patch_verified(argv: &[String], cwd: &Path) -> MaybeApplyPatchVerified {
@@ -160,50 +188,80 @@ pub fn maybe_parse_apply_patch_verified(argv: &[String], cwd: &Path) -> MaybeApp
                     }
                 })
                 .unwrap_or_else(|| cwd.to_path_buf());
-            let mut changes = HashMap::new();
+
+            let mut changes = Vec::new();
+            let mut virtual_files: HashMap<PathBuf, Option<String>> = HashMap::new();
+
             for hunk in hunks {
-                let path = hunk.resolve_path(&effective_cwd);
                 match hunk {
-                    Hunk::AddFile { contents, .. } => {
-                        changes.insert(path, ApplyPatchFileChange::Add { content: contents });
+                    Hunk::AddFile { path, contents } => {
+                        let path = effective_cwd.join(path);
+                        virtual_files.insert(path.clone(), Some(contents.clone()));
+                        changes.push((path, ApplyPatchFileChange::Add { content: contents }));
                     }
-                    Hunk::DeleteFile { .. } => {
-                        let content = match std::fs::read_to_string(&path) {
+                    Hunk::DeleteFile { path } => {
+                        let path = effective_cwd.join(path);
+                        let content = match read_file_from_virtual_state(&virtual_files, &path) {
                             Ok(content) => content,
-                            Err(e) => {
-                                return MaybeApplyPatchVerified::CorrectnessError(
-                                    ApplyPatchError::IoError(IoError {
-                                        context: format!("Failed to read {}", path.display()),
-                                        source: e,
-                                    }),
-                                );
+                            Err(error) => {
+                                return MaybeApplyPatchVerified::CorrectnessError(error);
                             }
                         };
-                        changes.insert(path, ApplyPatchFileChange::Delete { content });
+                        virtual_files.insert(path.clone(), None);
+                        changes.push((path, ApplyPatchFileChange::Delete { content }));
                     }
                     Hunk::UpdateFile {
-                        move_path, chunks, ..
+                        path,
+                        move_path,
+                        chunks,
                     } => {
+                        let path = effective_cwd.join(path);
+                        let current_content =
+                            match read_file_from_virtual_state(&virtual_files, &path) {
+                                Ok(content) => content,
+                                Err(error) => {
+                                    return MaybeApplyPatchVerified::CorrectnessError(error);
+                                }
+                            };
+
                         let ApplyPatchFileUpdate {
                             unified_diff,
-                            content: contents,
-                        } = match unified_diff_from_chunks(&path, &chunks) {
+                            content: new_content,
+                        } = match unified_diff_from_contents(&path, &current_content, &chunks) {
                             Ok(diff) => diff,
-                            Err(e) => {
-                                return MaybeApplyPatchVerified::CorrectnessError(e);
+                            Err(error) => {
+                                return MaybeApplyPatchVerified::CorrectnessError(error);
                             }
                         };
-                        changes.insert(
+
+                        let move_path = move_path.map(|move_path| effective_cwd.join(move_path));
+                        match move_path.as_ref() {
+                            Some(destination_path) if destination_path != &path => {
+                                virtual_files.insert(path.clone(), None);
+                                virtual_files
+                                    .insert(destination_path.clone(), Some(new_content.clone()));
+                            }
+                            Some(destination_path) => {
+                                virtual_files
+                                    .insert(destination_path.clone(), Some(new_content.clone()));
+                            }
+                            None => {
+                                virtual_files.insert(path.clone(), Some(new_content.clone()));
+                            }
+                        }
+
+                        changes.push((
                             path,
                             ApplyPatchFileChange::Update {
                                 unified_diff,
-                                move_path: move_path.map(|p| effective_cwd.join(p)),
-                                new_content: contents,
+                                move_path,
+                                new_content,
                             },
-                        );
+                        ));
                     }
                 }
             }
+
             MaybeApplyPatchVerified::Body(ApplyPatchAction {
                 changes,
                 patch,
@@ -746,7 +804,7 @@ PATCH"#,
         assert_eq!(
             result,
             MaybeApplyPatchVerified::Body(ApplyPatchAction {
-                changes: HashMap::from([(
+                changes: vec![(
                     session_dir.path().join(relative_path),
                     ApplyPatchFileChange::Update {
                         unified_diff: r#"@@ -1 +1 @@
@@ -757,7 +815,7 @@ PATCH"#,
                         move_path: None,
                         new_content: "updated session directory content\n".to_string(),
                     },
-                )]),
+                )],
                 patch: argv[1].clone(),
                 cwd: session_dir.path().to_path_buf(),
             })
@@ -797,7 +855,9 @@ PATCH"#,
 
         let change = action
             .changes()
-            .get(&worktree_dir.join(source_name))
+            .iter()
+            .find(|(path, _)| path == &worktree_dir.join(source_name))
+            .map(|(_, change)| change)
             .expect("source file change present");
 
         match change {
@@ -806,6 +866,79 @@ PATCH"#,
                     move_path.as_deref(),
                     Some(worktree_dir.join(dest_name).as_path())
                 );
+            }
+            other => panic!("expected update change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_verification_preserves_same_file_hunk_order() {
+        let session_dir = tempdir().unwrap();
+        let source = session_dir.path().join("ordered.txt");
+        fs::write(&source, "alpha\nbeta\n").unwrap();
+
+        let patch = wrap_patch(
+            r#"*** Update File: ordered.txt
+@@
+-alpha
++ALPHA
+*** Update File: ordered.txt
+@@
+-ALPHA
++ALPHA!"#,
+        );
+
+        let argv = vec!["apply_patch".to_string(), patch];
+        let result = maybe_parse_apply_patch_verified(&argv, session_dir.path());
+        let action = match result {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified body, got {other:?}"),
+        };
+
+        assert_eq!(action.changes().len(), 2);
+
+        let (_, second_change) = action.changes().last().expect("second change exists");
+        match second_change {
+            ApplyPatchFileChange::Update { new_content, .. } => {
+                assert_eq!(new_content, "ALPHA!\nbeta\n");
+            }
+            other => panic!("expected update change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_patch_verification_uses_move_destination_for_follow_up_update() {
+        let session_dir = tempdir().unwrap();
+        let source = session_dir.path().join("old.txt");
+        fs::write(&source, "start\n").unwrap();
+
+        let patch = wrap_patch(
+            r#"*** Update File: old.txt
+*** Move to: moved.txt
+@@
+-start
++middle
+*** Update File: moved.txt
+@@
+-middle
++done"#,
+        );
+
+        let argv = vec!["apply_patch".to_string(), patch];
+        let result = maybe_parse_apply_patch_verified(&argv, session_dir.path());
+        let action = match result {
+            MaybeApplyPatchVerified::Body(action) => action,
+            other => panic!("expected verified body, got {other:?}"),
+        };
+
+        assert_eq!(action.changes().len(), 2);
+
+        let (second_path, second_change) = action.changes().last().expect("second change exists");
+        assert_eq!(second_path, &session_dir.path().join("moved.txt"));
+
+        match second_change {
+            ApplyPatchFileChange::Update { new_content, .. } => {
+                assert_eq!(new_content, "done\n");
             }
             other => panic!("expected update change, got {other:?}"),
         }

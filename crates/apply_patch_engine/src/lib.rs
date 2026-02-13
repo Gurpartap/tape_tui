@@ -3,7 +3,6 @@ mod parser;
 mod seek_sequence;
 mod standalone_executable;
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -117,7 +116,9 @@ pub enum MaybeApplyPatchVerified {
 /// construction, all paths should be absolute paths.
 #[derive(Debug, PartialEq)]
 pub struct ApplyPatchAction {
-    changes: HashMap<PathBuf, ApplyPatchFileChange>,
+    /// Planned changes in patch order. Keeping ordering here avoids semantic
+    /// collapse for repeated or dependent hunks touching the same path.
+    changes: Vec<(PathBuf, ApplyPatchFileChange)>,
 
     /// The raw patch argument that can be used with `apply_patch` as an exec
     /// call. i.e., if the original arg was parsed in "lenient" mode with a
@@ -133,8 +134,9 @@ impl ApplyPatchAction {
         self.changes.is_empty()
     }
 
-    /// Returns the changes that would be made by applying the patch.
-    pub fn changes(&self) -> &HashMap<PathBuf, ApplyPatchFileChange> {
+    /// Returns the changes that would be made by applying the patch, preserving
+    /// original patch hunk ordering.
+    pub fn changes(&self) -> &[(PathBuf, ApplyPatchFileChange)] {
         &self.changes
     }
 
@@ -157,7 +159,7 @@ impl ApplyPatchAction {
 + {content}
 *** End Patch"#,
         );
-        let changes = HashMap::from([(path.to_path_buf(), ApplyPatchFileChange::Add { content })]);
+        let changes = vec![(path.to_path_buf(), ApplyPatchFileChange::Add { content })];
         #[expect(clippy::expect_used)]
         Self {
             changes,
@@ -353,6 +355,14 @@ fn derive_new_contents_from_chunks(
         }
     };
 
+    derive_new_contents_from_text(path, original_contents, chunks)
+}
+
+fn derive_new_contents_from_text(
+    path: &Path,
+    original_contents: String,
+    chunks: &[UpdateFileChunk],
+) -> std::result::Result<AppliedPatch, ApplyPatchError> {
     let mut original_lines: Vec<String> = original_contents.split('\n').map(String::from).collect();
 
     // Drop the trailing empty element that results from the final newline so
@@ -518,6 +528,35 @@ pub fn unified_diff_from_chunks_with_context(
         original_contents,
         new_contents,
     } = derive_new_contents_from_chunks(path, chunks)?;
+    render_unified_diff(original_contents, new_contents, context)
+}
+
+pub(crate) fn unified_diff_from_contents(
+    path: &Path,
+    original_contents: &str,
+    chunks: &[UpdateFileChunk],
+) -> std::result::Result<ApplyPatchFileUpdate, ApplyPatchError> {
+    unified_diff_from_contents_with_context(path, original_contents, chunks, 1)
+}
+
+pub(crate) fn unified_diff_from_contents_with_context(
+    path: &Path,
+    original_contents: &str,
+    chunks: &[UpdateFileChunk],
+    context: usize,
+) -> std::result::Result<ApplyPatchFileUpdate, ApplyPatchError> {
+    let AppliedPatch {
+        original_contents,
+        new_contents,
+    } = derive_new_contents_from_text(path, original_contents.to_string(), chunks)?;
+    render_unified_diff(original_contents, new_contents, context)
+}
+
+fn render_unified_diff(
+    original_contents: String,
+    new_contents: String,
+    context: usize,
+) -> std::result::Result<ApplyPatchFileUpdate, ApplyPatchError> {
     let text_diff = TextDiff::from_lines(&original_contents, &new_contents);
     let unified_diff = text_diff.unified_diff().context_radius(context).to_string();
     Ok(ApplyPatchFileUpdate {
