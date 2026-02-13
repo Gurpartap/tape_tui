@@ -179,6 +179,39 @@ impl App {
         &self.conversation
     }
 
+    /// Returns tool-call arguments for a run/call identifier when present in
+    /// pending run memory (active run) or committed conversation history.
+    pub fn tool_call_arguments(&self, run_id: RunId, call_id: &str) -> Option<&serde_json::Value> {
+        if let Some(pending) = self.pending_run_memory.as_ref() {
+            if pending.run_id == run_id {
+                if let Some(arguments) =
+                    pending.entries.iter().rev().find_map(|entry| match entry {
+                        RunMessage::ToolCall {
+                            call_id: pending_call_id,
+                            arguments,
+                            ..
+                        } if pending_call_id == call_id => Some(arguments),
+                        _ => None,
+                    })
+                {
+                    return Some(arguments);
+                }
+            }
+        }
+
+        self.conversation
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                RunMessage::ToolCall {
+                    call_id: conversation_call_id,
+                    arguments,
+                    ..
+                } if conversation_call_id == call_id => Some(arguments),
+                _ => None,
+            })
+    }
+
     fn run_messages_with_pending_user_prompt(&self, prompt: &str) -> Vec<RunMessage> {
         let mut messages = self.conversation.clone();
         messages.push(RunMessage::UserText {
@@ -931,6 +964,32 @@ mod tests {
             .iter()
             .all(|message| message.run_id == Some(14)));
         assert!(app.conversation_messages().is_empty());
+    }
+
+    #[test]
+    fn tool_call_arguments_resolve_pending_then_conversation_history() {
+        let mut app = App::new();
+        app.mode = Mode::Running { run_id: 77 };
+
+        app.on_tool_call_started(
+            77,
+            "call-pending",
+            "bash",
+            &serde_json::json!({ "command": "pwd" }),
+        );
+
+        assert_eq!(
+            app.tool_call_arguments(77, "call-pending"),
+            Some(&serde_json::json!({ "command": "pwd" }))
+        );
+
+        app.on_run_finished(77);
+        assert_eq!(app.mode, Mode::Idle);
+        assert_eq!(
+            app.tool_call_arguments(77, "call-pending"),
+            Some(&serde_json::json!({ "command": "pwd" }))
+        );
+        assert_eq!(app.tool_call_arguments(77, "missing"), None);
     }
 
     #[test]

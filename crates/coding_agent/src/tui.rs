@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
 use tape_tui::core::component::Focusable;
 use tape_tui::core::cursor::CursorPos;
 use tape_tui::core::input::KeyEventType;
@@ -256,7 +257,7 @@ impl Component for AppComponent {
 
         append_wrapped_text(&mut lines, width, &render_header(), "", "");
         for message in &snapshot.transcript {
-            render_message_lines(message, width, &mut lines);
+            render_message_lines(&snapshot, message, width, &mut lines);
             lines.push(separator_line(width));
         }
 
@@ -546,7 +547,7 @@ fn spinner_glyph() -> String {
     FRAMES[(index / 120 % 4) as usize].to_string()
 }
 
-fn render_message_lines(message: &Message, width: usize, lines: &mut Vec<String>) {
+fn render_message_lines(app: &App, message: &Message, width: usize, lines: &mut Vec<String>) {
     let role_prefix = message_role_prefix(message);
 
     if message.content.is_empty() {
@@ -563,11 +564,7 @@ fn render_message_lines(message: &Message, width: usize, lines: &mut Vec<String>
             }
         }
         _ => {
-            let text_lines: Vec<String> = message
-                .content
-                .split('\n')
-                .map(ToString::to_string)
-                .collect();
+            let text_lines = message_display_lines(app, message);
             for (index, line) in text_lines.iter().enumerate() {
                 let prefix = if index == 0 {
                     format!("{role_prefix}: ")
@@ -578,6 +575,130 @@ fn render_message_lines(message: &Message, width: usize, lines: &mut Vec<String>
             }
         }
     }
+}
+
+fn message_display_lines(app: &App, message: &Message) -> Vec<String> {
+    match message.role {
+        Role::Tool => tool_message_display_lines(app, message),
+        _ => message
+            .content
+            .split('\n')
+            .map(ToString::to_string)
+            .collect(),
+    }
+}
+
+fn tool_message_display_lines(app: &App, message: &Message) -> Vec<String> {
+    let mut lines: Vec<String> = message
+        .content
+        .split('\n')
+        .map(ToString::to_string)
+        .collect();
+
+    let Some(run_id) = message.run_id else {
+        return lines;
+    };
+
+    let Some((tool_name, call_id)) = parse_tool_started_message(message.content.as_str()) else {
+        return lines;
+    };
+
+    let Some(arguments) = app.tool_call_arguments(run_id, call_id) else {
+        return lines;
+    };
+
+    lines.extend(format_tool_call_argument_lines(tool_name, arguments));
+    lines
+}
+
+fn parse_tool_started_message(content: &str) -> Option<(&str, &str)> {
+    let body = content.strip_prefix("Tool ")?;
+    let (tool_name, call_part) = body.split_once(" (")?;
+    let call_id = call_part.strip_suffix(") started")?;
+    Some((tool_name, call_id))
+}
+
+fn format_tool_call_argument_lines(tool_name: &str, arguments: &Value) -> Vec<String> {
+    match tool_name {
+        "bash" => {
+            let mut lines = Vec::new();
+            if let Some(command) = argument_string(arguments, "command") {
+                lines.push(format!("↳ command: {command}"));
+            }
+            if let Some(cwd) = argument_string(arguments, "cwd") {
+                lines.push(format!("↳ cwd: {cwd}"));
+            }
+            if let Some(timeout_sec) = argument_u64(arguments, "timeout_sec") {
+                lines.push(format!("↳ timeout_sec: {timeout_sec}"));
+            }
+            if lines.is_empty() {
+                vec![format!("↳ args: {arguments}")]
+            } else {
+                lines
+            }
+        }
+        "read" => argument_string(arguments, "path")
+            .map(|path| vec![format!("↳ path: {path}")])
+            .unwrap_or_else(|| vec![format!("↳ args: {arguments}")]),
+        "write" => {
+            let mut lines = Vec::new();
+            if let Some(path) = argument_string(arguments, "path") {
+                lines.push(format!("↳ path: {path}"));
+            }
+            if let Some(content) = argument_string(arguments, "content") {
+                lines.push(format!("↳ content: {} chars", content.chars().count()));
+            }
+            if lines.is_empty() {
+                vec![format!("↳ args: {arguments}")]
+            } else {
+                lines
+            }
+        }
+        "edit" => {
+            let mut lines = Vec::new();
+            if let Some(path) = argument_string(arguments, "path") {
+                lines.push(format!("↳ path: {path}"));
+            }
+            if let Some(old_text) = argument_string(arguments, "old_text") {
+                lines.push(format!("↳ old_text: {} chars", old_text.chars().count()));
+            }
+            if let Some(new_text) = argument_string(arguments, "new_text") {
+                lines.push(format!("↳ new_text: {} chars", new_text.chars().count()));
+            }
+            if lines.is_empty() {
+                vec![format!("↳ args: {arguments}")]
+            } else {
+                lines
+            }
+        }
+        "apply_patch" => {
+            let mut lines = Vec::new();
+            if let Some(input) = argument_string(arguments, "input") {
+                lines.push(format!("↳ patch: {} chars", input.chars().count()));
+                if let Some(first_line) = input.lines().next().filter(|line| !line.is_empty()) {
+                    lines.push(format!("↳ patch first line: {first_line}"));
+                }
+            }
+            if lines.is_empty() {
+                vec![format!("↳ args: {arguments}")]
+            } else {
+                lines
+            }
+        }
+        _ => vec![format!("↳ args: {arguments}")],
+    }
+}
+
+fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn argument_u64(arguments: &Value, key: &str) -> Option<u64> {
+    arguments.get(key).and_then(Value::as_u64)
 }
 
 fn render_markdown_lines(width: usize, text: &str) -> Vec<String> {
@@ -818,5 +939,47 @@ mod tests {
     fn view_mode_cycles_between_plan_and_build() {
         assert_eq!(ViewMode::Plan.next(), ViewMode::Build);
         assert_eq!(ViewMode::Build.next(), ViewMode::Plan);
+    }
+
+    #[test]
+    fn tool_message_display_lines_include_started_tool_arguments() {
+        let mut app = App::new();
+        app.mode = Mode::Running { run_id: 7 };
+        app.on_tool_call_started(
+            7,
+            "call-1",
+            "bash",
+            &serde_json::json!({
+                "command": "echo hello",
+                "cwd": "/tmp",
+                "timeout_sec": 30
+            }),
+        );
+
+        let message = app
+            .transcript
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .expect("tool message should exist");
+
+        let lines = tool_message_display_lines(&app, message);
+        assert_eq!(lines[0], "Tool bash (call-1) started");
+        assert!(lines.iter().any(|line| line == "↳ command: echo hello"));
+        assert!(lines.iter().any(|line| line == "↳ cwd: /tmp"));
+        assert!(lines.iter().any(|line| line == "↳ timeout_sec: 30"));
+    }
+
+    #[test]
+    fn tool_message_display_lines_leave_non_started_entries_unchanged() {
+        let app = App::new();
+        let message = Message {
+            role: Role::Tool,
+            content: "Tool bash (call-1) completed".to_string(),
+            streaming: false,
+            run_id: Some(7),
+        };
+
+        let lines = tool_message_display_lines(&app, &message);
+        assert_eq!(lines, vec!["Tool bash (call-1) completed".to_string()]);
     }
 }
