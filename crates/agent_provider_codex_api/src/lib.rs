@@ -1059,6 +1059,14 @@ fn duplicate_normalized_unresolved_tool_transport_id_error(call_id: &str) -> Str
     )
 }
 
+fn split_canonical_tool_call_id(canonical_call_id: &str) -> (&str, Option<&str>) {
+    match canonical_call_id.split_once('|') {
+        Some((transport_call_id, "")) => (transport_call_id, None),
+        Some((transport_call_id, response_item_id)) => (transport_call_id, Some(response_item_id)),
+        None => (canonical_call_id, None),
+    }
+}
+
 fn codex_input_from_run_messages(messages: &[RunMessage]) -> Result<Vec<Value>, String> {
     let mut input = Vec::with_capacity(messages.len());
     let mut assistant_message_index = 0usize;
@@ -1080,15 +1088,21 @@ fn codex_input_from_run_messages(messages: &[RunMessage]) -> Result<Vec<Value>, 
                 tool_name,
                 arguments,
             } => {
-                let call_id = sanitize_nonempty_field(call_id, "tool call call_id")?;
+                let canonical_call_id = sanitize_nonempty_field(call_id, "tool call call_id")?;
+                let (transport_call_id, response_item_id) =
+                    split_canonical_tool_call_id(canonical_call_id.as_str());
                 let tool_name = sanitize_nonempty_field(tool_name, "tool call tool_name")?;
                 let arguments_json = encode_tool_call_arguments(tool_name.as_str(), arguments)?;
-                input.push(json!({
+                let mut function_call = json!({
                     "type": "function_call",
-                    "call_id": call_id,
+                    "call_id": transport_call_id,
                     "name": tool_name,
                     "arguments": arguments_json,
-                }));
+                });
+                if let Some(response_item_id) = response_item_id {
+                    function_call["id"] = Value::String(response_item_id.to_string());
+                }
+                input.push(function_call);
             }
             RunMessage::ToolResult {
                 call_id,
@@ -1096,12 +1110,14 @@ fn codex_input_from_run_messages(messages: &[RunMessage]) -> Result<Vec<Value>, 
                 content,
                 ..
             } => {
-                let call_id = sanitize_nonempty_field(call_id, "tool result call_id")?;
+                let canonical_call_id = sanitize_nonempty_field(call_id, "tool result call_id")?;
+                let (transport_call_id, _) =
+                    split_canonical_tool_call_id(canonical_call_id.as_str());
                 let _tool_name = sanitize_nonempty_field(tool_name, "tool result tool_name")?;
                 let output = Value::String(tool_result_content_text(content));
                 input.push(json!({
                     "type": "function_call_output",
-                    "call_id": call_id,
+                    "call_id": transport_call_id,
                     "output": output,
                 }));
             }
@@ -2097,7 +2113,38 @@ mod tests {
     }
 
     #[test]
-    fn run_request_payload_normalizes_tool_call_and_tool_result_call_ids() {
+    fn codex_input_from_run_messages_splits_canonical_pipe_id_for_function_call() {
+        let input = codex_input_from_run_messages(&[RunMessage::ToolCall {
+            call_id: "call_1|fc_item_1".to_string(),
+            tool_name: "read".to_string(),
+            arguments: json!({ "path": "README.md" }),
+        }])
+        .expect("conversion should succeed");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[0]["id"], "fc_item_1");
+    }
+
+    #[test]
+    fn codex_input_from_run_messages_uses_transport_call_id_for_function_call_output() {
+        let input = codex_input_from_run_messages(&[RunMessage::ToolResult {
+            call_id: "call_1|fc_item_1".to_string(),
+            tool_name: "read".to_string(),
+            content: json!("file contents"),
+            is_error: false,
+        }])
+        .expect("conversion should succeed");
+
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert!(input[0].get("id").is_none());
+    }
+
+    #[test]
+    fn run_request_payload_normalizes_and_splits_call_ids_in_outbound_payload() {
         let stream = FakeStreamClient::success(StreamResult {
             events: Vec::new(),
             terminal: Some(CodexResponseStatus::Completed),
@@ -2118,12 +2165,12 @@ mod tests {
                             text: "turn-1 user".to_string(),
                         },
                         RunMessage::ToolCall {
-                            call_id: " call id! ".to_string(),
+                            call_id: " call id! | item id! ".to_string(),
                             tool_name: "read".to_string(),
                             arguments: json!({ "path": "README.md" }),
                         },
                         RunMessage::ToolResult {
-                            call_id: "call id!".to_string(),
+                            call_id: "call id! | item id!".to_string(),
                             tool_name: "read".to_string(),
                             content: json!("file contents"),
                             is_error: false,
@@ -2145,8 +2192,10 @@ mod tests {
             .expect("initial request input should be an array");
         assert_eq!(initial_input[1]["type"], "function_call");
         assert_eq!(initial_input[1]["call_id"], "call_id");
+        assert_eq!(initial_input[1]["id"], "fc_item_id");
         assert_eq!(initial_input[2]["type"], "function_call_output");
         assert_eq!(initial_input[2]["call_id"], "call_id");
+        assert!(initial_input[2].get("id").is_none());
 
         assert!(matches!(
             events.as_slice(),
@@ -2796,10 +2845,11 @@ mod tests {
         assert_eq!(follow_up_input[0]["content"][0]["type"], "input_text");
         assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
         assert_eq!(follow_up_input[1]["type"], "function_call");
-        assert_eq!(follow_up_input[1]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[1]["call_id"], "call_1");
+        assert_eq!(follow_up_input[1]["id"], "fc_1");
         assert_eq!(follow_up_input[1]["name"], "read");
         assert_eq!(follow_up_input[2]["type"], "function_call_output");
-        assert_eq!(follow_up_input[2]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[2]["call_id"], "call_1");
         assert_eq!(follow_up_input[2]["output"], "file contents");
 
         assert!(matches!(
@@ -2845,9 +2895,10 @@ mod tests {
             .as_array()
             .expect("follow-up request input should be an array");
         assert_eq!(follow_up_input[1]["type"], "function_call");
-        assert_eq!(follow_up_input[1]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[1]["call_id"], "call_1");
+        assert_eq!(follow_up_input[1]["id"], "fc_1");
         assert_eq!(follow_up_input[2]["type"], "function_call_output");
-        assert_eq!(follow_up_input[2]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[2]["call_id"], "call_1");
         assert_eq!(follow_up_input[2]["output"], "tool output");
 
         assert!(matches!(
@@ -2918,9 +2969,10 @@ mod tests {
         assert_eq!(follow_up_input[2]["role"], "user");
         assert_eq!(follow_up_input[2]["content"][0]["text"], "turn-2 user");
         assert_eq!(follow_up_input[3]["type"], "function_call");
-        assert_eq!(follow_up_input[3]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[3]["call_id"], "call_1");
+        assert_eq!(follow_up_input[3]["id"], "fc_1");
         assert_eq!(follow_up_input[4]["type"], "function_call_output");
-        assert_eq!(follow_up_input[4]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[4]["call_id"], "call_1");
         assert_eq!(follow_up_input[4]["output"], "tool output");
 
         assert!(matches!(
@@ -2995,16 +3047,18 @@ mod tests {
         assert_eq!(follow_up_input[1]["type"], "message");
         assert_eq!(follow_up_input[1]["content"][0]["text"], "A");
         assert_eq!(follow_up_input[2]["type"], "function_call");
-        assert_eq!(follow_up_input[2]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[2]["call_id"], "call_1");
+        assert_eq!(follow_up_input[2]["id"], "fc_1");
         assert_eq!(follow_up_input[3]["type"], "message");
         assert_eq!(follow_up_input[3]["content"][0]["text"], "B");
         assert_eq!(follow_up_input[4]["type"], "function_call");
-        assert_eq!(follow_up_input[4]["call_id"], "call_2|fc_2");
+        assert_eq!(follow_up_input[4]["call_id"], "call_2");
+        assert_eq!(follow_up_input[4]["id"], "fc_2");
         assert_eq!(follow_up_input[5]["type"], "function_call_output");
-        assert_eq!(follow_up_input[5]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[5]["call_id"], "call_1");
         assert_eq!(follow_up_input[5]["output"], "result:1");
         assert_eq!(follow_up_input[6]["type"], "function_call_output");
-        assert_eq!(follow_up_input[6]["call_id"], "call_2|fc_2");
+        assert_eq!(follow_up_input[6]["call_id"], "call_2");
         assert_eq!(follow_up_input[6]["output"], "result:2");
 
         assert!(events
@@ -3245,13 +3299,15 @@ mod tests {
         assert_eq!(follow_up_input[0]["role"], "user");
         assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
         assert_eq!(follow_up_input[1]["type"], "function_call");
-        assert_eq!(follow_up_input[1]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[1]["call_id"], "call_1");
+        assert_eq!(follow_up_input[1]["id"], "fc_1");
         assert_eq!(follow_up_input[2]["type"], "function_call");
-        assert_eq!(follow_up_input[2]["call_id"], "call_2|fc_2");
+        assert_eq!(follow_up_input[2]["call_id"], "call_2");
+        assert_eq!(follow_up_input[2]["id"], "fc_2");
         assert_eq!(follow_up_input[3]["type"], "function_call_output");
-        assert_eq!(follow_up_input[3]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[3]["call_id"], "call_1");
         assert_eq!(follow_up_input[4]["type"], "function_call_output");
-        assert_eq!(follow_up_input[4]["call_id"], "call_2|fc_2");
+        assert_eq!(follow_up_input[4]["call_id"], "call_2");
 
         assert!(matches!(
             events.last(),
