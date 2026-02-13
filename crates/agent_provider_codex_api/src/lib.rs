@@ -259,6 +259,7 @@ impl CodexApiProvider {
     fn build_follow_up_request(
         &self,
         model_id: &str,
+        instructions: &str,
         roundtrips: &[ToolRoundtrip],
     ) -> CodexRequest {
         let mut input = Vec::with_capacity(roundtrips.len() * 2);
@@ -280,7 +281,11 @@ impl CodexApiProvider {
             }));
         }
 
-        let mut request = CodexRequest::new(model_id.to_owned(), Value::Array(input), None);
+        let mut request = CodexRequest::new(
+            model_id.to_owned(),
+            Value::Array(input),
+            Some(instructions.to_string()),
+        );
         request.tools = codex_tool_payloads();
         request
     }
@@ -454,7 +459,7 @@ impl RunProvider for CodexApiProvider {
                 });
             }
 
-            request = self.build_follow_up_request(&model_id, &roundtrips);
+            request = self.build_follow_up_request(&model_id, &instructions, &roundtrips);
         }
     }
 }
@@ -1018,6 +1023,11 @@ mod tests {
 
         let requests = stream.observed_requests();
         assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].instructions.as_deref(),
+            Some("system instructions"),
+            "follow-up request must preserve instructions"
+        );
         let follow_up_input = requests[1]
             .input
             .as_array()
@@ -1076,6 +1086,11 @@ mod tests {
 
         let requests = stream.observed_requests();
         assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].instructions.as_deref(),
+            Some("system instructions"),
+            "follow-up request must preserve instructions"
+        );
         let follow_up_input = requests[1]
             .input
             .as_array()
