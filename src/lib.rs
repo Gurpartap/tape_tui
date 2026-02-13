@@ -13,6 +13,15 @@
 //! # Runtime Alias
 //! [`TUI`] is a type alias for `runtime::tui::TuiRuntime<T>`.
 
+#![allow(
+    clippy::derivable_impls,
+    clippy::needless_range_loop,
+    clippy::question_mark,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_map_or
+)]
+
 pub mod config;
 pub mod logging;
 
