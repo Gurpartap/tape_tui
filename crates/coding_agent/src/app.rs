@@ -98,10 +98,11 @@ pub struct App {
     history: InputHistory,
     pub should_exit: bool,
     cancelling_run: Option<RunId>,
+    system_instructions: String,
 }
 
 pub trait HostOps {
-    fn start_run(&mut self, prompt: String) -> Result<RunId, String>;
+    fn start_run(&mut self, prompt: String, instructions: String) -> Result<RunId, String>;
     fn cancel_run(&mut self, run_id: RunId);
     fn request_render(&mut self);
     fn request_stop(&mut self);
@@ -109,6 +110,9 @@ pub trait HostOps {
 
 const HELP_TEXT: &str = "Commands: /help, /clear, /cancel, /quit";
 const ERROR_RUN_ALREADY_ACTIVE: &str = "Run already active";
+pub const SYSTEM_INSTRUCTIONS_ENV_VAR: &str = "CODING_AGENT_SYSTEM_INSTRUCTIONS";
+pub const DEFAULT_SYSTEM_INSTRUCTIONS: &str =
+    "You are a careful coding agent. Follow user requests exactly, keep output deterministic, and fail explicitly when constraints cannot be satisfied.";
 
 impl Default for App {
     fn default() -> Self {
@@ -116,8 +120,30 @@ impl Default for App {
     }
 }
 
+pub fn system_instructions_from_env() -> String {
+    let from_env = std::env::var(SYSTEM_INSTRUCTIONS_ENV_VAR).ok();
+    sanitize_system_instructions(from_env)
+}
+
+fn sanitize_system_instructions(raw: Option<String>) -> String {
+    let Some(value) = raw else {
+        return DEFAULT_SYSTEM_INSTRUCTIONS.to_string();
+    };
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        DEFAULT_SYSTEM_INSTRUCTIONS.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
+        Self::with_system_instructions(None)
+    }
+
+    pub fn with_system_instructions(system_instructions: Option<String>) -> Self {
         Self {
             mode: Mode::Idle,
             input: String::new(),
@@ -125,7 +151,12 @@ impl App {
             history: InputHistory::default(),
             should_exit: false,
             cancelling_run: None,
+            system_instructions: sanitize_system_instructions(system_instructions),
         }
+    }
+
+    pub fn system_instructions(&self) -> &str {
+        &self.system_instructions
     }
 
     pub fn on_input_replace(&mut self, text: String) {
@@ -222,7 +253,7 @@ impl App {
             run_id: None,
         });
 
-        match host.start_run(prompt) {
+        match host.start_run(prompt, self.system_instructions.clone()) {
             Ok(run_id) => {
                 self.mode = Mode::Running { run_id };
             }
@@ -331,10 +362,7 @@ impl App {
             return;
         }
 
-        self.push_tool(
-            run_id,
-            format!("Tool {tool_name} ({call_id}) started"),
-        );
+        self.push_tool(run_id, format!("Tool {tool_name} ({call_id}) started"));
     }
 
     pub fn on_tool_call_finished(
@@ -490,7 +518,46 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
     use super::*;
+
+    struct EnvVarGuard {
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(value: Option<&str>) -> Self {
+            let previous = std::env::var(SYSTEM_INSTRUCTIONS_ENV_VAR).ok();
+            match value {
+                Some(value) => std::env::set_var(SYSTEM_INSTRUCTIONS_ENV_VAR, value),
+                None => std::env::remove_var(SYSTEM_INSTRUCTIONS_ENV_VAR),
+            }
+
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(SYSTEM_INSTRUCTIONS_ENV_VAR, value),
+                None => std::env::remove_var(SYSTEM_INSTRUCTIONS_ENV_VAR),
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 
     fn assistant_message(content: &str, streaming: bool, run_id: Option<RunId>) -> Message {
         Message {
@@ -499,6 +566,29 @@ mod tests {
             streaming,
             run_id,
         }
+    }
+
+    #[test]
+    fn system_instructions_env_falls_back_to_default_when_unset_or_blank() {
+        let _env_serialization = lock_unpoisoned(env_lock());
+
+        {
+            let _guard = EnvVarGuard::set(None);
+            assert_eq!(system_instructions_from_env(), DEFAULT_SYSTEM_INSTRUCTIONS);
+        }
+
+        {
+            let _guard = EnvVarGuard::set(Some("   \n\t"));
+            assert_eq!(system_instructions_from_env(), DEFAULT_SYSTEM_INSTRUCTIONS);
+        }
+    }
+
+    #[test]
+    fn system_instructions_env_uses_trimmed_override_when_set() {
+        let _env_serialization = lock_unpoisoned(env_lock());
+        let _guard = EnvVarGuard::set(Some("  custom system instruction  "));
+
+        assert_eq!(system_instructions_from_env(), "custom system instruction");
     }
 
     #[test]
@@ -604,7 +694,9 @@ mod tests {
         assert_eq!(tool_messages.len(), 2);
         assert_eq!(tool_messages[0].content, "Tool bash (call-2) started");
         assert_eq!(tool_messages[1].content, "Tool bash (call-2) completed");
-        assert!(tool_messages.iter().all(|message| message.run_id == Some(14)));
+        assert!(tool_messages
+            .iter()
+            .all(|message| message.run_id == Some(14)));
     }
 
     #[test]

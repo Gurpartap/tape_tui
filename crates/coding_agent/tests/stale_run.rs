@@ -11,7 +11,7 @@ impl HostStub {
 }
 
 impl HostOps for HostStub {
-    fn start_run(&mut self, _prompt: String) -> Result<RunId, String> {
+    fn start_run(&mut self, _prompt: String, _instructions: String) -> Result<RunId, String> {
         Ok(self.next_run_id)
     }
 

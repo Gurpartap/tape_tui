@@ -157,6 +157,7 @@ impl RunProvider for MockProvider {
     ) -> Result<(), String> {
         let run_id = req.run_id;
         let _ = req.prompt;
+        let _ = req.instructions;
 
         emit(RunEvent::Started { run_id });
         thread::sleep(Duration::from_millis(Self::RUN_DELAY_MS));
@@ -266,6 +267,7 @@ mod tests {
                 RunRequest {
                     run_id: 7,
                     prompt: "test".to_string(),
+                    instructions: "system instructions".to_string(),
                 },
                 cancel,
                 &mut |_call| ToolResult::error("unused", "unused", "not used in mock tests"),

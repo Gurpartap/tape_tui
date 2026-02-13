@@ -24,6 +24,13 @@
 //! - `models` is required and must include at least one non-empty model ID.
 //! - `timeout_sec` is optional and must be > 0 when provided.
 //! - Unknown JSON fields are rejected.
+//!
+//! ## System instructions
+//!
+//! Runtime run requests always include required system instructions.
+//! Set `CODING_AGENT_SYSTEM_INSTRUCTIONS` to override the built-in default base
+//! block; runtime appends a concise tool-use policy and tool inventory before
+//! dispatching each provider run.
 
 pub mod app;
 pub mod commands;

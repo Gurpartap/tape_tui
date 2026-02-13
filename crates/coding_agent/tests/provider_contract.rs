@@ -651,7 +651,10 @@ fn tool_timeline_stays_scoped_to_active_run_when_provider_emits_stale_events() {
             .collect();
         assert_eq!(tool_messages.len(), 2);
         assert_eq!(tool_messages[0].run_id, Some(run_id));
-        assert_eq!(tool_messages[0].content, "Tool not-a-tool (call-stale-scope) started");
+        assert_eq!(
+            tool_messages[0].content,
+            "Tool not-a-tool (call-stale-scope) started"
+        );
         assert_eq!(tool_messages[1].run_id, Some(run_id));
         assert!(tool_messages[1]
             .content
@@ -684,7 +687,9 @@ fn unknown_tool_call_produces_explicit_error_result_and_tool_failure_timeline() 
                     && app.transcript.iter().any(|message| {
                         message.role == Role::Assistant
                             && message.run_id == Some(run_id)
-                            && message.content.contains("unknown-tool-error:Unknown host tool")
+                            && message
+                                .content
+                                .contains("unknown-tool-error:Unknown host tool")
                     })
             },
         );
@@ -692,7 +697,8 @@ fn unknown_tool_call_produces_explicit_error_result_and_tool_failure_timeline() 
 
         let app = lock_unpoisoned(&app);
         assert!(app.transcript.iter().any(|message| {
-            message.role == Role::Tool && message.content == "Tool not-a-tool (call-unknown) started"
+            message.role == Role::Tool
+                && message.content == "Tool not-a-tool (call-unknown) started"
         }));
         assert!(app.transcript.iter().any(|message| {
             message.role == Role::Tool
@@ -724,16 +730,20 @@ fn tool_execution_failure_produces_explicit_error_result_and_tool_failure_timeli
                     && app.transcript.iter().any(|message| {
                         message.role == Role::Assistant
                             && message.run_id == Some(run_id)
-                            && message.content.contains("execution-error:status: exit_code=9")
+                            && message
+                                .content
+                                .contains("execution-error:status: exit_code=9")
                     })
             },
         );
-        assert!(settled, "run with execution-failure tool call did not settle");
+        assert!(
+            settled,
+            "run with execution-failure tool call did not settle"
+        );
 
         let app = lock_unpoisoned(&app);
         assert!(app.transcript.iter().any(|message| {
-            message.role == Role::Tool
-                && message.content == "Tool bash (call-exec-failure) started"
+            message.role == Role::Tool && message.content == "Tool bash (call-exec-failure) started"
         }));
         assert!(app.transcript.iter().any(|message| {
             message.role == Role::Tool
@@ -741,5 +751,79 @@ fn tool_execution_failure_produces_explicit_error_result_and_tool_failure_timeli
                     .content
                     .contains("Tool bash (call-exec-failure) failed: status: exit_code=9")
         }));
+    });
+}
+
+struct InstructionCaptureProvider {
+    captured_instructions: Arc<Mutex<Vec<String>>>,
+}
+
+impl InstructionCaptureProvider {
+    fn new(captured_instructions: Arc<Mutex<Vec<String>>>) -> Self {
+        Self {
+            captured_instructions,
+        }
+    }
+}
+
+impl RunProvider for InstructionCaptureProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        lock_unpoisoned(&self.captured_instructions).push(req.instructions.clone());
+        emit(RunEvent::Started { run_id: req.run_id });
+        emit(RunEvent::Finished { run_id: req.run_id });
+        Ok(())
+    }
+}
+
+#[test]
+fn runtime_composes_non_empty_instructions_with_tool_policy() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::with_system_instructions(Some(
+            "Base system block".to_string(),
+        ))));
+        let captured_instructions = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(InstructionCaptureProvider::new(Arc::clone(
+            &captured_instructions,
+        )));
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let run_id = submit_prompt(&app, &mut host, "capture instructions");
+
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant && message.run_id == Some(run_id)
+                    })
+            },
+        );
+        assert!(settled, "instruction capture run did not settle");
+
+        let captured = lock_unpoisoned(&captured_instructions);
+        assert_eq!(captured.len(), 1);
+        let instructions = &captured[0];
+        assert!(!instructions.trim().is_empty());
+        assert!(instructions.contains("Base system block"));
+        assert!(instructions.contains("Tool use policy"));
+        assert!(instructions.contains("read"));
+        assert!(instructions.contains("bash"));
+        assert!(instructions.contains("edit"));
+        assert!(instructions.contains("write"));
     });
 }

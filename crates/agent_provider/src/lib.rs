@@ -62,6 +62,7 @@ impl From<&str> for ProviderInitError {
 pub struct RunRequest {
     pub run_id: RunId,
     pub prompt: String,
+    pub instructions: String,
 }
 
 /// Generic host-mediated tool definition exposed by a provider.
@@ -276,6 +277,19 @@ mod tests {
         let error = ProviderInitError::new("missing token");
         assert_eq!(error.message(), "missing token");
         assert_eq!(error.to_string(), "missing token");
+    }
+
+    #[test]
+    fn run_request_carries_prompt_and_instructions() {
+        let request = RunRequest {
+            run_id: 7,
+            prompt: "implement tests".to_string(),
+            instructions: "system instructions".to_string(),
+        };
+
+        assert_eq!(request.run_id, 7);
+        assert_eq!(request.prompt, "implement tests");
+        assert_eq!(request.instructions, "system instructions");
     }
 
     #[test]

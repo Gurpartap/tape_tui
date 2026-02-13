@@ -105,7 +105,11 @@ impl RuntimeController {
         })
     }
 
-    fn start_run_internal(self: &Arc<Self>, prompt: String) -> Result<RunId, String> {
+    fn start_run_internal(
+        self: &Arc<Self>,
+        prompt: String,
+        base_system_instructions: String,
+    ) -> Result<RunId, String> {
         let mut active_run = self.lock_active_run();
         if active_run.is_some() {
             return Err("Run already active".to_string());
@@ -113,7 +117,15 @@ impl RuntimeController {
 
         let run_id = self.next_run_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
-        let request = RunRequest { run_id, prompt };
+        let instructions = compose_system_instructions(
+            &base_system_instructions,
+            tool_prompting_instruction_appendix(),
+        )?;
+        let request = RunRequest {
+            run_id,
+            prompt,
+            instructions,
+        };
         let join_handle = self.spawn_worker(request, Arc::clone(&cancel))?;
 
         *active_run = Some(ActiveRun {
@@ -210,8 +222,10 @@ impl RuntimeController {
 
         let dispatch_key = (self.provider_id.clone(), tool_name.clone());
         let Some(dispatch_tool) = self.tool_dispatch.get(&dispatch_key).copied() else {
-            let error =
-                format!("Unknown host tool '{tool_name}' for provider '{}'", self.provider_id);
+            let error = format!(
+                "Unknown host tool '{tool_name}' for provider '{}'",
+                self.provider_id
+            );
 
             return self.finish_tool_call(run_id, ToolResult::error(call_id, tool_name, error));
         };
@@ -449,8 +463,8 @@ impl CustomCommand for DrainRunEventsCommand {
 }
 
 impl HostOps for Arc<RuntimeController> {
-    fn start_run(&mut self, prompt: String) -> Result<RunId, String> {
-        self.start_run_internal(prompt)
+    fn start_run(&mut self, prompt: String, instructions: String) -> Result<RunId, String> {
+        self.start_run_internal(prompt, instructions)
     }
 
     fn cancel_run(&mut self, run_id: RunId) {
@@ -464,6 +478,24 @@ impl HostOps for Arc<RuntimeController> {
     fn request_stop(&mut self) {
         self.runtime_handle.dispatch(Command::RequestStop);
     }
+}
+
+fn compose_system_instructions(base: &str, tool_appendix: &str) -> Result<String, String> {
+    let base = base.trim();
+    if base.is_empty() {
+        return Err("System instructions cannot be empty".to_string());
+    }
+
+    let tool_appendix = tool_appendix.trim();
+    if tool_appendix.is_empty() {
+        return Err("Tool prompting appendix cannot be empty".to_string());
+    }
+
+    Ok(format!("{base}\n\n{tool_appendix}"))
+}
+
+fn tool_prompting_instruction_appendix() -> &'static str {
+    "Tool use policy:\n- Use tools for workspace actions: read, bash, edit, write.\n- Prefer the smallest safe tool for the step you are performing.\n- Never fabricate tool success; report explicit tool errors as-is.\n- Keep mutating changes minimal and verifiable.\n- Do not substitute fallback providers or hidden behavior when provider/tool errors occur."
 }
 
 fn build_default_host_tool_executor() -> HostToolExecutor {
@@ -498,11 +530,17 @@ fn build_tool_dispatch_table(provider_id: &str) -> HashMap<(String, String), Bui
             (provider_id.clone(), "edit".to_string()),
             BuiltinDispatchTool::Edit,
         ),
-        ((provider_id, "write".to_string()), BuiltinDispatchTool::Write),
+        (
+            (provider_id, "write".to_string()),
+            BuiltinDispatchTool::Write,
+        ),
     ])
 }
 
-fn parse_tool_call(call: &ToolCallRequest, dispatch_tool: BuiltinDispatchTool) -> Result<ToolCall, String> {
+fn parse_tool_call(
+    call: &ToolCallRequest,
+    dispatch_tool: BuiltinDispatchTool,
+) -> Result<ToolCall, String> {
     let args = args_object(&call.tool_name, &call.arguments)?;
 
     match dispatch_tool {
@@ -526,12 +564,12 @@ fn parse_tool_call(call: &ToolCallRequest, dispatch_tool: BuiltinDispatchTool) -
     }
 }
 
-fn args_object<'a>(tool_name: &str, args: &'a Value) -> Result<&'a serde_json::Map<String, Value>, String> {
-    args.as_object().ok_or_else(|| {
-        format!(
-            "Invalid arguments for tool '{tool_name}': expected a JSON object"
-        )
-    })
+fn args_object<'a>(
+    tool_name: &str,
+    args: &'a Value,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    args.as_object()
+        .ok_or_else(|| format!("Invalid arguments for tool '{tool_name}': expected a JSON object"))
 }
 
 fn required_string_arg(
@@ -593,5 +631,35 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compose_system_instructions, tool_prompting_instruction_appendix};
+
+    #[test]
+    fn composed_system_instructions_include_tool_policy_and_inventory() {
+        let composed = compose_system_instructions(
+            "Be deterministic and concise.",
+            tool_prompting_instruction_appendix(),
+        )
+        .expect("composition should succeed");
+
+        assert!(composed.contains("Be deterministic and concise."));
+        assert!(composed.contains("Tool use policy:"));
+        assert!(composed.contains("read"));
+        assert!(composed.contains("bash"));
+        assert!(composed.contains("edit"));
+        assert!(composed.contains("write"));
+        assert!(!composed.trim().is_empty());
+    }
+
+    #[test]
+    fn composed_system_instructions_reject_empty_base() {
+        let error = compose_system_instructions("   ", tool_prompting_instruction_appendix())
+            .expect_err("empty base instructions should fail");
+
+        assert!(error.contains("cannot be empty"));
     }
 }

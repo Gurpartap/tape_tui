@@ -5,6 +5,7 @@ use coding_agent::commands::{parse_slash_command, SlashCommand};
 struct HostSpy {
     next_run_id: RunId,
     started_prompts: Vec<String>,
+    started_instructions: Vec<String>,
     cancelled_runs: Vec<RunId>,
     render_requests: usize,
     stop_requests: usize,
@@ -20,8 +21,9 @@ impl HostSpy {
 }
 
 impl HostOps for HostSpy {
-    fn start_run(&mut self, prompt: String) -> Result<RunId, String> {
+    fn start_run(&mut self, prompt: String, instructions: String) -> Result<RunId, String> {
         self.started_prompts.push(prompt);
+        self.started_instructions.push(instructions);
         Ok(self.next_run_id)
     }
 
@@ -50,6 +52,8 @@ fn submit_starts_run_and_enters_running_mode() {
         host.started_prompts,
         vec!["describe the module layout".to_string()]
     );
+    assert_eq!(host.started_instructions.len(), 1);
+    assert!(!host.started_instructions[0].trim().is_empty());
     assert_eq!(
         app.history_entries(),
         &["describe the module layout".to_string()]
@@ -67,6 +71,20 @@ fn submit_starts_run_and_enters_running_mode() {
         }
     );
     assert_eq!(host.render_requests, 1);
+}
+
+#[test]
+fn submit_passes_configured_system_instructions_to_host() {
+    let mut app = App::with_system_instructions(Some("custom system instructions".to_string()));
+    let mut host = HostSpy::with_next_run_id(1);
+
+    app.on_input_replace("run with instructions".to_string());
+    app.on_submit(&mut host);
+
+    assert_eq!(
+        host.started_instructions,
+        vec!["custom system instructions"]
+    );
 }
 
 #[test]

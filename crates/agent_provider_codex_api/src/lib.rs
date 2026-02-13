@@ -241,8 +241,14 @@ impl CodexApiProvider {
         Ok(pending_tool_calls)
     }
 
-    fn build_initial_request(&self, model_id: &str, prompt: String) -> CodexRequest {
-        let mut request = CodexRequest::new(model_id.to_owned(), prompt, None);
+    fn build_initial_request(
+        &self,
+        model_id: &str,
+        prompt: String,
+        instructions: &str,
+    ) -> CodexRequest {
+        let mut request =
+            CodexRequest::new(model_id.to_owned(), prompt, Some(instructions.to_string()));
         request.tools = codex_tool_payloads();
         request
     }
@@ -347,8 +353,13 @@ impl RunProvider for CodexApiProvider {
         execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
-        let run_id = req.run_id;
+        let RunRequest {
+            run_id,
+            prompt,
+            instructions,
+        } = req;
         let model_id = self.selected_model();
+        let instructions = sanitize_run_instructions(instructions)?;
 
         emit(RunEvent::Started { run_id });
 
@@ -357,7 +368,7 @@ impl RunProvider for CodexApiProvider {
             return Ok(());
         }
 
-        let mut request = self.build_initial_request(&model_id, req.prompt);
+        let mut request = self.build_initial_request(&model_id, prompt, &instructions);
 
         loop {
             if cancel.load(Ordering::Acquire) {
@@ -612,6 +623,18 @@ fn tool_result_content_text(value: &Value) -> String {
     }
 }
 
+fn sanitize_run_instructions(instructions: String) -> Result<String, String> {
+    let trimmed = instructions.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "codex-api provider requires non-empty run instructions before sending requests"
+                .to_string(),
+        );
+    }
+
+    Ok(trimmed.to_string())
+}
+
 fn value_type_name(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -747,6 +770,7 @@ mod tests {
                 RunRequest {
                     run_id: 9,
                     prompt: "hello".to_string(),
+                    instructions: "system instructions".to_string(),
                 },
                 cancel,
                 &mut execute_tool,
@@ -855,6 +879,10 @@ mod tests {
         let requests = stream.observed_requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].model, "gpt-5.1-codex");
+        assert_eq!(
+            requests[0].instructions.as_deref(),
+            Some("system instructions")
+        );
         assert_eq!(
             request_tool_names(&requests[0]),
             V1_TOOL_NAMES
@@ -1200,6 +1228,36 @@ mod tests {
             events.last(),
             Some(RunEvent::Failed { run_id: 9, error }) if error.contains("in_progress")
         ));
+    }
+
+    #[test]
+    fn run_rejects_empty_instructions_before_http_call() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        let result = provider.run(
+            RunRequest {
+                run_id: 12,
+                prompt: "hello".to_string(),
+                instructions: "   \n\t ".to_string(),
+            },
+            cancel,
+            &mut |_call| ToolResult::error("unused", "unused", "unused"),
+            &mut |event| events.push(event),
+        );
+
+        let error = result.expect_err("empty instructions should fail fast");
+        assert!(error.contains("requires non-empty run instructions"));
+        assert!(events.is_empty());
+        assert!(stream.observed_requests().is_empty());
     }
 
     #[test]

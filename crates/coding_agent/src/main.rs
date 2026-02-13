@@ -1,14 +1,17 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use coding_agent::app::App;
+use coding_agent::app::{system_instructions_from_env, App};
 use coding_agent::providers;
 use coding_agent::runtime::RuntimeController;
 use coding_agent::tui::AppComponent;
 use tape_tui::{ProcessTerminal, TUI};
 
 fn main() -> io::Result<()> {
-    let app = Arc::new(Mutex::new(App::new()));
+    let system_instructions = system_instructions_from_env();
+    let app = Arc::new(Mutex::new(App::with_system_instructions(Some(
+        system_instructions,
+    ))));
 
     let terminal = ProcessTerminal::new();
     let mut tui = TUI::new(terminal);
