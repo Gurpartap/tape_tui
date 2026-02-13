@@ -693,6 +693,19 @@ fn codex_tool_payloads() -> Vec<Value> {
         .collect()
 }
 
+/// Normalization/backfill policy for Codex replay history.
+///
+/// - Boundary backfill: at every assistant/user boundary, unresolved tool calls without any
+///   remaining *raw-id* tool results in the future are backfilled immediately with a synthetic
+///   error result (`"No result provided"`).
+/// - EOF backfill (current policy): after all messages are processed, any still-unresolved tool
+///   calls are always backfilled with the same synthetic error result, preserving unresolved
+///   encounter order.
+/// - Collision rules: unresolved tool calls must remain unique across both canonical normalized
+///   IDs and transport call IDs (`call_id` segment before `|`); either collision hard-fails.
+/// - Mapping precedence: tool results first attempt raw-id queue matching against unresolved
+///   calls; when no queued raw match exists, normalization fallback is applied to the raw result
+///   call ID.
 fn normalize_run_messages_for_codex(messages: Vec<RunMessage>) -> Result<Vec<RunMessage>, String> {
     let mut normalized = Vec::with_capacity(messages.len());
     let mut unresolved_tool_calls = VecDeque::new();
@@ -2041,6 +2054,63 @@ mod tests {
                 },
                 RunMessage::ToolResult {
                     call_id: "a".to_string(),
+                    tool_name: "write".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_backfill_policy_is_boundary_then_eof() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call-boundary!".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::AssistantText {
+                text: "turn-1 assistant".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call-eof!".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call-boundary".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call-boundary".to_string(),
+                    tool_name: "read".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+                RunMessage::AssistantText {
+                    text: "turn-1 assistant".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call-eof".to_string(),
+                    tool_name: "write".to_string(),
+                    arguments: json!({ "path": "README.md", "content": "updated" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call-eof".to_string(),
                     tool_name: "write".to_string(),
                     content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
                     is_error: true,
