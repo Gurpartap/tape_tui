@@ -599,106 +599,76 @@ fn tool_message_display_lines(app: &App, message: &Message) -> Vec<String> {
         return lines;
     };
 
-    let Some((tool_name, call_id)) = parse_tool_started_message(message.content.as_str()) else {
+    let Some((_tool_name, call_id, kind)) = parse_tool_timeline_message(message.content.as_str())
+    else {
         return lines;
     };
 
-    let Some(arguments) = app.tool_call_arguments(run_id, call_id) else {
-        return lines;
-    };
+    match kind {
+        ToolMessageKind::Started => {
+            if let Some(arguments) = app.tool_call_arguments(run_id, call_id) {
+                lines.extend(render_value_block("input", arguments));
+            }
+        }
+        ToolMessageKind::Completed | ToolMessageKind::Failed => {
+            if let Some((content, is_error)) = app.tool_call_result(run_id, call_id) {
+                lines.push(format!("↳ is_error: {is_error}"));
+                lines.extend(render_value_block("output", content));
+            }
+        }
+    }
 
-    lines.extend(format_tool_call_argument_lines(tool_name, arguments));
     lines
 }
 
-fn parse_tool_started_message(content: &str) -> Option<(&str, &str)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolMessageKind {
+    Started,
+    Completed,
+    Failed,
+}
+
+fn parse_tool_timeline_message(content: &str) -> Option<(&str, &str, ToolMessageKind)> {
     let body = content.strip_prefix("Tool ")?;
     let (tool_name, call_part) = body.split_once(" (")?;
-    let call_id = call_part.strip_suffix(") started")?;
-    Some((tool_name, call_id))
+    let (call_id, suffix) = call_part.split_once(") ")?;
+
+    let kind = if suffix.starts_with("started") {
+        ToolMessageKind::Started
+    } else if suffix.starts_with("completed") {
+        ToolMessageKind::Completed
+    } else if suffix.starts_with("failed") {
+        ToolMessageKind::Failed
+    } else {
+        return None;
+    };
+
+    Some((tool_name, call_id, kind))
 }
 
-fn format_tool_call_argument_lines(tool_name: &str, arguments: &Value) -> Vec<String> {
-    match tool_name {
-        "bash" => {
-            let mut lines = Vec::new();
-            if let Some(command) = argument_string(arguments, "command") {
-                lines.push(format!("↳ command: {command}"));
-            }
-            if let Some(cwd) = argument_string(arguments, "cwd") {
-                lines.push(format!("↳ cwd: {cwd}"));
-            }
-            if let Some(timeout_sec) = argument_u64(arguments, "timeout_sec") {
-                lines.push(format!("↳ timeout_sec: {timeout_sec}"));
-            }
-            if lines.is_empty() {
-                vec![format!("↳ args: {arguments}")]
+fn render_value_block(label: &str, value: &Value) -> Vec<String> {
+    let mut lines = vec![format!("↳ {label}:")];
+
+    match value {
+        Value::String(content) => {
+            if content.is_empty() {
+                lines.push("  <empty>".to_string());
             } else {
-                lines
-            }
-        }
-        "read" => argument_string(arguments, "path")
-            .map(|path| vec![format!("↳ path: {path}")])
-            .unwrap_or_else(|| vec![format!("↳ args: {arguments}")]),
-        "write" => {
-            let mut lines = Vec::new();
-            if let Some(path) = argument_string(arguments, "path") {
-                lines.push(format!("↳ path: {path}"));
-            }
-            if let Some(content) = argument_string(arguments, "content") {
-                lines.push(format!("↳ content: {} chars", content.chars().count()));
-            }
-            if lines.is_empty() {
-                vec![format!("↳ args: {arguments}")]
-            } else {
-                lines
-            }
-        }
-        "edit" => {
-            let mut lines = Vec::new();
-            if let Some(path) = argument_string(arguments, "path") {
-                lines.push(format!("↳ path: {path}"));
-            }
-            if let Some(old_text) = argument_string(arguments, "old_text") {
-                lines.push(format!("↳ old_text: {} chars", old_text.chars().count()));
-            }
-            if let Some(new_text) = argument_string(arguments, "new_text") {
-                lines.push(format!("↳ new_text: {} chars", new_text.chars().count()));
-            }
-            if lines.is_empty() {
-                vec![format!("↳ args: {arguments}")]
-            } else {
-                lines
-            }
-        }
-        "apply_patch" => {
-            let mut lines = Vec::new();
-            if let Some(input) = argument_string(arguments, "input") {
-                lines.push(format!("↳ patch: {} chars", input.chars().count()));
-                if let Some(first_line) = input.lines().next().filter(|line| !line.is_empty()) {
-                    lines.push(format!("↳ patch first line: {first_line}"));
+                for line in content.lines() {
+                    lines.push(format!("  {line}"));
                 }
             }
-            if lines.is_empty() {
-                vec![format!("↳ args: {arguments}")]
-            } else {
-                lines
+        }
+        _ => {
+            let rendered =
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+            for line in rendered.lines() {
+                lines.push(format!("  {line}"));
             }
         }
-        _ => vec![format!("↳ args: {arguments}")],
     }
-}
 
-fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
-    arguments
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-fn argument_u64(arguments: &Value, key: &str) -> Option<u64> {
-    arguments.get(key).and_then(Value::as_u64)
+    lines
 }
 
 fn render_markdown_lines(width: usize, text: &str) -> Vec<String> {
@@ -942,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_message_display_lines_include_started_tool_arguments() {
+    fn tool_message_display_lines_include_exact_started_tool_input_content() {
         let mut app = App::new();
         app.mode = Mode::Running { run_id: 7 };
         app.on_tool_call_started(
@@ -964,9 +934,47 @@ mod tests {
 
         let lines = tool_message_display_lines(&app, message);
         assert_eq!(lines[0], "Tool bash (call-1) started");
-        assert!(lines.iter().any(|line| line == "↳ command: echo hello"));
-        assert!(lines.iter().any(|line| line == "↳ cwd: /tmp"));
-        assert!(lines.iter().any(|line| line == "↳ timeout_sec: 30"));
+        assert!(lines.iter().any(|line| line == "↳ input:"));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("\"command\": \"echo hello\"")));
+        assert!(lines.iter().any(|line| line.contains("\"cwd\": \"/tmp\"")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("\"timeout_sec\": 30")));
+    }
+
+    #[test]
+    fn tool_message_display_lines_include_exact_completed_tool_output_content() {
+        let mut app = App::new();
+        app.mode = Mode::Running { run_id: 7 };
+        app.on_tool_call_started(
+            7,
+            "call-1",
+            "bash",
+            &serde_json::json!({ "command": "pwd" }),
+        );
+        app.on_tool_call_finished(
+            7,
+            "bash",
+            "call-1",
+            false,
+            &serde_json::json!("line-1\nline-2"),
+            "line-1\nline-2",
+        );
+
+        let message = app
+            .transcript
+            .iter()
+            .find(|message| message.role == Role::Tool && message.content.contains("completed"))
+            .expect("completed tool message should exist");
+
+        let lines = tool_message_display_lines(&app, message);
+        assert_eq!(lines[0], "Tool bash (call-1) completed");
+        assert!(lines.iter().any(|line| line == "↳ is_error: false"));
+        assert!(lines.iter().any(|line| line == "↳ output:"));
+        assert!(lines.iter().any(|line| line == "  line-1"));
+        assert!(lines.iter().any(|line| line == "  line-2"));
     }
 
     #[test]
