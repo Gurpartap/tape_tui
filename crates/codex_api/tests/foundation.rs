@@ -4,7 +4,8 @@ use codex_api::{normalize_codex_url, CodexApiClient, CodexApiConfig, CodexReques
 
 #[test]
 fn smoke_client_constructs_from_config() {
-    let config = CodexApiConfig::new("token", "account")
+    let config = CodexApiConfig::new("token")
+        .with_account_id("account")
         .with_session_id("session-1")
         .with_originator("pi");
 

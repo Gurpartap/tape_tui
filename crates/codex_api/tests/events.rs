@@ -20,14 +20,14 @@ fn events_status_from_str_parity() {
 #[test]
 fn events_variant_shapes_stable() {
     let event = CodexStreamEvent::ResponseCompleted {
-        status: CodexResponseStatus::Completed,
+        status: Some(CodexResponseStatus::Completed),
     };
-    assert_eq!(status_string(&event), "completed");
+    assert_eq!(status_string(&event), Some("completed"));
 }
 
-fn status_string(event: &CodexStreamEvent) -> &'static str {
+fn status_string(event: &CodexStreamEvent) -> Option<&'static str> {
     match event {
-        CodexStreamEvent::ResponseCompleted { status } => status.as_str(),
-        _ => "unknown",
+        CodexStreamEvent::ResponseCompleted { status } => status.map(|value| value.as_str()),
+        _ => None,
     }
 }

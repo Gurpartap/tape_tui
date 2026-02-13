@@ -126,7 +126,10 @@ impl Component for ViewportProbeComponent {
 }
 
 fn current_calls(calls: &Arc<Mutex<Vec<(usize, usize)>>>) -> Vec<(usize, usize)> {
-    calls.lock().expect("lock viewport calls for snapshot").clone()
+    calls
+        .lock()
+        .expect("lock viewport calls for snapshot")
+        .clone()
 }
 
 fn toast_options() -> SurfaceOptions {

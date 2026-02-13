@@ -551,7 +551,9 @@ pub(crate) fn allocate_surface_budgets(
 
             match measurement.lane {
                 SurfaceLane::Top => {
-                    reserved_top = reserved_top.saturating_add(allocated_rows).min(terminal_rows);
+                    reserved_top = reserved_top
+                        .saturating_add(allocated_rows)
+                        .min(terminal_rows);
                 }
                 SurfaceLane::Bottom => {
                     reserved_bottom = reserved_bottom

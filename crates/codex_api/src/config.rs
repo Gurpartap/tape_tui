@@ -8,7 +8,8 @@ use crate::url::DEFAULT_CODEX_BASE_URL;
 pub struct CodexApiConfig {
     /// OAuth/bearer token passed to `Authorization`.
     pub access_token: String,
-    /// Account identifier carried in `chatgpt-account-id` header family.
+    /// Compatibility field kept for callers that still pass account ids out-of-band.
+    /// Transport parity derives account id from token claims.
     pub account_id: String,
     /// Base URL for Codex endpoints.
     pub base_url: String,
@@ -40,12 +41,18 @@ impl Default for CodexApiConfig {
 }
 
 impl CodexApiConfig {
-    pub fn new(access_token: impl Into<String>, account_id: impl Into<String>) -> Self {
+    pub fn new(access_token: impl Into<String>) -> Self {
         Self {
             access_token: access_token.into(),
-            account_id: account_id.into(),
             ..Self::default()
         }
+    }
+
+    pub fn new_with_account_id(
+        access_token: impl Into<String>,
+        account_id: impl Into<String>,
+    ) -> Self {
+        Self::new(access_token).with_account_id(account_id)
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -55,6 +62,11 @@ impl CodexApiConfig {
 
     pub fn with_originator(mut self, originator: impl Into<String>) -> Self {
         self.originator = originator.into();
+        self
+    }
+
+    pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
+        self.account_id = account_id.into();
         self
     }
 

@@ -335,13 +335,20 @@ fn run_focus_churn_snapshot() -> FocusChurnSnapshot {
     runtime.set_focus(root_id);
 
     let surface_a_state = ProbeState::new();
-    let surface_a_id =
-        runtime.register_component(FocusProbeComponent::new("surface-a", surface_a_state.clone()));
-    runtime.show_surface(surface_a_id, Some(toast_options(SurfaceInputPolicy::Capture)));
+    let surface_a_id = runtime.register_component(FocusProbeComponent::new(
+        "surface-a",
+        surface_a_state.clone(),
+    ));
+    runtime.show_surface(
+        surface_a_id,
+        Some(toast_options(SurfaceInputPolicy::Capture)),
+    );
 
     let surface_b_state = ProbeState::new();
-    let surface_b_id =
-        runtime.register_component(FocusProbeComponent::new("surface-b", surface_b_state.clone()));
+    let surface_b_id = runtime.register_component(FocusProbeComponent::new(
+        "surface-b",
+        surface_b_state.clone(),
+    ));
     let surface_b = runtime.show_surface(
         surface_b_id,
         Some(toast_options(SurfaceInputPolicy::Capture)),
@@ -428,7 +435,11 @@ fn focus_and_input_routing_stays_stable_during_tiny_terminal_budget_churn() {
     assert_eq!(baseline.surface_a_events, vec!["text:3".to_string()]);
     assert_eq!(
         baseline.surface_b_events,
-        vec!["text:1".to_string(), "text:2".to_string(), "text:4".to_string()]
+        vec![
+            "text:1".to_string(),
+            "text:2".to_string(),
+            "text:4".to_string()
+        ]
     );
     assert!(
         contains_subsequence(&baseline.surface_b_focus_trace, &[true, false, true]),

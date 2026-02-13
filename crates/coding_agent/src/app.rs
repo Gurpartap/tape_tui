@@ -217,7 +217,9 @@ impl App {
             }
             Err(error) => {
                 if error == ERROR_RUN_ALREADY_ACTIVE {
-                    self.push_system("Run already in progress. Use /cancel to stop it.".to_string());
+                    self.push_system(
+                        "Run already in progress. Use /cancel to stop it.".to_string(),
+                    );
                 } else {
                     self.mode = Mode::Error(error.clone());
                     self.push_system(format!("Failed to start run: {error}"));
@@ -362,8 +364,7 @@ impl App {
     }
 
     fn should_apply_run_event(&self, run_id: RunId) -> bool {
-        !self.should_exit
-            && (self.is_active_run(run_id) || self.is_cancelling(run_id))
+        !self.should_exit && (self.is_active_run(run_id) || self.is_cancelling(run_id))
     }
 
     fn is_active_run(&self, run_id: RunId) -> bool {
@@ -429,7 +430,6 @@ impl App {
             run_id: None,
         });
     }
-
 }
 
 #[cfg(test)]
@@ -448,14 +448,16 @@ mod tests {
     #[test]
     fn finalize_stream_merges_assistant_chunks_for_same_run() {
         let mut app = App::new();
-        app.transcript.push(assistant_message("first ", true, Some(42)));
+        app.transcript
+            .push(assistant_message("first ", true, Some(42)));
         app.transcript.push(Message {
             role: Role::User,
             content: "ignored".to_string(),
             streaming: false,
             run_id: None,
         });
-        app.transcript.push(assistant_message("second", true, Some(42)));
+        app.transcript
+            .push(assistant_message("second", true, Some(42)));
 
         app.finalize_stream(42);
 
@@ -480,8 +482,10 @@ mod tests {
     fn on_run_started_does_not_duplicate_assistant_entry_for_active_run() {
         let mut app = App::new();
         app.mode = Mode::Running { run_id: 7 };
-        app.transcript.push(assistant_message("seed", false, Some(7)));
-        app.transcript.push(assistant_message("newer", true, Some(7)));
+        app.transcript
+            .push(assistant_message("seed", false, Some(7)));
+        app.transcript
+            .push(assistant_message("newer", true, Some(7)));
 
         let assistant_count_before = app
             .transcript

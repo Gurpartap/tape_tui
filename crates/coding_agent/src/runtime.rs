@@ -24,15 +24,18 @@ pub enum RunEvent {
 impl RunEvent {
     fn run_id(&self) -> RunId {
         match self {
-            Self::Started { run_id }
-            | Self::Finished { run_id }
-            | Self::Cancelled { run_id } => *run_id,
+            Self::Started { run_id } | Self::Finished { run_id } | Self::Cancelled { run_id } => {
+                *run_id
+            }
             Self::Chunk { run_id, .. } | Self::Failed { run_id, .. } => *run_id,
         }
     }
 
     fn is_terminal(&self) -> bool {
-        matches!(self, Self::Finished { .. } | Self::Failed { .. } | Self::Cancelled { .. })
+        matches!(
+            self,
+            Self::Finished { .. } | Self::Failed { .. } | Self::Cancelled { .. }
+        )
     }
 }
 
@@ -127,8 +130,7 @@ impl RuntimeController {
         };
         let run_outcome = catch_unwind(AssertUnwindSafe(|| {
             let mut tools = lock_unpoisoned(tools);
-            model
-                .run(request, Arc::clone(&cancel), &mut emit, &mut *tools)
+            model.run(request, Arc::clone(&cancel), &mut emit, &mut *tools)
         }));
 
         match run_outcome {
@@ -255,10 +257,7 @@ impl RuntimeController {
     }
 
     fn is_active_run_id(&self, run_id: RunId) -> bool {
-        self.lock_active_run()
-            .as_ref()
-            .map(|active| active.run_id)
-            == Some(run_id)
+        self.lock_active_run().as_ref().map(|active| active.run_id) == Some(run_id)
     }
 
     fn cancel_run_internal(&self, run_id: RunId) {

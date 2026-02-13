@@ -1,15 +1,15 @@
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tape_tui::core::component::Focusable;
 use tape_tui::core::cursor::CursorPos;
 use tape_tui::core::input::KeyEventType;
 use tape_tui::{
-    default_editor_keybindings_handle, Component, Editor, EditorOptions, EditorTheme, InputEvent, Markdown,
-    MarkdownTheme, SelectListTheme,
+    default_editor_keybindings_handle, Component, Editor, EditorOptions, EditorTheme, InputEvent,
+    Markdown, MarkdownTheme, SelectListTheme,
 };
 
 use crate::app::{App, HostOps, Message, Mode, Role};
@@ -149,21 +149,19 @@ impl AppComponent {
             if matches!(app.mode, Mode::Running { .. }) {
                 let app_for_spinner = Arc::clone(&app_for_submit);
                 let host_for_spinner = Arc::clone(&host_for_submit);
-                thread::spawn(move || {
-                    loop {
-                        thread::sleep(Duration::from_millis(120));
+                thread::spawn(move || loop {
+                    thread::sleep(Duration::from_millis(120));
 
-                        let running = {
-                            let app = lock_unpoisoned(&app_for_spinner);
-                            matches!(app.mode, Mode::Running { .. })
-                        };
-                        if !running {
-                            break;
-                        }
-
-                        let mut host = host_for_spinner.clone();
-                        host.request_render();
+                    let running = {
+                        let app = lock_unpoisoned(&app_for_spinner);
+                        matches!(app.mode, Mode::Running { .. })
+                    };
+                    if !running {
+                        break;
                     }
+
+                    let mut host = host_for_spinner.clone();
+                    host.request_render();
                 });
             }
         })));
@@ -219,21 +217,12 @@ impl Component for AppComponent {
             *editor_border = render_mode_line(width, self.view_mode);
         }
         lines.extend(editor_lines);
-        append_wrapped_text(
-            &mut lines,
-            width,
-            &render_status_footer(width),
-            "",
-            "",
-        );
+        append_wrapped_text(&mut lines, width, &render_status_footer(width), "", "");
 
-        self.cursor_pos = self
-            .editor
-            .cursor_pos()
-            .map(|position| CursorPos {
-                row: position.row + editor_start_row,
-                col: position.col,
-            });
+        self.cursor_pos = self.editor.cursor_pos().map(|position| CursorPos {
+            row: position.row + editor_start_row,
+            col: position.col,
+        });
 
         lines
     }
@@ -314,11 +303,7 @@ impl Component for AppComponent {
 fn render_status_line(mode: &Mode) -> String {
     match mode {
         Mode::Idle => {
-            format!(
-                "{} {}",
-                cyan("*"),
-                dim("Ready - awaiting your input")
-            )
+            format!("{} {}", cyan("*"), dim("Ready - awaiting your input"))
         }
         Mode::Running { run_id } => {
             format!(
@@ -351,15 +336,14 @@ fn render_working_directory() -> String {
             let home = std::env::var("HOME").ok();
             format_working_directory_with_home(&cwd, &branch, home.as_deref())
         }
-        Err(_) => format!(
-            "{}", dim("<unable to read current working directory>")
-        ),
+        Err(_) => format!("{}", dim("<unable to read current working directory>")),
     }
 }
 
 fn render_model_and_thinking() -> String {
     let model = std::env::var("CODING_AGENT_MODEL").unwrap_or_else(|_| "mock".to_string());
-    let thinking = std::env::var("CODING_AGENT_THINKING").unwrap_or_else(|_| "balanced".to_string());
+    let thinking =
+        std::env::var("CODING_AGENT_THINKING").unwrap_or_else(|_| "balanced".to_string());
 
     render_model_and_thinking_with(&model, &thinking)
 }
@@ -489,7 +473,11 @@ fn render_message_lines(message: &Message, width: usize, lines: &mut Vec<String>
             }
         }
         _ => {
-            let text_lines: Vec<String> = message.content.split('\n').map(ToString::to_string).collect();
+            let text_lines: Vec<String> = message
+                .content
+                .split('\n')
+                .map(ToString::to_string)
+                .collect();
             for (index, line) in text_lines.iter().enumerate() {
                 let prefix = if index == 0 {
                     format!("{role_prefix}: ")
@@ -543,7 +531,13 @@ fn message_role_prefix(message: &Message) -> String {
     format!("{role} {role_label}")
 }
 
-fn append_wrapped_text(lines: &mut Vec<String>, width: usize, text: &str, first_prefix: &str, continuation_prefix: &str) {
+fn append_wrapped_text(
+    lines: &mut Vec<String>,
+    width: usize,
+    text: &str,
+    first_prefix: &str,
+    continuation_prefix: &str,
+) {
     if width == 0 {
         lines.push(format!("{first_prefix}{text}"));
         return;
@@ -577,11 +571,14 @@ fn append_wrapped_text(lines: &mut Vec<String>, width: usize, text: &str, first_
             continue;
         }
 
-    let ch = match std::str::from_utf8(&bytes[index..]).ok().and_then(|rest| rest.chars().next()) {
-        Some(ch) => ch,
-        None => break,
-    };
-    index += ch.len_utf8();
+        let ch = match std::str::from_utf8(&bytes[index..])
+            .ok()
+            .and_then(|rest| rest.chars().next())
+        {
+            Some(ch) => ch,
+            None => break,
+        };
+        index += ch.len_utf8();
 
         if ch == '\n' {
             lines.push(line);

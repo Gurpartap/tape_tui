@@ -11,7 +11,11 @@ use tape_tui::TUI;
 
 mod support;
 
-fn setup_runtime() -> (TUI<support::SharedTerminal>, Arc<Mutex<App>>, Arc<Mutex<support::TerminalTrace>>) {
+fn setup_runtime() -> (
+    TUI<support::SharedTerminal>,
+    Arc<Mutex<App>>,
+    Arc<Mutex<support::TerminalTrace>>,
+) {
     let app = Arc::new(Mutex::new(App::new()));
     let (terminal, terminal_trace) = support::SharedTerminal::new(120, 40);
     let mut tui = TUI::new(terminal);

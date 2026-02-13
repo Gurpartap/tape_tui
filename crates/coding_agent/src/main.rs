@@ -21,7 +21,8 @@ fn main() -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
 
     let host = RuntimeController::new(Arc::clone(&app), runtime_handle, model, tools);
-    let root_component = tui.register_component(AppComponent::new(Arc::clone(&app), Arc::clone(&host)));
+    let root_component =
+        tui.register_component(AppComponent::new(Arc::clone(&app), Arc::clone(&host)));
     tui.set_root(vec![root_component]);
     tui.set_focus(root_component);
 

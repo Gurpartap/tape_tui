@@ -17,12 +17,20 @@ fn all_four_tools_have_success_paths() {
         path: "notes/hello.txt".to_string(),
         content: "hello".to_string(),
     });
-    assert!(write_result.ok, "write_file should succeed: {}", write_result.content);
+    assert!(
+        write_result.ok,
+        "write_file should succeed: {}",
+        write_result.content
+    );
 
     let read_result = executor.execute(ToolCall::ReadFile {
         path: "notes/hello.txt".to_string(),
     });
-    assert!(read_result.ok, "read_file should succeed: {}", read_result.content);
+    assert!(
+        read_result.ok,
+        "read_file should succeed: {}",
+        read_result.content
+    );
     assert_eq!(read_result.content, "hello");
 
     let edit_result = executor.execute(ToolCall::EditFile {
@@ -30,7 +38,11 @@ fn all_four_tools_have_success_paths() {
         old_text: "hello".to_string(),
         new_text: "hello world".to_string(),
     });
-    assert!(edit_result.ok, "edit_file should succeed: {}", edit_result.content);
+    assert!(
+        edit_result.ok,
+        "edit_file should succeed: {}",
+        edit_result.content
+    );
 
     let reread_result = executor.execute(ToolCall::ReadFile {
         path: "notes/hello.txt".to_string(),
@@ -43,7 +55,11 @@ fn all_four_tools_have_success_paths() {
         timeout_sec: None,
         cwd: Some(".".to_string()),
     });
-    assert!(bash_result.ok, "bash should succeed: {}", bash_result.content);
+    assert!(
+        bash_result.ok,
+        "bash should succeed: {}",
+        bash_result.content
+    );
     assert!(bash_result.content.contains("exit_code=0"));
     assert!(bash_result.content.contains("bash-ok"));
 }

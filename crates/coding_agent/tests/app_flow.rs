@@ -46,8 +46,14 @@ fn submit_starts_run_and_enters_running_mode() {
     app.on_input_replace("describe the module layout".to_string());
     app.on_submit(&mut host);
 
-    assert_eq!(host.started_prompts, vec!["describe the module layout".to_string()]);
-    assert_eq!(app.history_entries(), &["describe the module layout".to_string()]);
+    assert_eq!(
+        host.started_prompts,
+        vec!["describe the module layout".to_string()]
+    );
+    assert_eq!(
+        app.history_entries(),
+        &["describe the module layout".to_string()]
+    );
     assert_eq!(app.mode, Mode::Running { run_id: 42 });
     assert_eq!(app.input, "");
     assert_eq!(app.transcript.len(), 1);

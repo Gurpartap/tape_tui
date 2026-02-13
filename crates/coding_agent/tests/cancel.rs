@@ -186,7 +186,11 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-fn wait_until(timeout: Duration, mut tick: impl FnMut(), mut predicate: impl FnMut() -> bool) -> bool {
+fn wait_until(
+    timeout: Duration,
+    mut tick: impl FnMut(),
+    mut predicate: impl FnMut() -> bool,
+) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
         tick();
@@ -215,7 +219,8 @@ fn cancel_while_running_results_in_cancelled_state() {
         let app = Arc::new(Mutex::new(App::new()));
         let model: Arc<dyn ModelBackend> = Arc::new(BlockingCancelBackend);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
+        let mut host =
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -236,14 +241,12 @@ fn cancel_while_running_results_in_cancelled_state() {
             || {
                 let app = lock_unpoisoned(&app);
                 matches!(app.mode, Mode::Idle)
-                    && app
-                        .transcript
-                        .iter()
-                        .any(|message| message.role == Role::System && message.content == "Run cancelled")
-                    && app
-                        .transcript
-                        .iter()
-                        .any(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::System && message.content == "Run cancelled"
+                    })
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant && message.run_id == Some(run_id)
+                    })
             },
         );
 
@@ -271,7 +274,8 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
         let app = Arc::new(Mutex::new(App::new()));
         let model: Arc<dyn ModelBackend> = Arc::new(BlockingCancelBackend);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
+        let mut host =
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
 
         let _run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -303,7 +307,9 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
             let app = lock_unpoisoned(&app);
             app.transcript
                 .iter()
-                .filter(|message| message.role == Role::System && message.content == "Run cancelled")
+                .filter(|message| {
+                    message.role == Role::System && message.content == "Run cancelled"
+                })
                 .count()
         };
         assert_eq!(cancelled_count_after_first_completion, 1);
@@ -318,7 +324,9 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
             let app = lock_unpoisoned(&app);
             app.transcript
                 .iter()
-                .filter(|message| message.role == Role::System && message.content == "Run cancelled")
+                .filter(|message| {
+                    message.role == Role::System && message.content == "Run cancelled"
+                })
                 .count()
         };
 
@@ -332,7 +340,8 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
         let app = Arc::new(Mutex::new(App::new()));
         let model: Arc<dyn ModelBackend> = Arc::new(RacingCancelBackend);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
+        let mut host =
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -350,16 +359,17 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
             },
             || {
                 let app = lock_unpoisoned(&app);
-                app.transcript
-                    .iter()
-                    .any(|message| {
-                        message.role == Role::Assistant
-                            && message.run_id == Some(run_id)
-                            && message.content.contains("first")
-                    })
+                app.transcript.iter().any(|message| {
+                    message.role == Role::Assistant
+                        && message.run_id == Some(run_id)
+                        && message.content.contains("first")
+                })
             },
         );
-        assert!(streaming_started, "run did not start streaming before cancellation");
+        assert!(
+            streaming_started,
+            "run did not start streaming before cancellation"
+        );
 
         {
             let mut app = lock_unpoisoned(&app);
@@ -375,10 +385,9 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
             || {
                 let app = lock_unpoisoned(&app);
                 matches!(app.mode, Mode::Idle)
-                    && app
-                        .transcript
-                        .iter()
-                        .any(|message| message.role == Role::System && message.content == "Run cancelled")
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::System && message.content == "Run cancelled"
+                    })
             },
         );
         assert!(settled, "cancel race did not settle");
@@ -391,7 +400,10 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
             .collect();
 
         assert_eq!(assistant_messages.len(), 1);
-        assert!(assistant_messages[0].content == "first" || assistant_messages[0].content == "first second");
+        assert!(
+            assistant_messages[0].content == "first"
+                || assistant_messages[0].content == "first second"
+        );
         assert!(!assistant_messages[0].streaming);
     });
 }
@@ -418,13 +430,20 @@ fn flush_pending_events_in_headless_usage() {
             }
         };
 
-        let before_flush = wait_until(Duration::from_millis(100), || {}, || {
-            let app = lock_unpoisoned(&app);
-            app.transcript
-                .iter()
-                .all(|message| message.role != Role::Assistant || message.content != "deferred flush")
-        });
-        assert!(before_flush, "assistant content should remain unmerged before draining");
+        let before_flush = wait_until(
+            Duration::from_millis(100),
+            || {},
+            || {
+                let app = lock_unpoisoned(&app);
+                app.transcript.iter().all(|message| {
+                    message.role != Role::Assistant || message.content != "deferred flush"
+                })
+            },
+        );
+        assert!(
+            before_flush,
+            "assistant content should remain unmerged before draining"
+        );
 
         let settled = wait_until(
             Duration::from_secs(1),
@@ -434,10 +453,9 @@ fn flush_pending_events_in_headless_usage() {
             || {
                 let app = lock_unpoisoned(&app);
                 matches!(app.mode, Mode::Idle)
-                    && app
-                        .transcript
-                        .iter()
-                        .any(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant && message.run_id == Some(run_id)
+                    })
             },
         );
         assert!(settled, "headless flush did not apply queued events");

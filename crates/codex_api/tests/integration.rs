@@ -2,7 +2,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::time::Instant;
 
+use base64::{engine::general_purpose, Engine as _};
 use codex_api::events::{CodexResponseStatus, CodexStreamEvent};
 use codex_api::{CodexApiClient, CodexApiConfig, CodexApiError, CodexRequest};
 use serde_json::json;
@@ -10,12 +12,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Duration};
-
-fn allow_local_integration() -> bool {
-    std::env::var("CODEX_API_ALLOW_LOCAL_INTEGRATION")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
-}
 
 #[derive(Clone)]
 struct ResponseChunk {
@@ -28,6 +24,7 @@ enum ScriptedResponse {
     Respond {
         status: u16,
         content_type: &'static str,
+        header_delay_ms: u64,
         chunks: Vec<ResponseChunk>,
     },
     Reset,
@@ -90,6 +87,7 @@ fn response_sse(status: u16, frames: &[&str]) -> ScriptedResponse {
     ScriptedResponse::Respond {
         status,
         content_type: "text/event-stream",
+        header_delay_ms: 0,
         chunks: vec![ResponseChunk {
             delay_ms: 0,
             bytes: sse_frames(frames),
@@ -101,6 +99,7 @@ fn response_json(status: u16, body: &str) -> ScriptedResponse {
     ScriptedResponse::Respond {
         status,
         content_type: "application/json",
+        header_delay_ms: 0,
         chunks: vec![ResponseChunk {
             delay_ms: 0,
             bytes: body.as_bytes().to_vec(),
@@ -120,12 +119,17 @@ fn sse_frames(frames: &[&str]) -> Vec<u8> {
     body.into_bytes()
 }
 
+fn token_with_account_id(account_id: &str) -> String {
+    let claims = json!({
+        "https://api.openai.com/auth": {"chatgpt_account_id": account_id}
+    });
+    let payload = serde_json::to_vec(&claims).expect("serialize token claims");
+    let payload = general_purpose::URL_SAFE_NO_PAD.encode(payload);
+    format!("header.{payload}.signature")
+}
+
 #[tokio::test]
 async fn stream_integration_successful_completion() {
-    if !allow_local_integration() {
-        return;
-    }
-
     let server = ScriptedServer::new(vec![response_sse(
         200,
         &[
@@ -136,7 +140,7 @@ async fn stream_integration_successful_completion() {
     .await;
 
     let request = CodexRequest::new("gpt-codex", json!("hi"), None);
-    let config = CodexApiConfig::new("tok", "acct").with_base_url(&server.base_url);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
     let result = client
@@ -156,10 +160,6 @@ async fn stream_integration_successful_completion() {
 
 #[tokio::test]
 async fn stream_integration_done_alias_maps_to_completed_status() {
-    if !allow_local_integration() {
-        return;
-    }
-
     let server = ScriptedServer::new(vec![response_sse(
         200,
         &[r##"{"type":"response.done","response":{"status":"in_progress"}}"##],
@@ -167,7 +167,7 @@ async fn stream_integration_done_alias_maps_to_completed_status() {
     .await;
 
     let request = CodexRequest::new("gpt-codex", json!("hi"), None);
-    let config = CodexApiConfig::new("tok", "acct").with_base_url(&server.base_url);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
     let result = client
@@ -182,22 +182,15 @@ async fn stream_integration_done_alias_maps_to_completed_status() {
 }
 
 #[tokio::test]
-async fn stream_integration_failed_and_error_events_fail_terminal() {
-    if !allow_local_integration() {
-        return;
-    }
-
+async fn stream_integration_unknown_completed_status_is_none() {
     let server = ScriptedServer::new(vec![response_sse(
         200,
-        &[
-            r##"{"type":"response.failed","response":{"error":{"message":"boom"}}}"##,
-            r##"{"type":"error","code":"x","message":"bad"}"##,
-        ],
+        &[r##"{"type":"response.completed","response":{"status":"mystery"}}"##],
     )])
     .await;
 
     let request = CodexRequest::new("gpt-codex", json!("hi"), None);
-    let config = CodexApiConfig::new("tok", "acct").with_base_url(&server.base_url);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
     let result = client
@@ -205,25 +198,141 @@ async fn stream_integration_failed_and_error_events_fail_terminal() {
         .await
         .expect("stream should succeed");
 
-    assert_eq!(result.terminal, Some(CodexResponseStatus::Failed));
-    assert!(result
-        .events
-        .iter()
-        .any(|event| matches!(event, CodexStreamEvent::ResponseFailed { .. })));
-    assert!(result
-        .events
-        .iter()
-        .any(|event| matches!(event, CodexStreamEvent::Error { .. })));
+    assert_eq!(result.terminal, None);
+    assert!(matches!(
+        result.events.first(),
+        Some(CodexStreamEvent::ResponseCompleted { status: None })
+    ));
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_response_failed_event_returns_error() {
+    let server = ScriptedServer::new(vec![response_sse(
+        200,
+        &[r##"{"type":"response.failed","response":{"error":{"message":"boom"}}}"##],
+    )])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail");
+
+    assert!(matches!(
+        result,
+        CodexApiError::StreamFailed { code: None, ref message } if message == "boom"
+    ));
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_error_event_returns_error() {
+    let server = ScriptedServer::new(vec![response_sse(
+        200,
+        &[r##"{"type":"error","code":"x","message":"bad"}"##],
+    )])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail");
+
+    assert!(matches!(
+        result,
+        CodexApiError::StreamFailed { code: Some(ref code), ref message }
+            if code == "x" && message == "Codex error: bad"
+    ));
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_error_event_without_details_uses_serialized_event_fallback() {
+    let server = ScriptedServer::new(vec![response_sse(200, &[r##"{"type":"error"}"##])]).await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail");
+
+    assert!(matches!(
+        result,
+        CodexApiError::StreamFailed { code: None, ref message }
+            if message == "Codex error: {\"type\":\"error\"}"
+    ));
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_error_event_with_empty_fields_uses_serialized_event_fallback() {
+    let server = ScriptedServer::new(vec![response_sse(
+        200,
+        &[r##"{"type":"error","code":"","message":""}"##],
+    )])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail");
+
+    assert!(matches!(
+        result,
+        CodexApiError::StreamFailed { code: None, ref message }
+            if message.contains("Codex error: {") && message.contains("\"type\":\"error\"")
+    ));
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_response_failed_with_empty_message_uses_default_message() {
+    let server = ScriptedServer::new(vec![response_sse(
+        200,
+        &[r##"{"type":"response.failed","response":{"error":{"message":""}}}"##],
+    )])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail");
+
+    assert!(matches!(
+        result,
+        CodexApiError::StreamFailed { code: None, ref message } if message == "Codex response failed"
+    ));
 
     server.shutdown();
 }
 
 #[tokio::test]
 async fn stream_integration_retryable_then_success() {
-    if !allow_local_integration() {
-        return;
-    }
-
     let server = ScriptedServer::new(vec![
         response_json(503, r##"{"error":{"message":"overloaded"}}"##),
         response_sse(
@@ -234,7 +343,7 @@ async fn stream_integration_retryable_then_success() {
     .await;
 
     let request = CodexRequest::new("gpt-codex", json!("hi"), None);
-    let config = CodexApiConfig::new("tok", "acct").with_base_url(&server.base_url);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
     let result = timeout(Duration::from_secs(12), client.stream(&request, None))
@@ -249,19 +358,17 @@ async fn stream_integration_retryable_then_success() {
 }
 
 #[tokio::test]
-async fn stream_integration_non_retryable_status_fails_explicitly() {
-    if !allow_local_integration() {
-        return;
-    }
-
-    let server = ScriptedServer::new(vec![response_json(
-        400,
-        r##"{"error":{"message":"invalid request"}}"##,
-    )])
+async fn stream_integration_non_retryable_status_retries_then_fails() {
+    let server = ScriptedServer::new(vec![
+        response_json(400, r##"{"error":{"message":"invalid request"}}"##),
+        response_json(400, r##"{"error":{"message":"invalid request"}}"##),
+        response_json(400, r##"{"error":{"message":"invalid request"}}"##),
+        response_json(400, r##"{"error":{"message":"invalid request"}}"##),
+    ])
     .await;
 
     let request = CodexRequest::new("gpt-codex", json!("hi"), None);
-    let config = CodexApiConfig::new("tok", "acct").with_base_url(&server.base_url);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
     let result = client
@@ -269,26 +376,156 @@ async fn stream_integration_non_retryable_status_fails_explicitly() {
         .await
         .expect_err("stream should fail");
     assert!(matches!(result, CodexApiError::Status(code, _) if code.as_u16() == 400));
+    assert_eq!(server.request_count(), 4);
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_non_retryable_lowercase_usage_limit_message_does_not_retry() {
+    let server = ScriptedServer::new(vec![
+        response_json(400, r##"{"error":{"message":"usage limit reached"}}"##),
+        response_json(400, r##"{"error":{"message":"usage limit reached"}}"##),
+        response_json(400, r##"{"error":{"message":"usage limit reached"}}"##),
+        response_json(400, r##"{"error":{"message":"usage limit reached"}}"##),
+    ])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail");
+    assert!(
+        matches!(
+            result,
+            CodexApiError::Status(code, ref message)
+                if code.as_u16() == 400 && message == "usage limit reached"
+        ),
+        "unexpected error shape: {result:?}"
+    );
+    assert_eq!(server.request_count(), 1);
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_non_retryable_capitalized_usage_limit_message_retries() {
+    let server = ScriptedServer::new(vec![
+        response_json(400, r##"{"error":{"message":"Usage Limit Reached"}}"##),
+        response_json(400, r##"{"error":{"message":"Usage Limit Reached"}}"##),
+        response_json(400, r##"{"error":{"message":"Usage Limit Reached"}}"##),
+        response_json(400, r##"{"error":{"message":"Usage Limit Reached"}}"##),
+    ])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail");
+    assert!(
+        matches!(
+            result,
+            CodexApiError::Status(code, ref message)
+                if code.as_u16() == 400 && message == "Usage Limit Reached"
+        ),
+        "unexpected error shape: {result:?}"
+    );
+    assert_eq!(server.request_count(), 4);
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_usage_limit_status_retries_due_retryable_status_rule() {
+    let server = ScriptedServer::new(vec![
+        response_json(
+            429,
+            r##"{"error":{"code":"usage_limit_reached","message":"cap exceeded","plan_type":"Pro"}}"##,
+        ),
+        response_json(
+            429,
+            r##"{"error":{"code":"usage_limit_reached","message":"cap exceeded","plan_type":"Pro"}}"##,
+        ),
+        response_json(
+            429,
+            r##"{"error":{"code":"usage_limit_reached","message":"cap exceeded","plan_type":"Pro"}}"##,
+        ),
+        response_json(
+            429,
+            r##"{"error":{"code":"usage_limit_reached","message":"cap exceeded","plan_type":"Pro"}}"##,
+        ),
+    ])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail with usage-limit message");
+    assert!(
+        matches!(
+            result,
+            CodexApiError::Status(code, ref message)
+                if code.as_u16() == 429 && message.contains("usage limit")
+        ),
+        "unexpected error shape: {result:?}"
+    );
+    assert_eq!(server.request_count(), 4);
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_non_json_empty_body_uses_status_reason() {
+    let server = ScriptedServer::new(vec![
+        response_json(400, ""),
+        response_json(400, ""),
+        response_json(400, ""),
+        response_json(400, ""),
+    ])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = client
+        .stream(&request, None)
+        .await
+        .expect_err("stream should fail with status");
+    assert!(matches!(
+        result,
+        CodexApiError::Status(code, ref message) if code.as_u16() == 400 && message == "Bad Request"
+    ));
+    assert_eq!(server.request_count(), 4);
 
     server.shutdown();
 }
 
 #[tokio::test]
 async fn stream_integration_cancellation_during_stream() {
-    if !allow_local_integration() {
-        return;
-    }
-
     let server = ScriptedServer::new(vec![ScriptedResponse::Respond {
         status: 200,
         content_type: "text/event-stream",
+        header_delay_ms: 0,
         chunks: vec![
             ResponseChunk {
                 delay_ms: 0,
                 bytes: sse_frames(&[r##"{"type":"response.output_text.delta","delta":"stream"}"##]),
             },
             ResponseChunk {
-                delay_ms: 200,
+                delay_ms: 1_000,
                 bytes: sse_frames(&[
                     r##"{"type":"response.completed","response":{"status":"completed"}}"##,
                 ]),
@@ -298,7 +535,7 @@ async fn stream_integration_cancellation_during_stream() {
     .await;
 
     let request = CodexRequest::new("gpt-codex", json!("hi"), None);
-    let config = CodexApiConfig::new("tok", "acct").with_base_url(&server.base_url);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = Arc::new(CodexApiClient::new(config).expect("client"));
 
     let cancellation = Arc::new(AtomicBool::new(false));
@@ -310,6 +547,7 @@ async fn stream_integration_cancellation_during_stream() {
     });
 
     sleep(Duration::from_millis(120)).await;
+    let cancelled_at = Instant::now();
     cancellation.store(true, Ordering::Release);
 
     let result = timeout(Duration::from_secs(5), stream_task)
@@ -319,15 +557,136 @@ async fn stream_integration_cancellation_during_stream() {
         .expect_err("cancellation should abort stream");
 
     assert!(matches!(result, CodexApiError::Cancelled));
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(500),
+        "stream cancellation should stop quickly"
+    );
+    assert_eq!(server.request_count(), 1);
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_cancellation_during_retry_backoff() {
+    let server = ScriptedServer::new(vec![response_json(
+        503,
+        r##"{"error":{"message":"overloaded"}}"##,
+    )])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = Arc::new(CodexApiClient::new(config).expect("client"));
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let stream_task = tokio::spawn({
+        let client = Arc::clone(&client);
+        let request = request.clone();
+        let cancellation = Arc::clone(&cancellation);
+        async move { client.stream(&request, Some(&cancellation)).await }
+    });
+
+    sleep(Duration::from_millis(120)).await;
+    let cancelled_at = Instant::now();
+    cancellation.store(true, Ordering::Release);
+
+    let result = timeout(Duration::from_millis(800), stream_task)
+        .await
+        .expect("stream task should resolve quickly")
+        .expect("join handle should resolve")
+        .expect_err("cancellation should abort retry backoff");
+
+    assert!(matches!(result, CodexApiError::Cancelled));
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(500),
+        "retry backoff cancellation should stop quickly"
+    );
+    assert_eq!(server.request_count(), 1);
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_cancellation_during_retryable_error_body_read() {
+    let server = ScriptedServer::new(vec![ScriptedResponse::Respond {
+        status: 503,
+        content_type: "application/json",
+        header_delay_ms: 0,
+        chunks: vec![ResponseChunk {
+            delay_ms: 1_000,
+            bytes: br#"{"error":{"message":"overloaded"}}"#.to_vec(),
+        }],
+    }])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = Arc::new(CodexApiClient::new(config).expect("client"));
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let stream_task = tokio::spawn({
+        let client = Arc::clone(&client);
+        let request = request.clone();
+        let cancellation = Arc::clone(&cancellation);
+        async move { client.stream(&request, Some(&cancellation)).await }
+    });
+
+    sleep(Duration::from_millis(120)).await;
+    let cancelled_at = Instant::now();
+    cancellation.store(true, Ordering::Release);
+
+    let result = timeout(Duration::from_millis(800), stream_task)
+        .await
+        .expect("stream task should resolve quickly")
+        .expect("join handle should resolve")
+        .expect_err("cancellation should abort while reading retryable error body");
+
+    assert!(matches!(result, CodexApiError::Cancelled));
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(500),
+        "error-body read cancellation should stop quickly"
+    );
+    assert_eq!(server.request_count(), 1);
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_integration_timeout_then_retryable_success() {
+    let server = ScriptedServer::new(vec![
+        ScriptedResponse::Respond {
+            status: 200,
+            content_type: "text/event-stream",
+            header_delay_ms: 200,
+            chunks: vec![ResponseChunk {
+                delay_ms: 0,
+                bytes: sse_frames(&[
+                    r##"{"type":"response.completed","response":{"status":"completed"}}"##,
+                ]),
+            }],
+        },
+        response_sse(
+            200,
+            &[r##"{"type":"response.completed","response":{"status":"completed"}}"##],
+        ),
+    ])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct"))
+        .with_base_url(&server.base_url)
+        .with_timeout(Duration::from_millis(80));
+    let client = CodexApiClient::new(config).expect("client");
+
+    let result = timeout(Duration::from_secs(3), client.stream(&request, None))
+        .await
+        .expect("timeout retry path should resolve")
+        .expect("stream should eventually succeed");
+
+    assert_eq!(result.terminal, Some(CodexResponseStatus::Completed));
+    assert_eq!(server.request_count(), 2);
     server.shutdown();
 }
 
 #[tokio::test]
 async fn stream_integration_connection_reset_then_retry_exhausted() {
-    if !allow_local_integration() {
-        return;
-    }
-
     let server = ScriptedServer::new(vec![
         ScriptedResponse::Reset,
         ScriptedResponse::Reset,
@@ -337,7 +696,7 @@ async fn stream_integration_connection_reset_then_retry_exhausted() {
     .await;
 
     let request = CodexRequest::new("gpt-codex", json!("hi"), None);
-    let config = CodexApiConfig::new("tok", "acct").with_base_url(&server.base_url);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
     let result = timeout(Duration::from_secs(20), client.stream(&request, None))
@@ -349,7 +708,7 @@ async fn stream_integration_connection_reset_then_retry_exhausted() {
         result,
         CodexApiError::RetryExhausted { status: None, .. }
     ));
-    assert!(server.request_count() >= 4);
+    assert_eq!(server.request_count(), 4);
 
     server.shutdown();
 }
@@ -384,8 +743,12 @@ async fn serve_one(
         ScriptedResponse::Respond {
             status,
             content_type,
+            header_delay_ms,
             chunks,
         } => {
+            if header_delay_ms > 0 {
+                sleep(Duration::from_millis(header_delay_ms)).await;
+            }
             let headers = format!(
                 "HTTP/1.1 {status} {}\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
                 status_reason(status),

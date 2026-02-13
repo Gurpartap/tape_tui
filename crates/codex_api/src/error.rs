@@ -22,6 +22,10 @@ pub enum CodexApiError {
         status: Option<StatusCode>,
         last_error: Option<String>,
     },
+    StreamFailed {
+        code: Option<String>,
+        message: String,
+    },
     Cancelled,
     JoinError(String),
     Unknown(String),
@@ -45,7 +49,12 @@ pub(crate) struct ErrorPayloadFields {
 
 impl ErrorPayloadFields {
     pub fn usage_limit_message(&self, status: StatusCode) -> Option<String> {
-        let code = self.code.as_deref().or(self.type_.as_deref()).unwrap_or("");
+        let code = self
+            .code
+            .as_deref()
+            .and_then(non_empty_string)
+            .or_else(|| self.type_.as_deref().and_then(non_empty_string))
+            .unwrap_or("");
         if !matches_usage_limit(code, status) {
             return None;
         }
@@ -53,10 +62,12 @@ impl ErrorPayloadFields {
         let plan = self
             .plan_type
             .as_deref()
-            .map(|value| format!(" ({value} plan)"))
+            .and_then(non_empty_string)
+            .map(|value| format!(" ({} plan)", value.to_ascii_lowercase()))
             .unwrap_or_default();
         let mins = self
             .resets_at
+            .filter(|value| *value > 0)
             .and_then(|reset_sec| (reset_sec as i64).checked_mul(1000))
             .and_then(|reset_millis| (reset_millis).checked_sub(current_epoch_ms()))
             .map(|delta| (delta.max(0) as f64 / 60_000f64).round() as i64);
@@ -75,7 +86,7 @@ impl ErrorPayloadFields {
         let explicit = self
             .message
             .as_deref()
-            .filter(|message| !message.trim().is_empty())?;
+            .and_then(non_empty_string)?;
         Some(explicit.to_owned())
     }
 }
@@ -110,6 +121,12 @@ impl fmt::Display for CodexApiError {
                     .unwrap_or_else(|| "n/a".to_owned());
                 write!(f, "retry exhausted after max attempts (status: {status}, last_error: {last_error:?})")
             }
+            Self::StreamFailed { code, message } => match code {
+                Some(code) if !code.trim().is_empty() => {
+                    write!(f, "stream failed ({code}): {message}")
+                }
+                _ => write!(f, "stream failed: {message}"),
+            },
             Self::Cancelled => write!(f, "request was cancelled"),
             Self::JoinError(message) => write!(f, "stream join failure: {message}"),
             Self::Unknown(message) => write!(f, "{message}"),
@@ -134,7 +151,16 @@ impl From<JsonError> for CodexApiError {
 pub fn parse_error_message(status: StatusCode, body: &str) -> String {
     let parsed = match serde_json::from_str::<ErrorPayload>(body) {
         Ok(payload) => payload,
-        Err(_) => return body.trim().to_string(),
+        Err(_) => {
+            return if body.is_empty() {
+                status
+                    .canonical_reason()
+                    .unwrap_or("request failed")
+                    .to_string()
+            } else {
+                body.to_string()
+            };
+        }
     };
 
     if let Some(error) = parsed.value {
@@ -146,13 +172,13 @@ pub fn parse_error_message(status: StatusCode, body: &str) -> String {
         }
     }
 
-    if body.trim().is_empty() {
+    if body.is_empty() {
         status
             .canonical_reason()
             .unwrap_or("request failed")
             .to_string()
     } else {
-        body.trim().to_string()
+        body.to_string()
     }
 }
 
@@ -169,4 +195,12 @@ fn current_epoch_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     i64::try_from(now.as_millis()).unwrap_or(i64::MAX)
+}
+
+fn non_empty_string(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }

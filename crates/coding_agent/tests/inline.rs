@@ -127,9 +127,7 @@ fn prompt_is_visible_on_start() {
 
     let rendered = run_until(&mut tui, Duration::from_secs(1), || {
         let output = support::rendered_output(&terminal_trace);
-        output.contains("Coding Agent")
-            && output.contains("Ready")
-            && output.contains("\x1b[7m")
+        output.contains("Coding Agent") && output.contains("Ready") && output.contains("\x1b[7m")
     });
     assert!(rendered, "initial prompt render was not observed");
 
@@ -254,7 +252,10 @@ fn run_event_queue_applies_in_order() {
                 .iter()
                 .any(|message| message.role == Role::Assistant && !message.streaming)
     });
-    assert!(completed, "ordered queue events did not reach a completed assistant message");
+    assert!(
+        completed,
+        "ordered queue events did not reach a completed assistant message"
+    );
 
     let app = support::lock_unpoisoned(&app);
     let assistant_messages: Vec<_> = app
@@ -345,7 +346,10 @@ fn input_history_up_down_keys_cycle_and_return_to_live_draft() {
     let recalled_third = run_until(&mut tui, Duration::from_secs(1), || {
         support::lock_unpoisoned(&app).input == "first command"
     });
-    assert!(recalled_third, "additional up did not stay at oldest command");
+    assert!(
+        recalled_third,
+        "additional up did not stay at oldest command"
+    );
 
     support::inject_input(&terminal_trace, "\x1bOB");
     let restored_middle = run_until(&mut tui, Duration::from_secs(1), || {

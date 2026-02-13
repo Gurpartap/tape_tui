@@ -5,18 +5,18 @@ use crate::events::{CodexResponseStatus, CodexStreamEvent};
 /// Incremental parser for SSE text streams.
 #[derive(Debug, Default)]
 pub struct SseStreamParser {
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 impl SseStreamParser {
     /// Feed arbitrary bytes into the parser and drain complete events.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<CodexStreamEvent> {
-        self.buffer.push_str(&String::from_utf8_lossy(bytes));
+        self.buffer.extend_from_slice(bytes);
         let mut events = Vec::new();
 
-        while let Some(split) = self.buffer.find("\n\n") {
-            let frame = self.buffer[..split].to_string();
-            self.buffer.drain(0..split + 2);
+        while let Some((split, separator_len)) = find_frame_separator(&self.buffer) {
+            let frame = self.buffer[..split].to_vec();
+            self.buffer.drain(0..split + separator_len);
 
             if let Some(payload) = extract_data_payload(&frame) {
                 if payload == "[DONE]" || payload.is_empty() {
@@ -41,11 +41,24 @@ impl SseStreamParser {
     }
 
     pub fn is_empty_buffer(&self) -> bool {
-        self.buffer.trim().is_empty()
+        self.buffer.iter().all(|byte| byte.is_ascii_whitespace())
     }
 }
 
-fn extract_data_payload(frame: &str) -> Option<String> {
+fn find_frame_separator(buffer: &[u8]) -> Option<(usize, usize)> {
+    for index in 0..buffer.len() {
+        if index + 1 < buffer.len() && &buffer[index..index + 2] == b"\n\n" {
+            return Some((index, 2));
+        }
+        if index + 3 < buffer.len() && &buffer[index..index + 4] == b"\r\n\r\n" {
+            return Some((index, 4));
+        }
+    }
+    None
+}
+
+fn extract_data_payload(frame: &[u8]) -> Option<String> {
+    let frame = std::str::from_utf8(frame).ok()?;
     let data_lines: Vec<&str> = frame
         .lines()
         .filter_map(|line| line.strip_prefix("data:"))
@@ -61,9 +74,9 @@ fn extract_data_payload(frame: &str) -> Option<String> {
 }
 
 fn map_event(value: Value) -> Option<CodexStreamEvent> {
-    let event_type = value.get("type")?.as_str()?;
+    let event_type = value.get("type")?.as_str()?.to_owned();
 
-    match event_type {
+    match event_type.as_str() {
         "response.output_text.delta" => {
             let delta = value
                 .get("delta")
@@ -100,8 +113,7 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
                 .get("response")
                 .and_then(|response| response.get("status"))
                 .and_then(|status| status.as_str())
-                .and_then(CodexResponseStatus::parse)
-                .unwrap_or(CodexResponseStatus::Completed);
+                .and_then(CodexResponseStatus::parse);
 
             // Keep alias handling explicit so callers receive normalized completion.
             Some(CodexStreamEvent::ResponseCompleted { status })
@@ -112,6 +124,7 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
                 .and_then(|response| response.get("error"))
                 .and_then(|error| error.get("message"))
                 .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
                 .map(ToString::to_string);
             Some(CodexStreamEvent::ResponseFailed { message })
         }
@@ -119,14 +132,26 @@ fn map_event(value: Value) -> Option<CodexStreamEvent> {
             let code = value
                 .get("code")
                 .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
                 .map(ToString::to_string);
             let message = value
                 .get("message")
                 .and_then(|value| value.as_str())
-                .map(ToString::to_string);
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| {
+                    if code.is_none() {
+                        serde_json::to_string(&value).ok()
+                    } else {
+                        None
+                    }
+                });
             Some(CodexStreamEvent::Error { code, message })
         }
-        _ => None,
+        _ => Some(CodexStreamEvent::Unknown {
+            event_type,
+            payload: value,
+        }),
     }
 }
 

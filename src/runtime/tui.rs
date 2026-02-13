@@ -22,13 +22,13 @@ use crate::render::Frame;
 use crate::runtime::component_registry::{ComponentId, ComponentRegistry};
 use crate::runtime::ime::position_hardware_cursor;
 use crate::runtime::inline_viewport::InlineViewportState;
-use crate::runtime::surface::{
-    allocate_surface_budgets, measure_visible_surfaces, SurfaceAllocation, SurfaceEntry,
-    SurfaceId, SurfaceInputPolicy, SurfaceMeasurement, SurfaceMutation, SurfaceOptions,
-    SurfaceRenderEntry, SurfaceState,
-};
 #[cfg(test)]
 use crate::runtime::surface::SurfaceKind;
+use crate::runtime::surface::{
+    allocate_surface_budgets, measure_visible_surfaces, SurfaceAllocation, SurfaceEntry, SurfaceId,
+    SurfaceInputPolicy, SurfaceMeasurement, SurfaceMutation, SurfaceOptions, SurfaceRenderEntry,
+    SurfaceState,
+};
 
 const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
@@ -2530,8 +2530,8 @@ impl<T: Terminal> TuiRuntime<T> {
             debug_assert_eq!(measurement.stack_index, allocation.stack_index);
 
             let surface_options = entry.options.unwrap_or_default();
-            let mut layout_options =
-                surface_options.with_lane_reservations(allocation.reserved_top, allocation.reserved_bottom);
+            let mut layout_options = surface_options
+                .with_lane_reservations(allocation.reserved_top, allocation.reserved_bottom);
             layout_options.width = Some(crate::runtime::surface::SurfaceSizeValue::absolute(
                 allocation.allocated_width,
             ));

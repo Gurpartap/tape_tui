@@ -176,7 +176,10 @@ impl BuiltinToolExecutor {
         let bytes = match fs::read(&resolved) {
             Ok(bytes) => bytes,
             Err(error) => {
-                return ToolOutput::fail(format!("Failed to read file {}: {error}", resolved.display()));
+                return ToolOutput::fail(format!(
+                    "Failed to read file {}: {error}",
+                    resolved.display()
+                ));
             }
         };
 
@@ -209,7 +212,10 @@ impl BuiltinToolExecutor {
         let current_content = match fs::read_to_string(&resolved) {
             Ok(content) => content,
             Err(error) => {
-                return ToolOutput::fail(format!("Failed to read file {}: {error}", resolved.display()));
+                return ToolOutput::fail(format!(
+                    "Failed to read file {}: {error}",
+                    resolved.display()
+                ));
             }
         };
 
@@ -222,7 +228,10 @@ impl BuiltinToolExecutor {
 
         let updated_content = current_content.replacen(&old_text, &new_text, 1);
         if let Err(error) = fs::write(&resolved, updated_content) {
-            return ToolOutput::fail(format!("Failed to write file {}: {error}", resolved.display()));
+            return ToolOutput::fail(format!(
+                "Failed to write file {}: {error}",
+                resolved.display()
+            ));
         }
 
         ToolOutput::ok(format!("Updated {}", resolved.display()))
@@ -258,7 +267,10 @@ impl BuiltinToolExecutor {
         }
 
         if let Err(error) = fs::write(&resolved, content) {
-            return ToolOutput::fail(format!("Failed to write file {}: {error}", resolved.display()));
+            return ToolOutput::fail(format!(
+                "Failed to write file {}: {error}",
+                resolved.display()
+            ));
         }
 
         ToolOutput::ok(format!("Wrote {}", resolved.display()))
@@ -365,9 +377,9 @@ fn truncate_to_byte_limit(content: String, max_bytes: usize) -> String {
 fn canonicalize_existing_ancestor(path: &Path) -> Result<PathBuf, String> {
     for ancestor in path.ancestors() {
         if ancestor.exists() {
-            return ancestor
-                .canonicalize()
-                .map_err(|error| format!("Failed to resolve path {}: {error}", ancestor.display()));
+            return ancestor.canonicalize().map_err(|error| {
+                format!("Failed to resolve path {}: {error}", ancestor.display())
+            });
         }
     }
 

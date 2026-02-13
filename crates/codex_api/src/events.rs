@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Canonical terminal state mapped from Codex responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +52,10 @@ pub enum CodexStreamEvent {
         status: Option<CodexResponseStatus>,
     },
     #[serde(rename = "response.completed")]
-    ResponseCompleted { status: CodexResponseStatus },
+    ResponseCompleted {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<CodexResponseStatus>,
+    },
     #[serde(rename = "response.failed")]
     ResponseFailed { message: Option<String> },
     #[serde(rename = "error")]
@@ -59,9 +63,9 @@ pub enum CodexStreamEvent {
         code: Option<String>,
         message: Option<String>,
     },
-    /// Unknown or unhandled event type.
-    #[serde(other)]
-    Unknown,
+    /// Unknown event type retained for parity-safe passthrough behavior.
+    #[serde(rename = "unknown")]
+    Unknown { event_type: String, payload: Value },
 }
 
 #[derive(Debug, Clone, Default)]
