@@ -40,9 +40,9 @@ impl Terminal for NullTerminal {
 }
 
 #[derive(Default)]
-struct BlockingCancelBackend;
+struct BlockingCancelProvider;
 
-impl RunProvider for BlockingCancelBackend {
+impl RunProvider for BlockingCancelProvider {
     fn run(
         &self,
         req: RunRequest,
@@ -68,9 +68,9 @@ impl RunProvider for BlockingCancelBackend {
 }
 
 #[derive(Default)]
-struct RacingCancelBackend;
+struct RacingCancelProvider;
 
-impl RunProvider for RacingCancelBackend {
+impl RunProvider for RacingCancelProvider {
     fn run(
         &self,
         req: RunRequest,
@@ -101,9 +101,9 @@ impl RunProvider for RacingCancelBackend {
 }
 
 #[derive(Default)]
-struct FlushFallbackBackend;
+struct FlushFallbackProvider;
 
-impl RunProvider for FlushFallbackBackend {
+impl RunProvider for FlushFallbackProvider {
     fn run(
         &self,
         req: RunRequest,
@@ -217,10 +217,10 @@ fn running_run_id(mode: &Mode) -> RunId {
 fn cancel_while_running_results_in_cancelled_state() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn RunProvider> = Arc::new(BlockingCancelBackend);
+        let provider: Arc<dyn RunProvider> = Arc::new(BlockingCancelProvider);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
         let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -272,10 +272,10 @@ fn cancel_while_running_results_in_cancelled_state() {
 fn repeated_cancel_is_a_noop_after_first_signal() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn RunProvider> = Arc::new(BlockingCancelBackend);
+        let provider: Arc<dyn RunProvider> = Arc::new(BlockingCancelProvider);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
         let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
 
         let _run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -338,10 +338,10 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
 fn cancel_race_keeps_single_non_streaming_assistant_message() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn RunProvider> = Arc::new(RacingCancelBackend);
+        let provider: Arc<dyn RunProvider> = Arc::new(RacingCancelProvider);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
         let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -412,13 +412,13 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
 fn flush_pending_events_in_headless_usage() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn RunProvider> = Arc::new(FlushFallbackBackend);
+        let provider: Arc<dyn RunProvider> = Arc::new(FlushFallbackProvider);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
 
         // This test intentionally avoids running the TUI loop to emulate a headless caller
         // that must drive event application explicitly via flush_pending_run_events.
         let runtime_handle = runtime_loop.runtime_handle();
-        let mut host = RuntimeController::new(app.clone(), runtime_handle, model, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_handle, provider, tools);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);

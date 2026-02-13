@@ -336,7 +336,7 @@ fn render_working_directory() -> String {
             let home = std::env::var("HOME").ok();
             format_working_directory_with_home(&cwd, &branch, home.as_deref())
         }
-        Err(_) => format!("{}", dim("<unable to read current working directory>")),
+        Err(_) => dim("<unable to read current working directory>").to_string(),
     }
 }
 

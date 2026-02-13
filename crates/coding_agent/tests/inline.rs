@@ -14,9 +14,9 @@ use tape_tui::TUI;
 mod support;
 
 #[derive(Default)]
-struct BlockingBackend;
+struct BlockingProvider;
 
-impl RunProvider for BlockingBackend {
+impl RunProvider for BlockingProvider {
     fn run(
         &self,
         req: RunRequest,
@@ -42,9 +42,9 @@ impl RunProvider for BlockingBackend {
 }
 
 #[derive(Default)]
-struct OrderedChunkBackend;
+struct OrderedChunkProvider;
 
-impl RunProvider for OrderedChunkBackend {
+impl RunProvider for OrderedChunkProvider {
     fn run(
         &self,
         req: RunRequest,
@@ -69,8 +69,8 @@ impl RunProvider for OrderedChunkBackend {
     }
 }
 
-fn setup_runtime_with_model(
-    model: Arc<dyn RunProvider>,
+fn setup_runtime_with_provider(
+    provider: Arc<dyn RunProvider>,
 ) -> (
     TUI<support::SharedTerminal>,
     Arc<Mutex<App>>,
@@ -82,7 +82,7 @@ fn setup_runtime_with_model(
 
     let runtime_handle = tui.runtime_handle();
     let tools = BuiltinToolExecutor::new(".").expect("workspace root resolves");
-    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, model, tools);
+    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider, tools);
 
     let root = tui.register_component(AppComponent::new(Arc::clone(&app), host));
     tui.set_root(vec![root]);
@@ -96,7 +96,7 @@ fn setup_runtime() -> (
     Arc<Mutex<App>>,
     Arc<Mutex<support::TerminalTrace>>,
 ) {
-    setup_runtime_with_model(Arc::new(MockProvider::new(vec![
+    setup_runtime_with_provider(Arc::new(MockProvider::new(vec![
         "first chunk\n".to_string(),
         "second chunk".to_string(),
     ])))
@@ -137,7 +137,7 @@ fn prompt_is_visible_on_start() {
 
 #[test]
 fn composer_remains_interactive_during_streaming() {
-    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(BlockingBackend));
+    let (mut tui, app, terminal_trace) = setup_runtime_with_provider(Arc::new(BlockingProvider));
 
     tui.start().expect("runtime start");
     tui.run_once();
@@ -176,7 +176,7 @@ fn composer_remains_interactive_during_streaming() {
 
 #[test]
 fn escape_key_cancels_active_run() {
-    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(BlockingBackend));
+    let (mut tui, app, terminal_trace) = setup_runtime_with_provider(Arc::new(BlockingProvider));
 
     tui.start().expect("runtime start");
     tui.run_once();
@@ -206,7 +206,7 @@ fn escape_key_cancels_active_run() {
 
 #[test]
 fn escape_key_stops_streaming_immediately() {
-    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(BlockingBackend));
+    let (mut tui, app, terminal_trace) = setup_runtime_with_provider(Arc::new(BlockingProvider));
 
     tui.start().expect("runtime start");
     tui.run_once();
@@ -237,7 +237,8 @@ fn escape_key_stops_streaming_immediately() {
 
 #[test]
 fn run_event_queue_applies_in_order() {
-    let (mut tui, app, terminal_trace) = setup_runtime_with_model(Arc::new(OrderedChunkBackend));
+    let (mut tui, app, terminal_trace) =
+        setup_runtime_with_provider(Arc::new(OrderedChunkProvider));
 
     tui.start().expect("runtime start");
     tui.run_once();
@@ -289,7 +290,7 @@ fn normal_flow_stays_inline_without_alternate_screen_sequences() {
                 message.role == Role::Assistant && !message.streaming && !message.content.is_empty()
             })
     });
-    assert!(run_finished, "model run did not complete in time");
+    assert!(run_finished, "provider run did not complete in time");
 
     support::inject_input(&terminal_trace, "/quit");
     support::inject_input(&terminal_trace, "\r");

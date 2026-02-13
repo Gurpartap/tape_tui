@@ -22,9 +22,9 @@ fn setup_runtime() -> (
     let mut tui = TUI::new(terminal);
 
     let runtime_handle = tui.runtime_handle();
-    let model: Arc<dyn RunProvider> = Arc::new(MockProvider::default());
+    let provider: Arc<dyn RunProvider> = Arc::new(MockProvider::default());
     let tools = BuiltinToolExecutor::new(".").expect("workspace root resolves");
-    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, model, tools);
+    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider, tools);
 
     let root = tui.register_component(AppComponent::new(Arc::clone(&app), host));
     tui.set_root(vec![root]);

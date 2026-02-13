@@ -110,6 +110,12 @@ pub trait HostOps {
 const HELP_TEXT: &str = "Commands: /help, /clear, /cancel, /quit";
 const ERROR_RUN_ALREADY_ACTIVE: &str = "Run already active";
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {

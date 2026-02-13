@@ -18,8 +18,7 @@ fn main() -> io::Result<()> {
 
     let provider: Arc<dyn RunProvider> = Arc::new(MockProvider::default());
     let workspace_root = std::env::current_dir()?;
-    let tools = BuiltinToolExecutor::new(workspace_root)
-        .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+    let tools = BuiltinToolExecutor::new(workspace_root).map_err(io::Error::other)?;
 
     let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider, tools);
     let root_component =
