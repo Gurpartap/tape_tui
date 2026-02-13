@@ -197,6 +197,7 @@ fn map_event(value: Value) -> Vec<CodexStreamEvent> {
 #[cfg(test)]
 mod tests {
     use super::SseStreamParser;
+    use crate::events::{CodexResponseStatus, CodexStreamEvent};
 
     #[test]
     fn parse_sse_frames_incrementally() {
@@ -211,5 +212,56 @@ mod tests {
         events.extend(parser.feed(b"data: [DONE]\n\n"));
         assert_eq!(events.len(), 1);
         assert!(parser.is_empty_buffer());
+    }
+
+    #[test]
+    fn parse_function_call_output_item_emits_ordered_tool_call_events() {
+        let payload = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"status\":\"in_progress\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}\n\n"
+        );
+
+        let events = SseStreamParser::parse_frames(payload);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events.first(),
+            Some(CodexStreamEvent::OutputItemDone {
+                id: Some(id),
+                status: Some(CodexResponseStatus::InProgress),
+            }) if id == "fc_1"
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(CodexStreamEvent::ToolCallRequested {
+                id: Some(id),
+                call_id: Some(call_id),
+                tool_name: Some(tool_name),
+                arguments: Some(serde_json::Value::String(arguments)),
+            }) if id == "fc_1"
+                && call_id == "call_1"
+                && tool_name == "read"
+                && arguments == "{\"path\":\"README.md\"}"
+        ));
+    }
+
+    #[test]
+    fn parse_function_call_output_item_preserves_non_object_arguments() {
+        let payload = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_bad\",\"call_id\":\"call_bad\",\"name\":\"bash\",\"arguments\":17}}\n\n"
+        );
+
+        let events = SseStreamParser::parse_frames(payload);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events.get(1),
+            Some(CodexStreamEvent::ToolCallRequested {
+                id: Some(id),
+                call_id: Some(call_id),
+                tool_name: Some(tool_name),
+                arguments: Some(serde_json::Value::Number(number)),
+            }) if id == "fc_bad"
+                && call_id == "call_bad"
+                && tool_name == "bash"
+                && number.as_i64() == Some(17)
+        ));
     }
 }

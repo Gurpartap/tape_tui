@@ -996,6 +996,93 @@ mod tests {
     }
 
     #[test]
+    fn run_cancels_when_terminal_status_is_cancelled_while_tool_calls_are_pending() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: vec![CodexStreamEvent::ToolCallRequested {
+                id: Some("fc_cancel".to_string()),
+                call_id: Some("call_cancel".to_string()),
+                tool_name: Some("read".to_string()),
+                arguments: Some(Value::String("{\"path\":\"README.md\"}".to_string())),
+            }],
+            terminal: Some(CodexResponseStatus::Cancelled),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let events = run_events_with_executor(&provider, |_call| {
+            panic!("tool executor should not run after cancelled terminal status")
+        });
+
+        assert!(matches!(
+            events.first(),
+            Some(RunEvent::Started { run_id: 9 })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Cancelled { run_id: 9 })
+        ));
+        assert_eq!(stream.observed_requests().len(), 1);
+    }
+
+    #[test]
+    fn run_fails_when_terminal_status_is_non_complete_while_tool_calls_are_pending() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: vec![CodexStreamEvent::ToolCallRequested {
+                id: Some("fc_pending".to_string()),
+                call_id: Some("call_pending".to_string()),
+                tool_name: Some("bash".to_string()),
+                arguments: Some(Value::String("{\"command\":\"pwd\"}".to_string())),
+            }],
+            terminal: Some(CodexResponseStatus::InProgress),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let events = run_events_with_executor(&provider, |_call| {
+            panic!("tool executor should not run for non-complete terminal status")
+        });
+
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Failed { run_id: 9, error })
+                if error.contains("non-complete terminal status 'in_progress' while processing tool calls")
+        ));
+        assert_eq!(stream.observed_requests().len(), 1);
+    }
+
+    #[test]
+    fn run_fails_when_terminal_status_is_missing_while_tool_calls_are_pending() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: vec![CodexStreamEvent::ToolCallRequested {
+                id: Some("fc_missing_terminal".to_string()),
+                call_id: Some("call_missing_terminal".to_string()),
+                tool_name: Some("read".to_string()),
+                arguments: Some(Value::String("{\"path\":\"README.md\"}".to_string())),
+            }],
+            terminal: None,
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let events = run_events_with_executor(&provider, |_call| {
+            panic!("tool executor should not run when terminal status is missing")
+        });
+
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Failed { run_id: 9, error })
+                if error.contains("without terminal status while processing tool calls")
+        ));
+        assert_eq!(stream.observed_requests().len(), 1);
+    }
+
+    #[test]
     fn run_fails_explicitly_when_tool_call_payload_is_malformed() {
         let stream = FakeStreamClient::success(StreamResult {
             events: vec![CodexStreamEvent::ToolCallRequested {
