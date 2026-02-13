@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
+use apply_patch_engine::{
+    maybe_parse_apply_patch_verified, ApplyPatchError, ApplyPatchFileChange,
+    MaybeApplyPatchVerified,
+};
 use wait_timeout::ChildExt;
 
 const DEFAULT_BASH_TIMEOUT_SEC: u64 = 30;
@@ -29,6 +33,34 @@ pub enum ToolCall {
         path: String,
         content: String,
     },
+    ApplyPatch {
+        input: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum PatchMutation {
+    Add {
+        path: PathBuf,
+        content: String,
+    },
+    Delete {
+        path: PathBuf,
+    },
+    Update {
+        source_path: PathBuf,
+        destination_path: PathBuf,
+        content: String,
+    },
+}
+
+impl PatchMutation {
+    fn sort_key(&self) -> String {
+        match self {
+            Self::Add { path, .. } | Self::Delete { path } => path.to_string_lossy().to_string(),
+            Self::Update { source_path, .. } => source_path.to_string_lossy().to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,6 +308,168 @@ impl BuiltinToolExecutor {
         ToolOutput::ok(format!("Wrote {}", resolved.display()))
     }
 
+    fn execute_apply_patch(&self, input: String) -> ToolOutput {
+        if input.trim().is_empty() {
+            return ToolOutput::fail("apply_patch requires non-empty input".to_string());
+        }
+
+        let argv = vec!["apply_patch".to_string(), input];
+        let action = match maybe_parse_apply_patch_verified(&argv, &self.workspace_root) {
+            MaybeApplyPatchVerified::Body(action) => action,
+            MaybeApplyPatchVerified::CorrectnessError(error) => {
+                return ToolOutput::fail(self.map_apply_patch_error(error));
+            }
+            MaybeApplyPatchVerified::ShellParseError(error) => {
+                return ToolOutput::fail(format!(
+                    "apply_patch parse error: failed to parse invocation shell: {error:?}"
+                ));
+            }
+            MaybeApplyPatchVerified::NotApplyPatch => {
+                return ToolOutput::fail(
+                    "apply_patch parse error: input did not contain a valid apply_patch command"
+                        .to_string(),
+                );
+            }
+        };
+
+        if action.is_empty() {
+            return ToolOutput::fail("apply_patch produced no file changes".to_string());
+        }
+
+        let mut mutations = Vec::new();
+        for (path, change) in action.changes() {
+            let mutation = match change {
+                ApplyPatchFileChange::Add { content } => {
+                    let resolved = match self.resolve_patch_write_target(path) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            return ToolOutput::fail(self.map_apply_patch_path_error(error));
+                        }
+                    };
+
+                    PatchMutation::Add {
+                        path: resolved,
+                        content: content.clone(),
+                    }
+                }
+                ApplyPatchFileChange::Delete { .. } => {
+                    let resolved = match self.resolve_patch_existing_path(path) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            return ToolOutput::fail(self.map_apply_patch_path_error(error));
+                        }
+                    };
+
+                    PatchMutation::Delete { path: resolved }
+                }
+                ApplyPatchFileChange::Update {
+                    move_path,
+                    new_content,
+                    ..
+                } => {
+                    let source_path = match self.resolve_patch_existing_path(path) {
+                        Ok(path) => path,
+                        Err(error) => {
+                            return ToolOutput::fail(self.map_apply_patch_path_error(error));
+                        }
+                    };
+
+                    let destination_path = match move_path {
+                        Some(move_path) => match self.resolve_patch_write_target(move_path) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                return ToolOutput::fail(self.map_apply_patch_path_error(error));
+                            }
+                        },
+                        None => source_path.clone(),
+                    };
+
+                    PatchMutation::Update {
+                        source_path,
+                        destination_path,
+                        content: new_content.clone(),
+                    }
+                }
+            };
+
+            mutations.push(mutation);
+        }
+
+        mutations.sort_by_key(PatchMutation::sort_key);
+
+        let mut added = Vec::new();
+        let mut modified = Vec::new();
+        let mut deleted = Vec::new();
+
+        for mutation in mutations {
+            match mutation {
+                PatchMutation::Add { path, content } => {
+                    if let Some(parent) = path.parent() {
+                        if let Err(error) = fs::create_dir_all(parent) {
+                            return ToolOutput::fail(format!(
+                                "apply_patch io failure while creating parent directory {}: {error}",
+                                parent.display()
+                            ));
+                        }
+                    }
+
+                    if let Err(error) = fs::write(&path, content) {
+                        return ToolOutput::fail(format!(
+                            "apply_patch io failure while writing {}: {error}",
+                            path.display()
+                        ));
+                    }
+
+                    added.push(path);
+                }
+                PatchMutation::Delete { path } => {
+                    if let Err(error) = fs::remove_file(&path) {
+                        return ToolOutput::fail(format!(
+                            "apply_patch io failure while deleting {}: {error}",
+                            path.display()
+                        ));
+                    }
+
+                    deleted.push(path);
+                }
+                PatchMutation::Update {
+                    source_path,
+                    destination_path,
+                    content,
+                } => {
+                    if let Some(parent) = destination_path.parent() {
+                        if let Err(error) = fs::create_dir_all(parent) {
+                            return ToolOutput::fail(format!(
+                                "apply_patch io failure while creating parent directory {}: {error}",
+                                parent.display()
+                            ));
+                        }
+                    }
+
+                    if let Err(error) = fs::write(&destination_path, content) {
+                        return ToolOutput::fail(format!(
+                            "apply_patch io failure while writing {}: {error}",
+                            destination_path.display()
+                        ));
+                    }
+
+                    if source_path != destination_path {
+                        if let Err(error) = fs::remove_file(&source_path) {
+                            return ToolOutput::fail(format!(
+                                "apply_patch io failure while removing source {}: {error}",
+                                source_path.display()
+                            ));
+                        }
+                    }
+
+                    modified.push(destination_path);
+                }
+            }
+        }
+
+        ToolOutput::ok(self.format_apply_patch_summary(&added, &modified, &deleted))
+    }
+
     fn resolve_existing_path(&self, path: &str) -> Result<PathBuf, String> {
         if path.trim().is_empty() {
             return Err("Path must not be empty".to_string());
@@ -328,6 +522,81 @@ impl BuiltinToolExecutor {
             ))
         }
     }
+
+    fn resolve_patch_existing_path(&self, path: &Path) -> Result<PathBuf, String> {
+        self.resolve_existing_path(path.to_string_lossy().as_ref())
+    }
+
+    fn resolve_patch_write_target(&self, path: &Path) -> Result<PathBuf, String> {
+        if path.exists() {
+            let canonical = path
+                .canonicalize()
+                .map_err(|error| format!("Failed to resolve path {}: {error}", path.display()))?;
+            self.ensure_inside_workspace(&canonical)?;
+            Ok(path.to_path_buf())
+        } else {
+            self.resolve_write_path(path.to_string_lossy().as_ref())
+        }
+    }
+
+    fn map_apply_patch_error(&self, error: ApplyPatchError) -> String {
+        match error {
+            ApplyPatchError::ParseError(error) => format!("apply_patch parse error: {error}"),
+            ApplyPatchError::ComputeReplacements(error) => {
+                format!("apply_patch context mismatch: {error}")
+            }
+            ApplyPatchError::IoError(error) => format!("apply_patch io failure: {error}"),
+            ApplyPatchError::ImplicitInvocation => {
+                "apply_patch invocation error: patch must be passed as the explicit apply_patch input"
+                    .to_string()
+            }
+        }
+    }
+
+    fn map_apply_patch_path_error(&self, error: String) -> String {
+        if error.contains("Path escapes workspace root") {
+            format!("apply_patch path escape rejected: {error}")
+        } else {
+            format!("apply_patch path validation failed: {error}")
+        }
+    }
+
+    fn format_apply_patch_summary(
+        &self,
+        added: &[PathBuf],
+        modified: &[PathBuf],
+        deleted: &[PathBuf],
+    ) -> String {
+        let mut summary_lines = vec!["Success. Updated the following files:".to_string()];
+
+        let mut added = added.to_vec();
+        let mut modified = modified.to_vec();
+        let mut deleted = deleted.to_vec();
+
+        added.sort();
+        modified.sort();
+        deleted.sort();
+
+        for path in added {
+            summary_lines.push(format!("A {}", self.workspace_relative_display(&path)));
+        }
+
+        for path in modified {
+            summary_lines.push(format!("M {}", self.workspace_relative_display(&path)));
+        }
+
+        for path in deleted {
+            summary_lines.push(format!("D {}", self.workspace_relative_display(&path)));
+        }
+
+        summary_lines.join("\n")
+    }
+
+    fn workspace_relative_display(&self, path: &Path) -> String {
+        path.strip_prefix(&self.workspace_root)
+            .map(|relative| relative.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string())
+    }
 }
 
 impl ToolExecutor for BuiltinToolExecutor {
@@ -345,6 +614,7 @@ impl ToolExecutor for BuiltinToolExecutor {
                 new_text,
             } => self.execute_edit_file(path, old_text, new_text),
             ToolCall::WriteFile { path, content } => self.execute_write_file(path, content),
+            ToolCall::ApplyPatch { input } => self.execute_apply_patch(input),
         }
     }
 }

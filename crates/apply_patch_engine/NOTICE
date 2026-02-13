@@ -1,0 +1,12 @@
+This crate contains code derived from:
+
+  OpenAI Codex repository
+  https://github.com/openai/codex
+  commit dd80e332c45aefc935d68fe067026ccf40312ccd
+  path: codex-rs/apply-patch
+
+Modified sections in this port:
+- crate/package wiring for local workspace (`apply_patch_engine` naming)
+- binary entrypoint namespace update in `src/main.rs`
+- additional local integration tests in `tests/engine.rs`
+- provenance documentation (`UPSTREAM.md`, `NOTICE`)

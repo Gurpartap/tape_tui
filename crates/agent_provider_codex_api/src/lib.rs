@@ -3,7 +3,7 @@
 //! This adapter translates `codex_api` stream semantics into deterministic
 //! `RunEvent` lifecycle events expected by `coding_agent`.
 //! Host-mediated tool execution is serial and limited to the v1 tool pack
-//! (`bash`, `read`, `edit`, `write`), with explicit failure/cancel outcomes for
+//! (`bash`, `read`, `edit`, `write`, `apply_patch`), with explicit failure/cancel outcomes for
 //! malformed payloads or non-complete terminal statuses.
 
 use std::sync::atomic::Ordering;
@@ -24,7 +24,7 @@ use url::Url;
 /// Stable provider identifier used by `coding_agent` startup selection.
 pub const CODEX_API_PROVIDER_ID: &str = "codex-api";
 
-const V1_TOOL_NAMES: [&str; 4] = ["bash", "read", "edit", "write"];
+const V1_TOOL_NAMES: [&str; 5] = ["bash", "read", "edit", "write", "apply_patch"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelectionState {
@@ -514,6 +514,20 @@ fn v1_tool_definitions() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
         },
+        ToolDefinition {
+            name: "apply_patch".to_string(),
+            description: Some(
+                "Apply an apply_patch-formatted patch to workspace files".to_string(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string" }
+                },
+                "required": ["input"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
@@ -878,7 +892,6 @@ mod tests {
                 .map(|name| (*name).to_string())
                 .collect::<Vec<_>>()
         );
-        assert!(!names.iter().any(|name| name == "apply_patch"));
     }
 
     #[test]
@@ -1016,6 +1029,174 @@ mod tests {
         assert_eq!(follow_up_input[1]["type"], "function_call_output");
         assert_eq!(follow_up_input[1]["call_id"], "call_1");
         assert_eq!(follow_up_input[1]["output"], "file contents");
+
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Finished { run_id: 9 })
+        ));
+    }
+
+    #[test]
+    fn run_roundtrips_apply_patch_success_call() {
+        let patch_input =
+            "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch";
+        let stream = FakeStreamClient::scripted(vec![
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![CodexStreamEvent::ToolCallRequested {
+                    id: Some("fc_apply_patch_1".to_string()),
+                    call_id: Some("call_apply_patch_1".to_string()),
+                    tool_name: Some("apply_patch".to_string()),
+                    arguments: Some(Value::String(json!({ "input": patch_input }).to_string())),
+                }],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+        ]);
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let mut observed_calls = Vec::new();
+        let events = run_events_with_executor(&provider, |call| {
+            observed_calls.push(call.clone());
+            ToolResult::success(
+                call.call_id,
+                call.tool_name,
+                "Success. Updated the following files:\nM src/main.rs",
+            )
+        });
+
+        assert_eq!(observed_calls.len(), 1);
+        assert_eq!(observed_calls[0].tool_name, "apply_patch");
+        assert_eq!(observed_calls[0].arguments["input"], patch_input);
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 2);
+        let follow_up_input = requests[1]
+            .input
+            .as_array()
+            .expect("follow-up request input should be an array");
+        assert_eq!(follow_up_input[0]["type"], "function_call");
+        assert_eq!(follow_up_input[0]["name"], "apply_patch");
+        assert_eq!(follow_up_input[1]["type"], "function_call_output");
+        assert_eq!(
+            follow_up_input[1]["output"],
+            "Success. Updated the following files:\nM src/main.rs"
+        );
+
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Finished { run_id: 9 })
+        ));
+    }
+
+    #[test]
+    fn run_roundtrips_apply_patch_malformed_failure_payload() {
+        let stream = FakeStreamClient::scripted(vec![
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![CodexStreamEvent::ToolCallRequested {
+                    id: Some("fc_apply_patch_bad".to_string()),
+                    call_id: Some("call_apply_patch_bad".to_string()),
+                    tool_name: Some("apply_patch".to_string()),
+                    arguments: Some(Value::String(
+                        json!({
+                            "input": "*** Begin Patch\n*** Update File: foo.txt\n@@\n-old\n+new"
+                        })
+                        .to_string(),
+                    )),
+                }],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+        ]);
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let events = run_events_with_executor(&provider, |call| {
+            ToolResult::error(
+                call.call_id,
+                call.tool_name,
+                "apply_patch parse error: invalid patch",
+            )
+        });
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 2);
+        let follow_up_input = requests[1]
+            .input
+            .as_array()
+            .expect("follow-up request input should be an array");
+        assert_eq!(follow_up_input[0]["name"], "apply_patch");
+        assert_eq!(follow_up_input[1]["type"], "function_call_output");
+        assert_eq!(follow_up_input[1]["output"]["success"], false);
+        assert_eq!(
+            follow_up_input[1]["output"]["content"],
+            "apply_patch parse error: invalid patch"
+        );
+
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Finished { run_id: 9 })
+        ));
+    }
+
+    #[test]
+    fn run_roundtrips_apply_patch_path_escape_failure_payload() {
+        let stream = FakeStreamClient::scripted(vec![
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![CodexStreamEvent::ToolCallRequested {
+                    id: Some("fc_apply_patch_escape".to_string()),
+                    call_id: Some("call_apply_patch_escape".to_string()),
+                    tool_name: Some("apply_patch".to_string()),
+                    arguments: Some(Value::String(
+                        json!({
+                            "input": "*** Begin Patch\n*** Add File: ../escape.txt\n+bad\n*** End Patch"
+                        })
+                        .to_string(),
+                    )),
+                }],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+        ]);
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let events = run_events_with_executor(&provider, |call| {
+            ToolResult::error(
+                call.call_id,
+                call.tool_name,
+                "apply_patch path escape rejected: Path escapes workspace root",
+            )
+        });
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 2);
+        let follow_up_input = requests[1]
+            .input
+            .as_array()
+            .expect("follow-up request input should be an array");
+        assert_eq!(follow_up_input[0]["name"], "apply_patch");
+        assert_eq!(follow_up_input[1]["type"], "function_call_output");
+        assert_eq!(follow_up_input[1]["output"]["success"], false);
+        assert_eq!(
+            follow_up_input[1]["output"]["content"],
+            "apply_patch path escape rejected: Path escapes workspace root"
+        );
 
         assert!(matches!(
             events.last(),
@@ -1208,7 +1389,7 @@ mod tests {
             events: vec![CodexStreamEvent::ToolCallRequested {
                 id: Some("fc_1".to_string()),
                 call_id: Some("call_1".to_string()),
-                tool_name: Some("apply_patch".to_string()),
+                tool_name: Some("unknown_tool".to_string()),
                 arguments: Some(Value::String("{}".to_string())),
             }],
             terminal: Some(CodexResponseStatus::Completed),
@@ -1224,7 +1405,7 @@ mod tests {
 
         assert!(matches!(
             events.last(),
-            Some(RunEvent::Failed { run_id: 9, error }) if error.contains("Unsupported tool call 'apply_patch'")
+            Some(RunEvent::Failed { run_id: 9, error }) if error.contains("Unsupported tool call 'unknown_tool'")
         ));
         assert_eq!(stream.observed_requests().len(), 1);
     }

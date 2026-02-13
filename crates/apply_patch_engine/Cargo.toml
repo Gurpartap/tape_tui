@@ -1,0 +1,24 @@
+[package]
+name = "apply_patch_engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "apply_patch_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "apply_patch"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+similar = "2.7.0"
+thiserror = "2.0.17"
+tree-sitter = "0.25.10"
+tree-sitter-bash = "0.25"
+
+[dev-dependencies]
+assert_matches = "1.5.0"
+pretty_assertions = "1.4.1"
+tempfile = "3.23.0"

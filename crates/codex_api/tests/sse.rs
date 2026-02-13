@@ -198,8 +198,9 @@ fn sse_parser_error_without_code_or_message_keeps_serialized_event_fallback() {
 
 #[test]
 fn sse_parser_error_with_empty_code_and_message_uses_serialized_fallback() {
-    let events =
-        SseStreamParser::parse_frames("data: {\"type\":\"error\",\"code\":\"\",\"message\":\"\"}\n\n");
+    let events = SseStreamParser::parse_frames(
+        "data: {\"type\":\"error\",\"code\":\"\",\"message\":\"\"}\n\n",
+    );
     assert_eq!(events.len(), 1);
     assert!(matches!(
         events.first(),

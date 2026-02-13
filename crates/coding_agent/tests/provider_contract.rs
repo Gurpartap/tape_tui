@@ -825,5 +825,6 @@ fn runtime_composes_non_empty_instructions_with_tool_policy() {
         assert!(instructions.contains("bash"));
         assert!(instructions.contains("edit"));
         assert!(instructions.contains("write"));
+        assert!(instructions.contains("apply_patch"));
     });
 }

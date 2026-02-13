@@ -9,7 +9,7 @@ fn new_executor(workspace_root: &Path) -> BuiltinToolExecutor {
 }
 
 #[test]
-fn all_four_tools_have_success_paths() {
+fn all_five_tools_have_success_paths() {
     let workspace = tempdir().expect("temp workspace");
     let mut executor = new_executor(workspace.path());
 
@@ -49,6 +49,27 @@ fn all_four_tools_have_success_paths() {
     });
     assert!(reread_result.ok);
     assert_eq!(reread_result.content, "hello world");
+
+    let apply_patch_result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Update File: notes/hello.txt\n@@\n-hello world\n+hello patched\n*** End Patch"
+            .to_string(),
+    });
+    assert!(
+        apply_patch_result.ok,
+        "apply_patch should succeed: {}",
+        apply_patch_result.content
+    );
+    assert!(
+        apply_patch_result.content.contains("M notes/hello.txt"),
+        "{}",
+        apply_patch_result.content
+    );
+
+    let patched_result = executor.execute(ToolCall::ReadFile {
+        path: "notes/hello.txt".to_string(),
+    });
+    assert!(patched_result.ok);
+    assert_eq!(patched_result.content, "hello patched\n");
 
     let bash_result = executor.execute(ToolCall::Bash {
         command: "printf 'bash-ok'".to_string(),
@@ -152,4 +173,59 @@ fn edit_file_fails_when_old_text_has_multiple_matches() {
 
     assert!(!result.ok);
     assert!(result.content.contains("found 2"), "{}", result.content);
+}
+
+#[test]
+fn apply_patch_fails_with_explicit_parse_error_on_malformed_patch() {
+    let workspace = tempdir().expect("temp workspace");
+    let mut executor = new_executor(workspace.path());
+
+    let result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Add File: broken.txt\n+oops".to_string(),
+    });
+
+    assert!(!result.ok);
+    assert!(
+        result.content.contains("apply_patch parse error"),
+        "{}",
+        result.content
+    );
+}
+
+#[test]
+fn apply_patch_rejects_path_escape_outside_workspace() {
+    let workspace = tempdir().expect("temp workspace");
+    let mut executor = new_executor(workspace.path());
+
+    let result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Add File: ../escape.txt\n+forbidden\n*** End Patch"
+            .to_string(),
+    });
+
+    assert!(!result.ok);
+    assert!(
+        result.content.contains("apply_patch path escape rejected"),
+        "{}",
+        result.content
+    );
+}
+
+#[test]
+fn apply_patch_fails_with_explicit_context_mismatch() {
+    let workspace = tempdir().expect("temp workspace");
+    let file_path = workspace.path().join("context.txt");
+    fs::write(&file_path, "line-1\nline-2\n").expect("write seed file");
+
+    let mut executor = new_executor(workspace.path());
+    let result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Update File: context.txt\n@@\n-missing-line\n+replacement\n*** End Patch"
+            .to_string(),
+    });
+
+    assert!(!result.ok);
+    assert!(
+        result.content.contains("apply_patch context mismatch"),
+        "{}",
+        result.content
+    );
 }

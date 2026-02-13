@@ -523,7 +523,9 @@ fn cancellation_during_tool_execution_remains_idempotent() {
             let app = lock_unpoisoned(&app);
             app.transcript
                 .iter()
-                .filter(|message| message.role == Role::System && message.content == "Run cancelled")
+                .filter(|message| {
+                    message.role == Role::System && message.content == "Run cancelled"
+                })
                 .count()
         };
         assert_eq!(cancelled_count_after_settle, 1);
@@ -554,7 +556,9 @@ fn cancellation_during_tool_execution_remains_idempotent() {
             let app = lock_unpoisoned(&app);
             app.transcript
                 .iter()
-                .filter(|message| message.role == Role::System && message.content == "Run cancelled")
+                .filter(|message| {
+                    message.role == Role::System && message.content == "Run cancelled"
+                })
                 .count()
         };
         assert_eq!(cancelled_count_after_extra_cancel, 1);

@@ -48,6 +48,7 @@ enum BuiltinDispatchTool {
     Read,
     Edit,
     Write,
+    ApplyPatch,
 }
 
 #[derive(Debug)]
@@ -495,7 +496,7 @@ fn compose_system_instructions(base: &str, tool_appendix: &str) -> Result<String
 }
 
 fn tool_prompting_instruction_appendix() -> &'static str {
-    "Tool use policy:\n- Use tools for workspace actions: read, bash, edit, write.\n- Prefer the smallest safe tool for the step you are performing.\n- Never fabricate tool success; report explicit tool errors as-is.\n- Keep mutating changes minimal and verifiable.\n- Do not substitute fallback providers or hidden behavior when provider/tool errors occur."
+    "Tool use policy:\n- Use tools for workspace actions: read, bash, edit, write, apply_patch.\n- Prefer the smallest safe tool for the step you are performing.\n- Never fabricate tool success; report explicit tool errors as-is.\n- Keep mutating changes minimal and verifiable.\n- Do not substitute fallback providers or hidden behavior when provider/tool errors occur."
 }
 
 fn build_default_host_tool_executor() -> HostToolExecutor {
@@ -531,8 +532,12 @@ fn build_tool_dispatch_table(provider_id: &str) -> HashMap<(String, String), Bui
             BuiltinDispatchTool::Edit,
         ),
         (
-            (provider_id, "write".to_string()),
+            (provider_id.clone(), "write".to_string()),
             BuiltinDispatchTool::Write,
+        ),
+        (
+            (provider_id, "apply_patch".to_string()),
+            BuiltinDispatchTool::ApplyPatch,
         ),
     ])
 }
@@ -560,6 +565,9 @@ fn parse_tool_call(
         BuiltinDispatchTool::Write => Ok(ToolCall::WriteFile {
             path: required_string_arg(args, &call.tool_name, "path")?,
             content: required_string_arg(args, &call.tool_name, "content")?,
+        }),
+        BuiltinDispatchTool::ApplyPatch => Ok(ToolCall::ApplyPatch {
+            input: required_string_arg(args, &call.tool_name, "input")?,
         }),
     }
 }
@@ -652,6 +660,7 @@ mod tests {
         assert!(composed.contains("bash"));
         assert!(composed.contains("edit"));
         assert!(composed.contains("write"));
+        assert!(composed.contains("apply_patch"));
         assert!(!composed.trim().is_empty());
     }
 

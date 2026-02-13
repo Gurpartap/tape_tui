@@ -156,8 +156,7 @@ mod tests {
     use super::*;
 
     const VALID_ACCOUNT_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC10ZXN0In19.sig";
-    const MISSING_ACCOUNT_CLAIM_TOKEN: &str =
-        "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.e30.sig";
+    const MISSING_ACCOUNT_CLAIM_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.e30.sig";
 
     struct EnvVarGuard {
         key: &'static str,
@@ -362,7 +361,10 @@ mod tests {
             Some(file.path().to_str().expect("temp path must be utf-8")),
         );
 
-        let error = provider_init_error(provider_from_env(), "empty token should fail before model checks");
+        let error = provider_init_error(
+            provider_from_env(),
+            "empty token should fail before model checks",
+        );
         assert!(error.message().contains("field 'access_token'"));
     }
 
@@ -399,7 +401,9 @@ mod tests {
         );
 
         let error = provider_init_error(provider_from_env(), "zero timeout should fail");
-        assert!(error.message().contains("'timeout_sec' must be greater than zero"));
+        assert!(error
+            .message()
+            .contains("'timeout_sec' must be greater than zero"));
     }
 
     #[test]
@@ -416,10 +420,13 @@ mod tests {
             Some(file.path().to_str().expect("temp path must be utf-8")),
         );
 
-        let error = provider_init_error(provider_from_env(), "token without account claim should fail");
-        assert!(error
-            .message()
-            .contains("must be a JWT containing claim 'https://api.openai.com/auth.chatgpt_account_id'"));
+        let error = provider_init_error(
+            provider_from_env(),
+            "token without account claim should fail",
+        );
+        assert!(error.message().contains(
+            "must be a JWT containing claim 'https://api.openai.com/auth.chatgpt_account_id'"
+        ));
     }
 
     #[test]
@@ -436,7 +443,8 @@ mod tests {
             Some(file.path().to_str().expect("temp path must be utf-8")),
         );
 
-        let provider = provider_from_env().expect("valid bootstrap should initialize codex provider");
+        let provider =
+            provider_from_env().expect("valid bootstrap should initialize codex provider");
         assert_eq!(provider.profile().provider_id, CODEX_API_PROVIDER_ID);
         assert_eq!(provider.profile().model_id, "gpt-5.3-codex");
     }

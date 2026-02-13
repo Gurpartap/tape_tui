@@ -9,6 +9,7 @@ members = [
   "crates/agent_provider",
   "crates/agent_provider_codex_api",
   "crates/agent_provider_mock",
+  "crates/apply_patch_engine",
   "crates/coding_agent",
   "crates/codex_api",
 ]
