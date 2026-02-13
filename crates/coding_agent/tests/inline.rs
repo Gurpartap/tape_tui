@@ -4,7 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role};
-use coding_agent::model::{MockBackend, ModelBackend, RunRequest};
+use coding_agent::provider::{RunProvider, RunRequest};
+use coding_agent::providers::MockProvider;
 use coding_agent::runtime::{RunEvent, RuntimeController};
 use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
 use coding_agent::tui::AppComponent;
@@ -15,7 +16,7 @@ mod support;
 #[derive(Default)]
 struct BlockingBackend;
 
-impl ModelBackend for BlockingBackend {
+impl RunProvider for BlockingBackend {
     fn run(
         &self,
         req: RunRequest,
@@ -43,7 +44,7 @@ impl ModelBackend for BlockingBackend {
 #[derive(Default)]
 struct OrderedChunkBackend;
 
-impl ModelBackend for OrderedChunkBackend {
+impl RunProvider for OrderedChunkBackend {
     fn run(
         &self,
         req: RunRequest,
@@ -69,7 +70,7 @@ impl ModelBackend for OrderedChunkBackend {
 }
 
 fn setup_runtime_with_model(
-    model: Arc<dyn ModelBackend>,
+    model: Arc<dyn RunProvider>,
 ) -> (
     TUI<support::SharedTerminal>,
     Arc<Mutex<App>>,
@@ -95,7 +96,7 @@ fn setup_runtime() -> (
     Arc<Mutex<App>>,
     Arc<Mutex<support::TerminalTrace>>,
 ) {
-    setup_runtime_with_model(Arc::new(MockBackend::new(vec![
+    setup_runtime_with_model(Arc::new(MockProvider::new(vec![
         "first chunk\n".to_string(),
         "second chunk".to_string(),
     ])))

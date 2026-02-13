@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role, RunId};
-use coding_agent::model::{ModelBackend, RunRequest};
+use coding_agent::provider::{RunProvider, RunRequest};
 use coding_agent::runtime::{RunEvent, RuntimeController};
 use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
 use tape_tui::{Terminal, TUI};
@@ -42,7 +42,7 @@ impl Terminal for NullTerminal {
 #[derive(Default)]
 struct BlockingCancelBackend;
 
-impl ModelBackend for BlockingCancelBackend {
+impl RunProvider for BlockingCancelBackend {
     fn run(
         &self,
         req: RunRequest,
@@ -70,7 +70,7 @@ impl ModelBackend for BlockingCancelBackend {
 #[derive(Default)]
 struct RacingCancelBackend;
 
-impl ModelBackend for RacingCancelBackend {
+impl RunProvider for RacingCancelBackend {
     fn run(
         &self,
         req: RunRequest,
@@ -103,7 +103,7 @@ impl ModelBackend for RacingCancelBackend {
 #[derive(Default)]
 struct FlushFallbackBackend;
 
-impl ModelBackend for FlushFallbackBackend {
+impl RunProvider for FlushFallbackBackend {
     fn run(
         &self,
         req: RunRequest,
@@ -217,7 +217,7 @@ fn running_run_id(mode: &Mode) -> RunId {
 fn cancel_while_running_results_in_cancelled_state() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn ModelBackend> = Arc::new(BlockingCancelBackend);
+        let model: Arc<dyn RunProvider> = Arc::new(BlockingCancelBackend);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
         let mut host =
             RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
@@ -272,7 +272,7 @@ fn cancel_while_running_results_in_cancelled_state() {
 fn repeated_cancel_is_a_noop_after_first_signal() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn ModelBackend> = Arc::new(BlockingCancelBackend);
+        let model: Arc<dyn RunProvider> = Arc::new(BlockingCancelBackend);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
         let mut host =
             RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
@@ -338,7 +338,7 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
 fn cancel_race_keeps_single_non_streaming_assistant_message() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn ModelBackend> = Arc::new(RacingCancelBackend);
+        let model: Arc<dyn RunProvider> = Arc::new(RacingCancelBackend);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
         let mut host =
             RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), model, tools);
@@ -412,7 +412,7 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
 fn flush_pending_events_in_headless_usage() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
-        let model: Arc<dyn ModelBackend> = Arc::new(FlushFallbackBackend);
+        let model: Arc<dyn RunProvider> = Arc::new(FlushFallbackBackend);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
 
         // This test intentionally avoids running the TUI loop to emulate a headless caller

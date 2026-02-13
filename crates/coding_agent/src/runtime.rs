@@ -9,7 +9,7 @@ use tape_tui::runtime::tui::{
 };
 
 use crate::app::{App, HostOps, Mode, RunId};
-use crate::model::{ModelBackend, RunRequest};
+use crate::provider::{RunProvider, RunRequest};
 use crate::tools::BuiltinToolExecutor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub struct RuntimeController {
     pending_events: Arc<Mutex<VecDeque<RunEvent>>>,
     next_run_id: AtomicU64,
     active_run: Mutex<Option<ActiveRun>>,
-    model: Arc<dyn ModelBackend>,
+    provider: Arc<dyn RunProvider>,
     tools: Mutex<BuiltinToolExecutor>,
 }
 
@@ -64,7 +64,7 @@ impl RuntimeController {
     pub fn new(
         app: Arc<Mutex<App>>,
         runtime_handle: RuntimeHandle,
-        model: Arc<dyn ModelBackend>,
+        provider: Arc<dyn RunProvider>,
         tools: BuiltinToolExecutor,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -73,7 +73,7 @@ impl RuntimeController {
             pending_events: Arc::new(Mutex::new(VecDeque::new())),
             next_run_id: AtomicU64::new(1),
             active_run: Mutex::new(None),
-            model,
+            provider,
             tools: Mutex::new(tools),
         })
     }
@@ -118,7 +118,7 @@ impl RuntimeController {
         let terminal_emitted = Arc::new(AtomicBool::new(false));
         let terminal_emitted_for_emit = Arc::clone(&terminal_emitted);
         let controller = Arc::clone(&self);
-        let model = Arc::clone(&self.model);
+        let provider = Arc::clone(&self.provider);
         let tools = &self.tools;
 
         let mut emit = move |event: RunEvent| {
@@ -130,7 +130,7 @@ impl RuntimeController {
         };
         let run_outcome = catch_unwind(AssertUnwindSafe(|| {
             let mut tools = lock_unpoisoned(tools);
-            model.run(request, Arc::clone(&cancel), &mut emit, &mut *tools)
+            provider.run(request, Arc::clone(&cancel), &mut emit, &mut *tools)
         }));
 
         match run_outcome {
@@ -138,14 +138,14 @@ impl RuntimeController {
             Ok(Err(error)) => emit(RunEvent::Failed { run_id, error }),
             Err(_) => emit(RunEvent::Failed {
                 run_id,
-                error: "Model backend panicked".to_string(),
+                error: "Run provider panicked".to_string(),
             }),
         }
 
         if !terminal_emitted.load(Ordering::SeqCst) && self.is_active_run_id(run_id) {
             emit(RunEvent::Failed {
                 run_id,
-                error: "Model backend exited without terminal event".to_string(),
+                error: "Run provider exited without terminal event".to_string(),
             });
         }
     }

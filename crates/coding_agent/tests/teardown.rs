@@ -3,7 +3,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode};
-use coding_agent::model::{MockBackend, ModelBackend};
+use coding_agent::provider::RunProvider;
+use coding_agent::providers::MockProvider;
 use coding_agent::runtime::RuntimeController;
 use coding_agent::tools::BuiltinToolExecutor;
 use coding_agent::tui::AppComponent;
@@ -21,7 +22,7 @@ fn setup_runtime() -> (
     let mut tui = TUI::new(terminal);
 
     let runtime_handle = tui.runtime_handle();
-    let model: Arc<dyn ModelBackend> = Arc::new(MockBackend::default());
+    let model: Arc<dyn RunProvider> = Arc::new(MockProvider::default());
     let tools = BuiltinToolExecutor::new(".").expect("workspace root resolves");
     let host = RuntimeController::new(Arc::clone(&app), runtime_handle, model, tools);
 
