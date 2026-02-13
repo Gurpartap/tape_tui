@@ -1,4 +1,5 @@
 use coding_agent::app::{App, HostOps, Message, Mode, Role, RunId};
+use coding_agent::provider::RunMessage;
 
 struct HostStub {
     next_run_id: RunId,
@@ -11,7 +12,11 @@ impl HostStub {
 }
 
 impl HostOps for HostStub {
-    fn start_run(&mut self, _prompt: String, _instructions: String) -> Result<RunId, String> {
+    fn start_run(
+        &mut self,
+        _messages: Vec<RunMessage>,
+        _instructions: String,
+    ) -> Result<RunId, String> {
         Ok(self.next_run_id)
     }
 

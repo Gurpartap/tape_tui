@@ -1,4 +1,5 @@
 use crate::commands::{parse_slash_command, SlashCommand};
+use crate::provider::RunMessage;
 
 pub type RunId = u64;
 
@@ -95,6 +96,7 @@ pub struct App {
     pub mode: Mode,
     pub input: String,
     pub transcript: Vec<Message>,
+    conversation: Vec<RunMessage>,
     history: InputHistory,
     pub should_exit: bool,
     cancelling_run: Option<RunId>,
@@ -102,7 +104,11 @@ pub struct App {
 }
 
 pub trait HostOps {
-    fn start_run(&mut self, prompt: String, instructions: String) -> Result<RunId, String>;
+    fn start_run(
+        &mut self,
+        messages: Vec<RunMessage>,
+        instructions: String,
+    ) -> Result<RunId, String>;
     fn cancel_run(&mut self, run_id: RunId);
     fn request_render(&mut self);
     fn request_stop(&mut self);
@@ -148,6 +154,7 @@ impl App {
             mode: Mode::Idle,
             input: String::new(),
             transcript: Vec::new(),
+            conversation: Vec::new(),
             history: InputHistory::default(),
             should_exit: false,
             cancelling_run: None,
@@ -157,6 +164,19 @@ impl App {
 
     pub fn system_instructions(&self) -> &str {
         &self.system_instructions
+    }
+
+    /// Returns model-facing conversation messages retained across turns.
+    pub fn conversation_messages(&self) -> &[RunMessage] {
+        &self.conversation
+    }
+
+    fn run_messages_with_pending_user_prompt(&self, prompt: &str) -> Vec<RunMessage> {
+        let mut messages = self.conversation.clone();
+        messages.push(RunMessage::UserText {
+            text: prompt.to_string(),
+        });
+        messages
     }
 
     pub fn on_input_replace(&mut self, text: String) {
@@ -215,6 +235,7 @@ impl App {
                 }
                 SlashCommand::Clear => {
                     self.transcript.clear();
+                    self.conversation.clear();
                     self.push_system("Transcript cleared".to_string());
                     host.request_render();
                 }
@@ -245,6 +266,8 @@ impl App {
             return;
         }
 
+        let run_messages = self.run_messages_with_pending_user_prompt(&prompt);
+
         self.push_history_entry(prompt.clone());
         self.transcript.push(Message {
             role: Role::User,
@@ -252,8 +275,11 @@ impl App {
             streaming: false,
             run_id: None,
         });
+        self.conversation.push(RunMessage::UserText {
+            text: prompt.clone(),
+        });
 
-        match host.start_run(prompt, self.system_instructions.clone()) {
+        match host.start_run(run_messages, self.system_instructions.clone()) {
             Ok(run_id) => {
                 self.mode = Mode::Running { run_id };
             }
@@ -357,11 +383,22 @@ impl App {
         }
     }
 
-    pub fn on_tool_call_started(&mut self, run_id: RunId, call_id: &str, tool_name: &str) {
+    pub fn on_tool_call_started(
+        &mut self,
+        run_id: RunId,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) {
         if !self.should_apply_run_event(run_id) {
             return;
         }
 
+        self.conversation.push(RunMessage::ToolCall {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: arguments.clone(),
+        });
         self.push_tool(run_id, format!("Tool {tool_name} ({call_id}) started"));
     }
 
@@ -371,20 +408,28 @@ impl App {
         tool_name: &str,
         call_id: &str,
         is_error: bool,
-        content: &str,
+        content: &serde_json::Value,
+        content_text: &str,
     ) {
         if !self.should_apply_run_event(run_id) {
             return;
         }
+
+        self.conversation.push(RunMessage::ToolResult {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: content.clone(),
+            is_error,
+        });
 
         let mut message = format!(
             "Tool {tool_name} ({call_id}) {}",
             if is_error { "failed" } else { "completed" }
         );
 
-        if is_error && !content.is_empty() {
+        if is_error && !content_text.is_empty() {
             message.push_str(": ");
-            message.push_str(content);
+            message.push_str(content_text);
         }
 
         self.push_tool(run_id, message);
@@ -406,6 +451,7 @@ impl App {
         }
 
         self.finalize_stream(run_id);
+        self.record_assistant_message_for_run(run_id);
         self.mode = Mode::Idle;
     }
 
@@ -495,6 +541,24 @@ impl App {
         self.cancelling_run = None;
         self.mode = Mode::Idle;
         self.finalize_stream(run_id);
+    }
+
+    fn record_assistant_message_for_run(&mut self, run_id: RunId) {
+        let Some(content) = self
+            .transcript
+            .iter()
+            .find(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
+            .map(|message| message.content.clone())
+        else {
+            return;
+        };
+
+        if content.is_empty() {
+            return;
+        }
+
+        self.conversation
+            .push(RunMessage::AssistantText { text: content });
     }
 
     fn push_tool(&mut self, run_id: RunId, content: String) {
@@ -654,9 +718,21 @@ mod tests {
         let mut app = App::new();
         app.mode = Mode::Running { run_id: 9 };
 
-        app.on_tool_call_started(9, "call-1", "read");
-        app.on_tool_call_finished(9, "read", "call-1", true, "missing file");
-        app.on_tool_call_started(999, "stale", "bash");
+        app.on_tool_call_started(
+            9,
+            "call-1",
+            "read",
+            &serde_json::json!({ "path": "README.md" }),
+        );
+        app.on_tool_call_finished(
+            9,
+            "read",
+            "call-1",
+            true,
+            &serde_json::json!("missing file"),
+            "missing file",
+        );
+        app.on_tool_call_started(999, "stale", "bash", &serde_json::json!({}));
 
         let tool_messages: Vec<_> = app
             .transcript
@@ -672,6 +748,22 @@ mod tests {
         );
         assert_eq!(tool_messages[0].run_id, Some(9));
         assert_eq!(tool_messages[1].run_id, Some(9));
+        assert_eq!(
+            app.conversation_messages(),
+            &[
+                RunMessage::ToolCall {
+                    call_id: "call-1".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: serde_json::json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call-1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: serde_json::json!("missing file"),
+                    is_error: true,
+                }
+            ]
+        );
     }
 
     #[test]
@@ -680,10 +772,29 @@ mod tests {
         app.mode = Mode::Idle;
         app.cancelling_run = Some(14);
 
-        app.on_tool_call_started(99, "stale-start", "write");
-        app.on_tool_call_started(14, "call-2", "bash");
-        app.on_tool_call_finished(99, "write", "stale-finish", true, "stale");
-        app.on_tool_call_finished(14, "bash", "call-2", false, "ignored success content");
+        app.on_tool_call_started(99, "stale-start", "write", &serde_json::json!({}));
+        app.on_tool_call_started(
+            14,
+            "call-2",
+            "bash",
+            &serde_json::json!({ "command": "pwd" }),
+        );
+        app.on_tool_call_finished(
+            99,
+            "write",
+            "stale-finish",
+            true,
+            &serde_json::json!("stale"),
+            "stale",
+        );
+        app.on_tool_call_finished(
+            14,
+            "bash",
+            "call-2",
+            false,
+            &serde_json::json!("ignored success content"),
+            "ignored success content",
+        );
 
         let tool_messages: Vec<_> = app
             .transcript
@@ -697,6 +808,22 @@ mod tests {
         assert!(tool_messages
             .iter()
             .all(|message| message.run_id == Some(14)));
+        assert_eq!(
+            app.conversation_messages(),
+            &[
+                RunMessage::ToolCall {
+                    call_id: "call-2".to_string(),
+                    tool_name: "bash".to_string(),
+                    arguments: serde_json::json!({ "command": "pwd" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call-2".to_string(),
+                    tool_name: "bash".to_string(),
+                    content: serde_json::json!("ignored success content"),
+                    is_error: false,
+                }
+            ]
+        );
     }
 
     #[test]
@@ -833,5 +960,74 @@ mod tests {
         assert_eq!(assistant_messages.len(), 1);
         assert_eq!(assistant_messages[0].content, "first second");
         assert!(!assistant_messages[0].streaming);
+    }
+
+    #[test]
+    fn submit_failure_keeps_user_turn_in_model_facing_history() {
+        struct FailingHost;
+
+        impl HostOps for FailingHost {
+            fn start_run(
+                &mut self,
+                _messages: Vec<RunMessage>,
+                _instructions: String,
+            ) -> Result<RunId, String> {
+                Err("transport unavailable".to_string())
+            }
+
+            fn cancel_run(&mut self, _run_id: RunId) {}
+
+            fn request_render(&mut self) {}
+
+            fn request_stop(&mut self) {}
+        }
+
+        let mut app = App::new();
+        let mut host = FailingHost;
+
+        app.on_input_replace("retry this".to_string());
+        app.on_submit(&mut host);
+
+        assert_eq!(app.mode, Mode::Error("transport unavailable".to_string()));
+        assert_eq!(
+            app.conversation_messages(),
+            &[RunMessage::UserText {
+                text: "retry this".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn failed_run_does_not_persist_assistant_text_in_model_history() {
+        let mut app = App::new();
+        let run_id = 17;
+        app.mode = Mode::Running { run_id };
+
+        app.on_run_started(run_id);
+        app.on_run_chunk(run_id, "partial");
+        app.on_run_failed(run_id, "boom");
+
+        assert!(app
+            .conversation_messages()
+            .iter()
+            .all(|message| !matches!(message, RunMessage::AssistantText { .. })));
+    }
+
+    #[test]
+    fn cancelled_run_does_not_persist_assistant_text_in_model_history() {
+        let mut app = App::new();
+        let run_id = 23;
+        app.mode = Mode::Running { run_id };
+
+        app.on_run_started(run_id);
+        app.on_run_chunk(run_id, "partial");
+        app.mode = Mode::Idle;
+        app.cancelling_run = Some(run_id);
+        app.on_run_cancelled(run_id);
+
+        assert!(app
+            .conversation_messages()
+            .iter()
+            .all(|message| !matches!(message, RunMessage::AssistantText { .. })));
     }
 }

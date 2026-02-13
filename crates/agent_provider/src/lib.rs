@@ -57,11 +57,33 @@ impl From<&str> for ProviderInitError {
     }
 }
 
+/// Provider-neutral model-facing message history item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunMessage {
+    UserText {
+        text: String,
+    },
+    AssistantText {
+        text: String,
+    },
+    ToolCall {
+        call_id: String,
+        tool_name: String,
+        arguments: Value,
+    },
+    ToolResult {
+        call_id: String,
+        tool_name: String,
+        content: Value,
+        is_error: bool,
+    },
+}
+
 /// Input required to start a provider run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
     pub run_id: RunId,
-    pub prompt: String,
+    pub messages: Vec<RunMessage>,
     pub instructions: String,
 }
 
@@ -205,8 +227,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunProvider, RunRequest,
-        ToolCallRequest, ToolDefinition, ToolResult,
+        CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunMessage, RunProvider,
+        RunRequest, ToolCallRequest, ToolDefinition, ToolResult,
     };
 
     struct MinimalProvider;
@@ -280,15 +302,22 @@ mod tests {
     }
 
     #[test]
-    fn run_request_carries_prompt_and_instructions() {
+    fn run_request_carries_message_history_and_instructions() {
         let request = RunRequest {
             run_id: 7,
-            prompt: "implement tests".to_string(),
+            messages: vec![RunMessage::UserText {
+                text: "implement tests".to_string(),
+            }],
             instructions: "system instructions".to_string(),
         };
 
         assert_eq!(request.run_id, 7);
-        assert_eq!(request.prompt, "implement tests");
+        assert_eq!(
+            request.messages,
+            vec![RunMessage::UserText {
+                text: "implement tests".to_string(),
+            }]
+        );
         assert_eq!(request.instructions, "system instructions");
     }
 

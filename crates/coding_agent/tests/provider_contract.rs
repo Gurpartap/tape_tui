@@ -8,7 +8,8 @@ use serde_json::json;
 
 use coding_agent::app::{App, Mode, Role, RunId};
 use coding_agent::provider::{
-    CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest, ToolCallRequest, ToolResult,
+    CancelSignal, ProviderProfile, RunEvent, RunMessage, RunProvider, RunRequest, ToolCallRequest,
+    ToolResult,
 };
 use coding_agent::runtime::RuntimeController;
 use tape_tui::{Terminal, TUI};
@@ -268,6 +269,62 @@ impl RunProvider for ExecutionFailureToolProvider {
             text: format!("execution-error:{}", tool_result_content_text(&result)),
         });
         emit(RunEvent::Finished { run_id: req.run_id });
+
+        Ok(())
+    }
+}
+
+struct FailThenCaptureProvider {
+    turn: Mutex<u32>,
+    captured_second_turn_messages: Arc<Mutex<Option<Vec<RunMessage>>>>,
+}
+
+impl FailThenCaptureProvider {
+    fn new(captured_second_turn_messages: Arc<Mutex<Option<Vec<RunMessage>>>>) -> Self {
+        Self {
+            turn: Mutex::new(0),
+            captured_second_turn_messages,
+        }
+    }
+}
+
+impl RunProvider for FailThenCaptureProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        let turn = {
+            let mut turn = lock_unpoisoned(&self.turn);
+            *turn += 1;
+            *turn
+        };
+
+        emit(RunEvent::Started { run_id: req.run_id });
+
+        if turn == 1 {
+            emit(RunEvent::Chunk {
+                run_id: req.run_id,
+                text: "partial failure output".to_string(),
+            });
+            emit(RunEvent::Failed {
+                run_id: req.run_id,
+                error: "boom".to_string(),
+            });
+        } else {
+            *lock_unpoisoned(&self.captured_second_turn_messages) = Some(req.messages.clone());
+            emit(RunEvent::Chunk {
+                run_id: req.run_id,
+                text: "ok".to_string(),
+            });
+            emit(RunEvent::Finished { run_id: req.run_id });
+        }
 
         Ok(())
     }
@@ -567,6 +624,76 @@ fn cancellation_signal_reaches_provider_and_preserves_cancelled_state() {
         assert_eq!(assistant_messages.len(), 1);
         assert_eq!(assistant_messages[0].content, "streaming");
         assert!(!assistant_messages[0].streaming);
+
+        assert_eq!(
+            app.conversation_messages(),
+            &[RunMessage::UserText {
+                text: "cancel this run".to_string(),
+            }]
+        );
+    });
+}
+
+#[test]
+fn failed_run_does_not_replay_assistant_text_on_next_turn() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let captured_second_turn_messages = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn RunProvider> = Arc::new(FailThenCaptureProvider::new(Arc::clone(
+            &captured_second_turn_messages,
+        )));
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let _first_run_id = submit_prompt(&app, &mut host, "first prompt");
+        let first_settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Error(_))
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::System && message.content == "Run failed: boom"
+                    })
+            },
+        );
+        assert!(first_settled, "failed run did not settle");
+
+        let second_run_id = submit_prompt(&app, &mut host, "second prompt");
+        let second_settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(second_run_id)
+                            && message.content == "ok"
+                    })
+            },
+        );
+        assert!(second_settled, "second run after failure did not settle");
+
+        let captured = lock_unpoisoned(&captured_second_turn_messages)
+            .clone()
+            .expect("second turn messages should be captured");
+        assert_eq!(
+            captured,
+            vec![
+                RunMessage::UserText {
+                    text: "first prompt".to_string(),
+                },
+                RunMessage::UserText {
+                    text: "second prompt".to_string(),
+                },
+            ]
+        );
     });
 }
 
@@ -663,6 +790,34 @@ fn tool_timeline_stays_scoped_to_active_run_when_provider_emits_stale_events() {
             .transcript
             .iter()
             .any(|message| message.content.contains("stale provider chunk")));
+
+        let model_tool_messages: Vec<_> = app
+            .conversation_messages()
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    RunMessage::ToolCall { .. } | RunMessage::ToolResult { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            model_tool_messages,
+            vec![
+                RunMessage::ToolCall {
+                    call_id: "call-stale-scope".to_string(),
+                    tool_name: "not-a-tool".to_string(),
+                    arguments: json!({}),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call-stale-scope".to_string(),
+                    tool_name: "not-a-tool".to_string(),
+                    content: json!("Unknown host tool 'not-a-tool' for provider 'contract-test'"),
+                    is_error: true,
+                },
+            ]
+        );
     });
 }
 
@@ -751,6 +906,262 @@ fn tool_execution_failure_produces_explicit_error_result_and_tool_failure_timeli
                     .content
                     .contains("Tool bash (call-exec-failure) failed: status: exit_code=9")
         }));
+    });
+}
+
+struct MessageHistoryCaptureProvider {
+    captured_messages: Arc<Mutex<Vec<Vec<RunMessage>>>>,
+}
+
+impl MessageHistoryCaptureProvider {
+    fn new(captured_messages: Arc<Mutex<Vec<Vec<RunMessage>>>>) -> Self {
+        Self { captured_messages }
+    }
+}
+
+impl RunProvider for MessageHistoryCaptureProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        lock_unpoisoned(&self.captured_messages).push(req.messages.clone());
+        emit(RunEvent::Started { run_id: req.run_id });
+        emit(RunEvent::Chunk {
+            run_id: req.run_id,
+            text: format!("ack:{}", req.run_id),
+        });
+        emit(RunEvent::Finished { run_id: req.run_id });
+        Ok(())
+    }
+}
+
+#[test]
+fn runtime_replays_model_facing_message_history_across_turns() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let captured_messages = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(MessageHistoryCaptureProvider::new(
+            Arc::clone(&captured_messages),
+        ));
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let first_run_id = submit_prompt(&app, &mut host, "first prompt");
+        let first_settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(first_run_id)
+                            && message.content == format!("ack:{first_run_id}")
+                    })
+            },
+        );
+        assert!(first_settled, "first run did not settle");
+
+        let second_run_id = submit_prompt(&app, &mut host, "second prompt");
+        let second_settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(second_run_id)
+                            && message.content == format!("ack:{second_run_id}")
+                    })
+            },
+        );
+        assert!(second_settled, "second run did not settle");
+
+        let captured_messages = lock_unpoisoned(&captured_messages);
+        assert_eq!(captured_messages.len(), 2);
+        assert_eq!(
+            captured_messages[0],
+            vec![RunMessage::UserText {
+                text: "first prompt".to_string(),
+            }]
+        );
+        assert_eq!(
+            captured_messages[1],
+            vec![
+                RunMessage::UserText {
+                    text: "first prompt".to_string(),
+                },
+                RunMessage::AssistantText {
+                    text: format!("ack:{first_run_id}"),
+                },
+                RunMessage::UserText {
+                    text: "second prompt".to_string(),
+                }
+            ]
+        );
+    });
+}
+
+struct ToolHistoryCaptureProvider {
+    turn: Mutex<u32>,
+    captured_second_turn_messages: Arc<Mutex<Option<Vec<RunMessage>>>>,
+}
+
+impl ToolHistoryCaptureProvider {
+    fn new(captured_second_turn_messages: Arc<Mutex<Option<Vec<RunMessage>>>>) -> Self {
+        Self {
+            turn: Mutex::new(0),
+            captured_second_turn_messages,
+        }
+    }
+}
+
+impl RunProvider for ToolHistoryCaptureProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        let turn = {
+            let mut turn = lock_unpoisoned(&self.turn);
+            *turn += 1;
+            *turn
+        };
+
+        emit(RunEvent::Started { run_id: req.run_id });
+
+        match turn {
+            1 => {
+                let result = execute_tool(ToolCallRequest {
+                    call_id: "call-memory".to_string(),
+                    tool_name: "not-a-tool".to_string(),
+                    arguments: json!({}),
+                });
+                if !result.is_error {
+                    return Err(
+                        "expected unknown tool call to return an explicit error".to_string()
+                    );
+                }
+                emit(RunEvent::Chunk {
+                    run_id: req.run_id,
+                    text: "turn-1".to_string(),
+                });
+            }
+            2 => {
+                *lock_unpoisoned(&self.captured_second_turn_messages) = Some(req.messages.clone());
+                emit(RunEvent::Chunk {
+                    run_id: req.run_id,
+                    text: "turn-2".to_string(),
+                });
+            }
+            _ => {
+                emit(RunEvent::Chunk {
+                    run_id: req.run_id,
+                    text: format!("turn-{turn}"),
+                });
+            }
+        }
+
+        emit(RunEvent::Finished { run_id: req.run_id });
+        Ok(())
+    }
+}
+
+#[test]
+fn runtime_replays_tool_call_and_result_history_on_next_turn() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let captured_second_turn_messages = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn RunProvider> = Arc::new(ToolHistoryCaptureProvider::new(Arc::clone(
+            &captured_second_turn_messages,
+        )));
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let first_run_id = submit_prompt(&app, &mut host, "read file");
+        let first_settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(first_run_id)
+                            && message.content == "turn-1"
+                    })
+            },
+        );
+        assert!(first_settled, "first tool-memory run did not settle");
+
+        let second_run_id = submit_prompt(&app, &mut host, "what did you read?");
+        let second_settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(second_run_id)
+                            && message.content == "turn-2"
+                    })
+            },
+        );
+        assert!(second_settled, "second tool-memory run did not settle");
+
+        let captured = lock_unpoisoned(&captured_second_turn_messages)
+            .clone()
+            .expect("second turn messages should be captured");
+        assert_eq!(
+            captured,
+            vec![
+                RunMessage::UserText {
+                    text: "read file".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call-memory".to_string(),
+                    tool_name: "not-a-tool".to_string(),
+                    arguments: json!({}),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call-memory".to_string(),
+                    tool_name: "not-a-tool".to_string(),
+                    content: json!("Unknown host tool 'not-a-tool' for provider 'contract-test'"),
+                    is_error: true,
+                },
+                RunMessage::AssistantText {
+                    text: "turn-1".to_string(),
+                },
+                RunMessage::UserText {
+                    text: "what did you read?".to_string(),
+                },
+            ]
+        );
     });
 }
 

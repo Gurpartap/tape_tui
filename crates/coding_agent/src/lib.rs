@@ -32,6 +32,9 @@
 //! block; runtime appends a concise tool-use policy and tool inventory before
 //! dispatching each provider run.
 //!
+//! Conversation memory contract: `coding_agent` owns model-facing run history and
+//! replays it on every turn through provider-neutral `RunMessage` items.
+//!
 //! Codex transport contract: Responses API `input` must be list-shaped JSON.
 //! Plain string `input` payloads are rejected during codex_api request preflight.
 

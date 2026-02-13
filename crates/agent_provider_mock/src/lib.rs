@@ -156,7 +156,7 @@ impl RunProvider for MockProvider {
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
-        let _ = req.prompt;
+        let _ = req.messages;
         let _ = req.instructions;
 
         emit(RunEvent::Started { run_id });
@@ -258,6 +258,8 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    use agent_provider::RunMessage;
+
     use super::*;
 
     fn collect_events(provider: &MockProvider, cancel: CancelSignal) -> Vec<RunEvent> {
@@ -266,7 +268,9 @@ mod tests {
             .run(
                 RunRequest {
                     run_id: 7,
-                    prompt: "test".to_string(),
+                    messages: vec![RunMessage::UserText {
+                        text: "test".to_string(),
+                    }],
                     instructions: "system instructions".to_string(),
                 },
                 cancel,

@@ -1,10 +1,12 @@
 use coding_agent::app::{App, HostOps, Message, Mode, Role, RunId};
 use coding_agent::commands::{parse_slash_command, SlashCommand};
+use coding_agent::provider::RunMessage;
 
 #[derive(Default)]
 struct HostSpy {
     next_run_id: RunId,
-    started_prompts: Vec<String>,
+    start_run_error: Option<String>,
+    started_runs: Vec<Vec<RunMessage>>,
     started_instructions: Vec<String>,
     cancelled_runs: Vec<RunId>,
     render_requests: usize,
@@ -18,12 +20,44 @@ impl HostSpy {
             ..Self::default()
         }
     }
+
+    fn with_start_run_error(error: impl Into<String>) -> Self {
+        Self {
+            start_run_error: Some(error.into()),
+            ..Self::default()
+        }
+    }
+
+    fn started_prompts(&self) -> Vec<String> {
+        self.started_runs
+            .iter()
+            .map(|messages| {
+                messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| match message {
+                        RunMessage::UserText { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
 }
 
 impl HostOps for HostSpy {
-    fn start_run(&mut self, prompt: String, instructions: String) -> Result<RunId, String> {
-        self.started_prompts.push(prompt);
+    fn start_run(
+        &mut self,
+        messages: Vec<RunMessage>,
+        instructions: String,
+    ) -> Result<RunId, String> {
+        self.started_runs.push(messages);
         self.started_instructions.push(instructions);
+
+        if let Some(error) = self.start_run_error.clone() {
+            return Err(error);
+        }
+
         Ok(self.next_run_id)
     }
 
@@ -49,7 +83,7 @@ fn submit_starts_run_and_enters_running_mode() {
     app.on_submit(&mut host);
 
     assert_eq!(
-        host.started_prompts,
+        host.started_prompts(),
         vec!["describe the module layout".to_string()]
     );
     assert_eq!(host.started_instructions.len(), 1);
@@ -71,6 +105,24 @@ fn submit_starts_run_and_enters_running_mode() {
         }
     );
     assert_eq!(host.render_requests, 1);
+}
+
+#[test]
+fn submit_failure_keeps_user_turn_in_model_history() {
+    let mut app = App::new();
+    let mut host = HostSpy::with_start_run_error("transport unavailable");
+
+    app.on_input_replace("retry this".to_string());
+    app.on_submit(&mut host);
+
+    assert_eq!(app.mode, Mode::Error("transport unavailable".to_string()));
+    assert_eq!(
+        app.conversation_messages(),
+        &[RunMessage::UserText {
+            text: "retry this".to_string(),
+        }]
+    );
+    assert_eq!(host.started_prompts(), vec!["retry this".to_string()]);
 }
 
 #[test]
@@ -109,7 +161,7 @@ fn slash_help_clear_and_quit_have_expected_semantics() {
     app.on_submit(&mut host);
 
     assert_eq!(app.mode, Mode::Idle);
-    assert_eq!(host.started_prompts.len(), 0);
+    assert_eq!(host.started_runs.len(), 0);
     assert!(app
         .transcript
         .last()
@@ -169,7 +221,7 @@ fn sending_message_while_running_is_non_failing() {
     app.on_input_replace("run while running".to_string());
     app.on_submit(&mut host);
     assert_eq!(app.mode, Mode::Running { run_id: 11 });
-    assert_eq!(host.started_prompts.len(), 1);
+    assert_eq!(host.started_runs.len(), 1);
 
     app.on_input_replace("another message".to_string());
     app.on_submit(&mut host);
@@ -182,7 +234,7 @@ fn sending_message_while_running_is_non_failing() {
         "Run already in progress. Use /cancel to stop it."
     );
     assert_eq!(app.mode, Mode::Running { run_id: 11 });
-    assert_eq!(host.started_prompts.len(), 1);
+    assert_eq!(host.started_runs.len(), 1);
     assert_eq!(host.render_requests, 2);
 }
 

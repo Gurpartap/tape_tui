@@ -2,6 +2,8 @@
 //!
 //! This adapter translates `codex_api` stream semantics into deterministic
 //! `RunEvent` lifecycle events expected by `coding_agent`.
+//! Initial requests replay full provider-neutral `RunRequest.messages` history into
+//! list-shaped Responses `input` items.
 //! Host-mediated tool execution is serial and limited to the v1 tool pack
 //! (`bash`, `read`, `edit`, `write`, `apply_patch`), with explicit failure/cancel outcomes for
 //! malformed payloads or non-complete terminal statuses.
@@ -11,8 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use agent_provider::{
-    CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunProvider, RunRequest,
-    ToolCallRequest, ToolDefinition, ToolResult,
+    CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunMessage, RunProvider,
+    RunRequest, ToolCallRequest, ToolDefinition, ToolResult,
 };
 use codex_api::{
     normalize_codex_url, CodexApiClient, CodexApiConfig, CodexApiError, CodexRequest,
@@ -36,13 +38,12 @@ struct PendingToolCall {
     call_id: String,
     tool_name: String,
     arguments: Value,
-    arguments_json: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct ToolRoundtrip {
-    pending_call: PendingToolCall,
-    result: ToolResult,
+struct StreamStepOutcome {
+    assistant_text: String,
+    pending_tool_calls: Vec<PendingToolCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,20 +212,22 @@ impl CodexApiProvider {
         run_id: u64,
         stream_events: Vec<CodexStreamEvent>,
         emit: &mut dyn FnMut(RunEvent),
-    ) -> Result<Vec<PendingToolCall>, String> {
+    ) -> Result<StreamStepOutcome, String> {
         let mut pending_tool_calls = Vec::new();
+        let mut assistant_text = String::new();
 
         for stream_event in stream_events {
             match stream_event {
-                CodexStreamEvent::OutputTextDelta { delta }
-                | CodexStreamEvent::ReasoningSummaryTextDelta { delta } => {
+                CodexStreamEvent::OutputTextDelta { delta } => {
                     if !delta.is_empty() {
+                        assistant_text.push_str(&delta);
                         emit(RunEvent::Chunk {
                             run_id,
                             text: delta,
                         });
                     }
                 }
+                CodexStreamEvent::ReasoningSummaryTextDelta { .. } => {}
                 CodexStreamEvent::ToolCallRequested {
                     call_id,
                     tool_name,
@@ -238,56 +241,25 @@ impl CodexApiProvider {
             }
         }
 
-        Ok(pending_tool_calls)
+        Ok(StreamStepOutcome {
+            assistant_text,
+            pending_tool_calls,
+        })
     }
 
     fn build_initial_request(
         &self,
         model_id: &str,
-        prompt: &str,
+        messages: &[RunMessage],
         instructions: &str,
-    ) -> CodexRequest {
+    ) -> Result<CodexRequest, String> {
         let mut request = CodexRequest::new(
             model_id.to_owned(),
-            codex_initial_user_input(prompt),
+            Value::Array(codex_input_from_run_messages(messages)?),
             Some(instructions.to_string()),
         );
         request.tools = codex_tool_payloads();
-        request
-    }
-
-    fn build_follow_up_request(
-        &self,
-        model_id: &str,
-        instructions: &str,
-        roundtrips: &[ToolRoundtrip],
-    ) -> CodexRequest {
-        let mut input = Vec::with_capacity(roundtrips.len() * 2);
-
-        for roundtrip in roundtrips {
-            input.push(json!({
-                "type": "function_call",
-                "call_id": roundtrip.pending_call.call_id.clone(),
-                "name": roundtrip.pending_call.tool_name.clone(),
-                "arguments": roundtrip.pending_call.arguments_json.clone(),
-            }));
-        }
-
-        for roundtrip in roundtrips {
-            input.push(json!({
-                "type": "function_call_output",
-                "call_id": roundtrip.result.call_id.clone(),
-                "output": codex_tool_output_payload(&roundtrip.result),
-            }));
-        }
-
-        let mut request = CodexRequest::new(
-            model_id.to_owned(),
-            Value::Array(input),
-            Some(instructions.to_string()),
-        );
-        request.tools = codex_tool_payloads();
-        request
+        Ok(request)
     }
 
     fn emit_terminal_event(
@@ -363,12 +335,15 @@ impl RunProvider for CodexApiProvider {
     ) -> Result<(), String> {
         let RunRequest {
             run_id,
-            prompt,
+            messages,
             instructions,
         } = req;
         let model_id = self.selected_model();
-        let prompt = sanitize_run_prompt(prompt)?;
+        let messages = sanitize_run_messages(messages)?;
         let instructions = sanitize_run_instructions(instructions)?;
+
+        let mut replay_messages = messages;
+        let mut request = self.build_initial_request(&model_id, &replay_messages, &instructions)?;
 
         emit(RunEvent::Started { run_id });
 
@@ -376,8 +351,6 @@ impl RunProvider for CodexApiProvider {
             emit(RunEvent::Cancelled { run_id });
             return Ok(());
         }
-
-        let mut request = self.build_initial_request(&model_id, &prompt, &instructions);
 
         loop {
             if cancel.load(Ordering::Acquire) {
@@ -400,16 +373,16 @@ impl RunProvider for CodexApiProvider {
                 }
             };
 
-            let pending_calls = match self.process_stream_events(run_id, stream_result.events, emit)
-            {
-                Ok(calls) => calls,
-                Err(error) => {
-                    emit(RunEvent::Failed { run_id, error });
-                    return Ok(());
-                }
-            };
+            let stream_outcome =
+                match self.process_stream_events(run_id, stream_result.events, emit) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        emit(RunEvent::Failed { run_id, error });
+                        return Ok(());
+                    }
+                };
 
-            if pending_calls.is_empty() {
+            if stream_outcome.pending_tool_calls.is_empty() {
                 self.emit_terminal_event(run_id, stream_result.terminal, emit);
                 return Ok(());
             }
@@ -440,8 +413,15 @@ impl RunProvider for CodexApiProvider {
                 }
             }
 
-            let mut roundtrips = Vec::with_capacity(pending_calls.len());
-            for pending_call in pending_calls {
+            if !stream_outcome.assistant_text.is_empty() {
+                replay_messages.push(RunMessage::AssistantText {
+                    text: stream_outcome.assistant_text,
+                });
+            }
+
+            let mut roundtrips: Vec<(PendingToolCall, ToolResult)> =
+                Vec::with_capacity(stream_outcome.pending_tool_calls.len());
+            for pending_call in stream_outcome.pending_tool_calls {
                 if cancel.load(Ordering::Acquire) {
                     emit(RunEvent::Cancelled { run_id });
                     return Ok(());
@@ -453,13 +433,33 @@ impl RunProvider for CodexApiProvider {
                     arguments: pending_call.arguments.clone(),
                 });
 
-                roundtrips.push(ToolRoundtrip {
-                    pending_call,
-                    result,
+                roundtrips.push((pending_call, result));
+            }
+
+            for (pending_call, _) in &roundtrips {
+                replay_messages.push(RunMessage::ToolCall {
+                    call_id: pending_call.call_id.clone(),
+                    tool_name: pending_call.tool_name.clone(),
+                    arguments: pending_call.arguments.clone(),
                 });
             }
 
-            request = self.build_follow_up_request(&model_id, &instructions, &roundtrips);
+            for (_, result) in roundtrips {
+                replay_messages.push(RunMessage::ToolResult {
+                    call_id: result.call_id,
+                    tool_name: result.tool_name,
+                    content: result.content,
+                    is_error: result.is_error,
+                });
+            }
+
+            request = match self.build_initial_request(&model_id, &replay_messages, &instructions) {
+                Ok(request) => request,
+                Err(error) => {
+                    emit(RunEvent::Failed { run_id, error });
+                    return Ok(());
+                }
+            };
         }
     }
 }
@@ -555,16 +555,122 @@ fn codex_tool_payloads() -> Vec<Value> {
         .collect()
 }
 
-fn codex_initial_user_input(prompt: &str) -> Value {
-    Value::Array(vec![json!({
+fn codex_input_from_run_messages(messages: &[RunMessage]) -> Result<Vec<Value>, String> {
+    let mut input = Vec::with_capacity(messages.len());
+    let mut assistant_message_index = 0usize;
+
+    for message in messages {
+        match message {
+            RunMessage::UserText { text } => {
+                input.push(codex_user_text_message(text)?);
+            }
+            RunMessage::AssistantText { text } => {
+                input.push(codex_assistant_output_message(
+                    text,
+                    assistant_message_index,
+                )?);
+                assistant_message_index += 1;
+            }
+            RunMessage::ToolCall {
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                let call_id = sanitize_nonempty_field(call_id, "tool call call_id")?;
+                let tool_name = sanitize_nonempty_field(tool_name, "tool call tool_name")?;
+                let arguments_json = encode_tool_call_arguments(tool_name.as_str(), arguments)?;
+                input.push(json!({
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": tool_name,
+                    "arguments": arguments_json,
+                }));
+            }
+            RunMessage::ToolResult {
+                call_id,
+                tool_name,
+                content,
+                ..
+            } => {
+                let call_id = sanitize_nonempty_field(call_id, "tool result call_id")?;
+                let _tool_name = sanitize_nonempty_field(tool_name, "tool result tool_name")?;
+                let output = Value::String(tool_result_content_text(content));
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                }));
+            }
+        }
+    }
+
+    Ok(input)
+}
+
+fn codex_user_text_message(text: &str) -> Result<Value, String> {
+    if text.trim().is_empty() {
+        return Err(
+            "codex-api provider requires non-empty user text messages in run history".to_string(),
+        );
+    }
+
+    Ok(json!({
         "role": "user",
         "content": [
             {
                 "type": "input_text",
-                "text": prompt,
+                "text": text,
             }
         ],
-    })])
+    }))
+}
+
+fn codex_assistant_output_message(text: &str, message_index: usize) -> Result<Value, String> {
+    if text.trim().is_empty() {
+        return Err(
+            "codex-api provider requires non-empty assistant text messages in run history"
+                .to_string(),
+        );
+    }
+
+    Ok(json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": text,
+                "annotations": [],
+            }
+        ],
+        "status": "completed",
+        "id": format!("msg_{message_index}"),
+    }))
+}
+
+fn encode_tool_call_arguments(tool_name: &str, arguments: &Value) -> Result<String, String> {
+    if !arguments.is_object() {
+        return Err(format!(
+            "codex-api provider requires tool call arguments to be a JSON object for tool '{tool_name}'"
+        ));
+    }
+
+    serde_json::to_string(arguments).map_err(|error| {
+        format!(
+            "codex-api provider failed to serialize tool call arguments for '{tool_name}': {error}"
+        )
+    })
+}
+
+fn sanitize_nonempty_field(value: &str, field_name: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "codex-api provider requires non-empty {field_name} in run history"
+        ));
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn parse_pending_tool_call(
@@ -586,13 +692,12 @@ fn parse_pending_tool_call(
         format!("Malformed tool call payload for '{tool_name}': missing arguments",)
     })?;
 
-    let (arguments, arguments_json) = normalize_tool_arguments(&tool_name, arguments)?;
+    let arguments = normalize_tool_arguments(&tool_name, arguments)?;
 
     Ok(PendingToolCall {
         call_id,
         tool_name,
         arguments,
-        arguments_json,
     })
 }
 
@@ -611,7 +716,7 @@ fn required_stream_string(value: Option<String>, field_name: &str) -> Result<Str
     Ok(trimmed.to_string())
 }
 
-fn normalize_tool_arguments(tool_name: &str, arguments: Value) -> Result<(Value, String), String> {
+fn normalize_tool_arguments(tool_name: &str, arguments: Value) -> Result<Value, String> {
     match arguments {
         Value::String(arguments_json) => {
             let parsed = serde_json::from_str::<Value>(&arguments_json).map_err(|error| {
@@ -626,28 +731,13 @@ fn normalize_tool_arguments(tool_name: &str, arguments: Value) -> Result<(Value,
                 ));
             }
 
-            Ok((parsed, arguments_json))
+            Ok(parsed)
         }
-        Value::Object(_) => {
-            let arguments_json = arguments.to_string();
-            Ok((arguments, arguments_json))
-        }
+        Value::Object(_) => Ok(arguments),
         other => Err(format!(
             "Malformed tool call payload for '{tool_name}': arguments must be a JSON object or string, got {}",
             value_type_name(&other)
         )),
-    }
-}
-
-fn codex_tool_output_payload(result: &ToolResult) -> Value {
-    let content_text = tool_result_content_text(&result.content);
-    if result.is_error {
-        json!({
-            "content": content_text,
-            "success": false,
-        })
-    } else {
-        Value::String(content_text)
     }
 }
 
@@ -658,15 +748,24 @@ fn tool_result_content_text(value: &Value) -> String {
     }
 }
 
-fn sanitize_run_prompt(prompt: String) -> Result<String, String> {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
+fn sanitize_run_messages(messages: Vec<RunMessage>) -> Result<Vec<RunMessage>, String> {
+    if messages.is_empty() {
         return Err(
-            "codex-api provider requires non-empty run prompt before sending requests".to_string(),
+            "codex-api provider requires non-empty run message history before sending requests"
+                .to_string(),
         );
     }
 
-    Ok(trimmed.to_string())
+    let has_user_message = messages
+        .iter()
+        .any(|message| matches!(message, RunMessage::UserText { .. }));
+    if !has_user_message {
+        return Err(
+            "codex-api provider requires at least one user text message in run history".to_string(),
+        );
+    }
+
+    Ok(messages)
 }
 
 fn sanitize_run_instructions(instructions: String) -> Result<String, String> {
@@ -815,7 +914,9 @@ mod tests {
             .run(
                 RunRequest {
                     run_id: 9,
-                    prompt: "hello".to_string(),
+                    messages: vec![RunMessage::UserText {
+                        text: "hello".to_string(),
+                    }],
                     instructions: "system instructions".to_string(),
                 },
                 cancel,
@@ -850,6 +951,25 @@ mod tests {
                     .map(ToString::to_string)
             })
             .collect()
+    }
+
+    fn assert_transport_invariants(request: &CodexRequest, instructions: &str) {
+        assert_eq!(request.instructions.as_deref(), Some(instructions));
+        assert!(
+            request.input.is_array(),
+            "request input must be list-shaped"
+        );
+        assert!(!request.store, "request must force store=false");
+        assert!(request.stream, "request must force stream=true");
+        assert_eq!(
+            request.include,
+            vec!["reasoning.encrypted_content".to_string()]
+        );
+        assert_eq!(request.tool_choice.as_deref(), Some("auto"));
+        assert!(
+            request.parallel_tool_calls,
+            "request must force parallel_tool_calls=true"
+        );
     }
 
     #[test]
@@ -951,9 +1071,12 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, RunEvent::Chunk { text, .. } if text == "Hello")));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, RunEvent::Chunk { text, .. } if text == " world")));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RunEvent::Chunk { text, .. } if text == " world")),
+            "reasoning-summary deltas must not be emitted as assistant output chunks"
+        );
         assert!(matches!(
             events.last(),
             Some(RunEvent::Finished { run_id: 9 })
@@ -985,6 +1108,175 @@ mod tests {
             !requests[0].input.is_string(),
             "initial codex request input must never be a plain string"
         );
+    }
+
+    #[test]
+    fn run_initial_request_replays_full_message_history_in_stable_order() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        provider
+            .run(
+                RunRequest {
+                    run_id: 9,
+                    messages: vec![
+                        RunMessage::UserText {
+                            text: "turn-1 user".to_string(),
+                        },
+                        RunMessage::AssistantText {
+                            text: "turn-1 assistant".to_string(),
+                        },
+                        RunMessage::ToolCall {
+                            call_id: "call_1".to_string(),
+                            tool_name: "read".to_string(),
+                            arguments: json!({ "path": "README.md" }),
+                        },
+                        RunMessage::ToolResult {
+                            call_id: "call_1".to_string(),
+                            tool_name: "read".to_string(),
+                            content: json!("file contents"),
+                            is_error: false,
+                        },
+                        RunMessage::UserText {
+                            text: "turn-2 user".to_string(),
+                        },
+                    ],
+                    instructions: "system instructions".to_string(),
+                },
+                cancel,
+                &mut |_call| {
+                    panic!("tool executor should not be called when stream does not request tools")
+                },
+                &mut |event| events.push(event),
+            )
+            .expect("run should succeed");
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 1);
+        let initial_input = requests[0]
+            .input
+            .as_array()
+            .expect("initial request input should be an array");
+
+        assert_eq!(initial_input.len(), 5);
+        assert_eq!(initial_input[0]["role"], "user");
+        assert_eq!(initial_input[0]["content"][0]["type"], "input_text");
+        assert_eq!(initial_input[0]["content"][0]["text"], "turn-1 user");
+
+        assert_eq!(initial_input[1]["type"], "message");
+        assert_eq!(initial_input[1]["role"], "assistant");
+        assert_eq!(initial_input[1]["content"][0]["type"], "output_text");
+        assert_eq!(initial_input[1]["content"][0]["text"], "turn-1 assistant");
+        assert_eq!(initial_input[1]["status"], "completed");
+        assert_eq!(initial_input[1]["id"], "msg_0");
+
+        assert_eq!(initial_input[2]["type"], "function_call");
+        assert_eq!(initial_input[2]["call_id"], "call_1");
+        assert_eq!(initial_input[2]["name"], "read");
+        assert_eq!(initial_input[2]["arguments"], "{\"path\":\"README.md\"}");
+
+        assert_eq!(initial_input[3]["type"], "function_call_output");
+        assert_eq!(initial_input[3]["call_id"], "call_1");
+        assert_eq!(initial_input[3]["output"], "file contents");
+
+        assert_eq!(initial_input[4]["role"], "user");
+        assert_eq!(initial_input[4]["content"][0]["type"], "input_text");
+        assert_eq!(initial_input[4]["content"][0]["text"], "turn-2 user");
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                RunEvent::Started { run_id: 9 },
+                RunEvent::Finished { run_id: 9 }
+            ]
+        ));
+    }
+
+    #[test]
+    fn run_fails_when_replayed_tool_call_arguments_are_not_object() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        let result = provider.run(
+            RunRequest {
+                run_id: 9,
+                messages: vec![
+                    RunMessage::UserText {
+                        text: "turn-1 user".to_string(),
+                    },
+                    RunMessage::ToolCall {
+                        call_id: "call_1".to_string(),
+                        tool_name: "read".to_string(),
+                        arguments: json!("bad"),
+                    },
+                ],
+                instructions: "system instructions".to_string(),
+            },
+            cancel,
+            &mut |_call| ToolResult::error("unused", "unused", "unused"),
+            &mut |event| events.push(event),
+        );
+
+        let error = result.expect_err("invalid replayed tool call arguments should fail fast");
+        assert!(error.contains("requires tool call arguments to be a JSON object"));
+        assert!(events.is_empty());
+        assert!(stream.observed_requests().is_empty());
+    }
+
+    #[test]
+    fn run_fails_when_replayed_tool_result_has_empty_call_id() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        let result = provider.run(
+            RunRequest {
+                run_id: 9,
+                messages: vec![
+                    RunMessage::UserText {
+                        text: "turn-1 user".to_string(),
+                    },
+                    RunMessage::ToolResult {
+                        call_id: "   ".to_string(),
+                        tool_name: "read".to_string(),
+                        content: json!("out"),
+                        is_error: false,
+                    },
+                ],
+                instructions: "system instructions".to_string(),
+            },
+            cancel,
+            &mut |_call| ToolResult::error("unused", "unused", "unused"),
+            &mut |event| events.push(event),
+        );
+
+        let error = result.expect_err("invalid replayed tool result should fail fast");
+        assert!(error.contains("requires non-empty tool result call_id"));
+        assert!(events.is_empty());
+        assert!(stream.observed_requests().is_empty());
     }
 
     #[test]
@@ -1023,26 +1315,102 @@ mod tests {
 
         let requests = stream.observed_requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[1].instructions.as_deref(),
-            Some("system instructions"),
-            "follow-up request must preserve instructions"
-        );
+        assert_transport_invariants(&requests[0], "system instructions");
+        assert_transport_invariants(&requests[1], "system instructions");
         let follow_up_input = requests[1]
             .input
             .as_array()
             .expect("follow-up request input should be an array");
-        assert_eq!(follow_up_input.len(), 2);
-        assert_eq!(follow_up_input[0]["type"], "function_call");
-        assert_eq!(follow_up_input[0]["call_id"], "call_1");
-        assert_eq!(follow_up_input[0]["name"], "read");
-        assert_eq!(follow_up_input[1]["type"], "function_call_output");
+        assert_eq!(follow_up_input.len(), 3);
+        assert_eq!(follow_up_input[0]["role"], "user");
+        assert_eq!(follow_up_input[0]["content"][0]["type"], "input_text");
+        assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
+        assert_eq!(follow_up_input[1]["type"], "function_call");
         assert_eq!(follow_up_input[1]["call_id"], "call_1");
-        assert_eq!(follow_up_input[1]["output"], "file contents");
+        assert_eq!(follow_up_input[1]["name"], "read");
+        assert_eq!(follow_up_input[2]["type"], "function_call_output");
+        assert_eq!(follow_up_input[2]["call_id"], "call_1");
+        assert_eq!(follow_up_input[2]["output"], "file contents");
 
         assert!(matches!(
             events.last(),
             Some(RunEvent::Finished { run_id: 9 })
+        ));
+    }
+
+    #[test]
+    fn run_follow_up_request_replays_prior_history_before_roundtrip_items() {
+        let stream = FakeStreamClient::scripted(vec![
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![CodexStreamEvent::ToolCallRequested {
+                    id: Some("fc_1".to_string()),
+                    call_id: Some("call_1".to_string()),
+                    tool_name: Some("read".to_string()),
+                    arguments: Some(Value::String("{\"path\":\"README.md\"}".to_string())),
+                }],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+            FakeStreamOutcome::Success(StreamResult {
+                events: Vec::new(),
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+        ]);
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        provider
+            .run(
+                RunRequest {
+                    run_id: 9,
+                    messages: vec![
+                        RunMessage::UserText {
+                            text: "turn-1 user".to_string(),
+                        },
+                        RunMessage::AssistantText {
+                            text: "turn-1 assistant".to_string(),
+                        },
+                        RunMessage::UserText {
+                            text: "turn-2 user".to_string(),
+                        },
+                    ],
+                    instructions: "system instructions".to_string(),
+                },
+                cancel,
+                &mut |call| ToolResult::success(call.call_id, call.tool_name, "tool output"),
+                &mut |event| events.push(event),
+            )
+            .expect("run should succeed");
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 2);
+        let follow_up_input = requests[1]
+            .input
+            .as_array()
+            .expect("follow-up request input should be an array");
+        assert_eq!(follow_up_input.len(), 5);
+        assert_eq!(follow_up_input[0]["role"], "user");
+        assert_eq!(follow_up_input[0]["content"][0]["text"], "turn-1 user");
+        assert_eq!(follow_up_input[1]["type"], "message");
+        assert_eq!(follow_up_input[1]["role"], "assistant");
+        assert_eq!(follow_up_input[1]["content"][0]["text"], "turn-1 assistant");
+        assert_eq!(follow_up_input[2]["role"], "user");
+        assert_eq!(follow_up_input[2]["content"][0]["text"], "turn-2 user");
+        assert_eq!(follow_up_input[3]["type"], "function_call");
+        assert_eq!(follow_up_input[3]["call_id"], "call_1");
+        assert_eq!(follow_up_input[4]["type"], "function_call_output");
+        assert_eq!(follow_up_input[4]["call_id"], "call_1");
+        assert_eq!(follow_up_input[4]["output"], "tool output");
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                RunEvent::Started { run_id: 9 },
+                RunEvent::Finished { run_id: 9 }
+            ]
         ));
     }
 
@@ -1095,11 +1463,13 @@ mod tests {
             .input
             .as_array()
             .expect("follow-up request input should be an array");
-        assert_eq!(follow_up_input[0]["type"], "function_call");
-        assert_eq!(follow_up_input[0]["name"], "apply_patch");
-        assert_eq!(follow_up_input[1]["type"], "function_call_output");
+        assert_eq!(follow_up_input[0]["role"], "user");
+        assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
+        assert_eq!(follow_up_input[1]["type"], "function_call");
+        assert_eq!(follow_up_input[1]["name"], "apply_patch");
+        assert_eq!(follow_up_input[2]["type"], "function_call_output");
         assert_eq!(
-            follow_up_input[1]["output"],
+            follow_up_input[2]["output"],
             "Success. Updated the following files:\nM src/main.rs"
         );
 
@@ -1150,11 +1520,10 @@ mod tests {
             .input
             .as_array()
             .expect("follow-up request input should be an array");
-        assert_eq!(follow_up_input[0]["name"], "apply_patch");
-        assert_eq!(follow_up_input[1]["type"], "function_call_output");
-        assert_eq!(follow_up_input[1]["output"]["success"], false);
+        assert_eq!(follow_up_input[1]["name"], "apply_patch");
+        assert_eq!(follow_up_input[2]["type"], "function_call_output");
         assert_eq!(
-            follow_up_input[1]["output"]["content"],
+            follow_up_input[2]["output"],
             "apply_patch parse error: invalid patch"
         );
 
@@ -1205,11 +1574,10 @@ mod tests {
             .input
             .as_array()
             .expect("follow-up request input should be an array");
-        assert_eq!(follow_up_input[0]["name"], "apply_patch");
-        assert_eq!(follow_up_input[1]["type"], "function_call_output");
-        assert_eq!(follow_up_input[1]["output"]["success"], false);
+        assert_eq!(follow_up_input[1]["name"], "apply_patch");
+        assert_eq!(follow_up_input[2]["type"], "function_call_output");
         assert_eq!(
-            follow_up_input[1]["output"]["content"],
+            follow_up_input[2]["output"],
             "apply_patch path escape rejected: Path escapes workspace root"
         );
 
@@ -1268,15 +1636,17 @@ mod tests {
             .input
             .as_array()
             .expect("follow-up request input should be an array");
-        assert_eq!(follow_up_input.len(), 4);
-        assert_eq!(follow_up_input[0]["type"], "function_call");
-        assert_eq!(follow_up_input[0]["call_id"], "call_1");
+        assert_eq!(follow_up_input.len(), 5);
+        assert_eq!(follow_up_input[0]["role"], "user");
+        assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
         assert_eq!(follow_up_input[1]["type"], "function_call");
-        assert_eq!(follow_up_input[1]["call_id"], "call_2");
-        assert_eq!(follow_up_input[2]["type"], "function_call_output");
-        assert_eq!(follow_up_input[2]["call_id"], "call_1");
+        assert_eq!(follow_up_input[1]["call_id"], "call_1");
+        assert_eq!(follow_up_input[2]["type"], "function_call");
+        assert_eq!(follow_up_input[2]["call_id"], "call_2");
         assert_eq!(follow_up_input[3]["type"], "function_call_output");
-        assert_eq!(follow_up_input[3]["call_id"], "call_2");
+        assert_eq!(follow_up_input[3]["call_id"], "call_1");
+        assert_eq!(follow_up_input[4]["type"], "function_call_output");
+        assert_eq!(follow_up_input[4]["call_id"], "call_2");
 
         assert!(matches!(
             events.last(),
@@ -1489,7 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_empty_prompt_before_http_call() {
+    fn run_rejects_empty_user_message_before_http_call() {
         let stream = FakeStreamClient::success(StreamResult {
             events: Vec::new(),
             terminal: Some(CodexResponseStatus::Completed),
@@ -1504,7 +1874,9 @@ mod tests {
         let result = provider.run(
             RunRequest {
                 run_id: 12,
-                prompt: "  \n\t ".to_string(),
+                messages: vec![RunMessage::UserText {
+                    text: "  \n\t ".to_string(),
+                }],
                 instructions: "system instructions".to_string(),
             },
             cancel,
@@ -1512,8 +1884,70 @@ mod tests {
             &mut |event| events.push(event),
         );
 
-        let error = result.expect_err("empty prompt should fail fast");
-        assert!(error.contains("requires non-empty run prompt"));
+        let error = result.expect_err("empty user message should fail fast");
+        assert!(error.contains("requires non-empty user text messages"));
+        assert!(events.is_empty());
+        assert!(stream.observed_requests().is_empty());
+    }
+
+    #[test]
+    fn run_rejects_empty_message_history_before_http_call() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        let result = provider.run(
+            RunRequest {
+                run_id: 12,
+                messages: Vec::new(),
+                instructions: "system instructions".to_string(),
+            },
+            cancel,
+            &mut |_call| ToolResult::error("unused", "unused", "unused"),
+            &mut |event| events.push(event),
+        );
+
+        let error = result.expect_err("empty message history should fail fast");
+        assert!(error.contains("requires non-empty run message history"));
+        assert!(events.is_empty());
+        assert!(stream.observed_requests().is_empty());
+    }
+
+    #[test]
+    fn run_rejects_history_without_user_message_before_http_call() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        let result = provider.run(
+            RunRequest {
+                run_id: 12,
+                messages: vec![RunMessage::AssistantText {
+                    text: "assistant only".to_string(),
+                }],
+                instructions: "system instructions".to_string(),
+            },
+            cancel,
+            &mut |_call| ToolResult::error("unused", "unused", "unused"),
+            &mut |event| events.push(event),
+        );
+
+        let error = result.expect_err("history without user message should fail fast");
+        assert!(error.contains("requires at least one user text message"));
         assert!(events.is_empty());
         assert!(stream.observed_requests().is_empty());
     }
@@ -1534,7 +1968,9 @@ mod tests {
         let result = provider.run(
             RunRequest {
                 run_id: 12,
-                prompt: "hello".to_string(),
+                messages: vec![RunMessage::UserText {
+                    text: "hello".to_string(),
+                }],
                 instructions: "   \n\t ".to_string(),
             },
             cancel,

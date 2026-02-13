@@ -11,7 +11,7 @@ use tape_tui::runtime::tui::{
 
 use crate::app::{App, HostOps, Mode, RunId};
 use crate::provider::{
-    ProviderProfile, RunEvent, RunProvider, RunRequest, ToolCallRequest, ToolResult,
+    ProviderProfile, RunEvent, RunMessage, RunProvider, RunRequest, ToolCallRequest, ToolResult,
 };
 use crate::tools::{BuiltinToolExecutor, ToolCall, ToolExecutor, ToolOutput};
 
@@ -35,6 +35,7 @@ enum RuntimeEvent {
         run_id: RunId,
         call_id: String,
         tool_name: String,
+        arguments: Value,
     },
     ToolCallCompleted {
         run_id: RunId,
@@ -108,7 +109,7 @@ impl RuntimeController {
 
     fn start_run_internal(
         self: &Arc<Self>,
-        prompt: String,
+        messages: Vec<RunMessage>,
         base_system_instructions: String,
     ) -> Result<RunId, String> {
         let mut active_run = self.lock_active_run();
@@ -124,7 +125,7 @@ impl RuntimeController {
         )?;
         let request = RunRequest {
             run_id,
-            prompt,
+            messages,
             instructions,
         };
         let join_handle = self.spawn_worker(request, Arc::clone(&cancel))?;
@@ -208,6 +209,7 @@ impl RuntimeController {
             run_id,
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
+            arguments: call.arguments.clone(),
         });
 
         if cancel.load(Ordering::SeqCst) {
@@ -345,9 +347,10 @@ impl RuntimeController {
                 run_id,
                 call_id,
                 tool_name,
+                arguments,
             } => {
                 let mut app = lock_unpoisoned(&self.app);
-                app.on_tool_call_started(run_id, &call_id, &tool_name);
+                app.on_tool_call_started(run_id, &call_id, &tool_name, &arguments);
             }
             RuntimeEvent::ToolCallCompleted { run_id, result } => {
                 let content = tool_result_content_as_text(&result.content);
@@ -357,6 +360,7 @@ impl RuntimeController {
                     &result.tool_name,
                     &result.call_id,
                     result.is_error,
+                    &result.content,
                     &content,
                 );
             }
@@ -464,8 +468,12 @@ impl CustomCommand for DrainRunEventsCommand {
 }
 
 impl HostOps for Arc<RuntimeController> {
-    fn start_run(&mut self, prompt: String, instructions: String) -> Result<RunId, String> {
-        self.start_run_internal(prompt, instructions)
+    fn start_run(
+        &mut self,
+        messages: Vec<RunMessage>,
+        instructions: String,
+    ) -> Result<RunId, String> {
+        self.start_run_internal(messages, instructions)
     }
 
     fn cancel_run(&mut self, run_id: RunId) {
