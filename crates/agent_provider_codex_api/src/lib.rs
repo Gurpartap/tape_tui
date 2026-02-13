@@ -8,7 +8,7 @@
 //! (`bash`, `read`, `edit`, `write`, `apply_patch`), with explicit failure/cancel outcomes for
 //! malformed payloads or non-complete terminal statuses.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -32,6 +32,24 @@ const V1_TOOL_NAMES: [&str; 5] = ["bash", "read", "edit", "write", "apply_patch"
 const THINKING_LEVELS_BASELINE: [&str; 5] = ["off", "minimal", "low", "medium", "high"];
 const THINKING_LEVELS_WITH_XHIGH: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT: &str = "No result provided";
+const NORMALIZED_TOOL_CALL_ID_MAX_LEN: usize = 64;
+const NORMALIZED_TOOL_CALL_ID_FALLBACK: &str = "call_0";
+const NORMALIZED_TOOL_ITEM_ID_FALLBACK: &str = "fc_0";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedToolCallId {
+    canonical: String,
+    transport_call_id: String,
+    response_item_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnresolvedToolCall {
+    raw_id: String,
+    canonical_id: String,
+    transport_call_id: String,
+    tool_name: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelectionState {
@@ -41,15 +59,21 @@ struct SelectionState {
 
 #[derive(Debug, Clone, PartialEq)]
 struct PendingToolCall {
-    call_id: String,
+    execution_call_id: String,
+    replay_call_id: String,
     tool_name: String,
     arguments: Value,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+enum ReplayStepItem {
+    AssistantText(String),
+    ToolCall(PendingToolCall),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct StreamStepOutcome {
-    assistant_text: String,
-    pending_tool_calls: Vec<PendingToolCall>,
+    replay_items: Vec<ReplayStepItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,14 +266,14 @@ impl CodexApiProvider {
         stream_events: Vec<CodexStreamEvent>,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<StreamStepOutcome, String> {
-        let mut pending_tool_calls = Vec::new();
-        let mut assistant_text = String::new();
+        let mut replay_items = Vec::new();
+        let mut text_buffer = String::new();
 
         for stream_event in stream_events {
             match stream_event {
                 CodexStreamEvent::OutputTextDelta { delta } => {
                     if !delta.is_empty() {
-                        assistant_text.push_str(&delta);
+                        text_buffer.push_str(&delta);
                         emit(RunEvent::Chunk {
                             run_id,
                             text: delta,
@@ -258,22 +282,30 @@ impl CodexApiProvider {
                 }
                 CodexStreamEvent::ReasoningSummaryTextDelta { .. } => {}
                 CodexStreamEvent::ToolCallRequested {
+                    id,
                     call_id,
                     tool_name,
                     arguments,
-                    ..
                 } => {
-                    pending_tool_calls
-                        .push(parse_pending_tool_call(call_id, tool_name, arguments)?);
+                    if !text_buffer.is_empty() {
+                        replay_items.push(ReplayStepItem::AssistantText(std::mem::take(
+                            &mut text_buffer,
+                        )));
+                    }
+
+                    replay_items.push(ReplayStepItem::ToolCall(parse_pending_tool_call(
+                        id, call_id, tool_name, arguments,
+                    )?));
                 }
                 _ => {}
             }
         }
 
-        Ok(StreamStepOutcome {
-            assistant_text,
-            pending_tool_calls,
-        })
+        if !text_buffer.is_empty() {
+            replay_items.push(ReplayStepItem::AssistantText(text_buffer));
+        }
+
+        Ok(StreamStepOutcome { replay_items })
     }
 
     fn build_initial_request(
@@ -283,7 +315,8 @@ impl CodexApiProvider {
         messages: &[RunMessage],
         instructions: &str,
     ) -> Result<CodexRequest, String> {
-        let normalized_messages = normalize_run_messages_for_codex(messages.to_vec())?;
+        let sanitized_messages = sanitize_run_messages(messages.to_vec())?;
+        let normalized_messages = normalize_run_messages_for_codex(sanitized_messages)?;
         let mut request = CodexRequest::new(
             model_id.to_owned(),
             Value::Array(codex_input_from_run_messages(&normalized_messages)?),
@@ -431,7 +464,12 @@ impl RunProvider for CodexApiProvider {
                     }
                 };
 
-            if stream_outcome.pending_tool_calls.is_empty() {
+            let has_pending_tool_calls = stream_outcome
+                .replay_items
+                .iter()
+                .any(|item| matches!(item, ReplayStepItem::ToolCall(_)));
+
+            if !has_pending_tool_calls {
                 self.emit_terminal_event(run_id, stream_result.terminal, emit);
                 return Ok(());
             }
@@ -462,40 +500,50 @@ impl RunProvider for CodexApiProvider {
                 }
             }
 
-            if !stream_outcome.assistant_text.is_empty() {
-                replay_messages.push(RunMessage::AssistantText {
-                    text: stream_outcome.assistant_text,
-                });
+            let pending_tool_calls_len = stream_outcome
+                .replay_items
+                .iter()
+                .filter(|item| matches!(item, ReplayStepItem::ToolCall(_)))
+                .count();
+            let mut pending_tool_calls = Vec::with_capacity(pending_tool_calls_len);
+
+            for replay_item in stream_outcome.replay_items {
+                match replay_item {
+                    ReplayStepItem::AssistantText(text) => {
+                        if !text.is_empty() {
+                            replay_messages.push(RunMessage::AssistantText { text });
+                        }
+                    }
+                    ReplayStepItem::ToolCall(pending_call) => {
+                        replay_messages.push(RunMessage::ToolCall {
+                            call_id: pending_call.replay_call_id.clone(),
+                            tool_name: pending_call.tool_name.clone(),
+                            arguments: pending_call.arguments.clone(),
+                        });
+                        pending_tool_calls.push(pending_call);
+                    }
+                }
             }
 
-            let mut roundtrips: Vec<(PendingToolCall, ToolResult)> =
-                Vec::with_capacity(stream_outcome.pending_tool_calls.len());
-            for pending_call in stream_outcome.pending_tool_calls {
+            let mut tool_results = Vec::with_capacity(pending_tool_calls.len());
+            for pending_call in pending_tool_calls {
                 if cancel.load(Ordering::Acquire) {
                     emit(RunEvent::Cancelled { run_id });
                     return Ok(());
                 }
 
                 let result = execute_tool(ToolCallRequest {
-                    call_id: pending_call.call_id.clone(),
-                    tool_name: pending_call.tool_name.clone(),
-                    arguments: pending_call.arguments.clone(),
+                    call_id: pending_call.execution_call_id,
+                    tool_name: pending_call.tool_name,
+                    arguments: pending_call.arguments,
                 });
 
-                roundtrips.push((pending_call, result));
+                tool_results.push((pending_call.replay_call_id, result));
             }
 
-            for (pending_call, _) in &roundtrips {
-                replay_messages.push(RunMessage::ToolCall {
-                    call_id: pending_call.call_id.clone(),
-                    tool_name: pending_call.tool_name.clone(),
-                    arguments: pending_call.arguments.clone(),
-                });
-            }
-
-            for (_, result) in roundtrips {
+            for (replay_call_id, result) in tool_results {
                 replay_messages.push(RunMessage::ToolResult {
-                    call_id: result.call_id,
+                    call_id: replay_call_id,
                     tool_name: result.tool_name,
                     content: result.content,
                     is_error: result.is_error,
@@ -647,26 +695,36 @@ fn codex_tool_payloads() -> Vec<Value> {
 
 fn normalize_run_messages_for_codex(messages: Vec<RunMessage>) -> Result<Vec<RunMessage>, String> {
     let mut normalized = Vec::with_capacity(messages.len());
-    let mut unresolved_tool_calls: Vec<(String, String)> = Vec::new();
-    let mut unresolved_call_ids = HashSet::new();
+    let mut unresolved_tool_calls = VecDeque::new();
+    let mut unresolved_canonical_ids = HashSet::new();
+    let mut unresolved_transport_call_ids = HashSet::new();
+    let mut unresolved_canonical_ids_by_raw: HashMap<String, VecDeque<String>> = HashMap::new();
+    let mut remaining_tool_result_counts_by_raw =
+        build_remaining_tool_result_counts_by_raw(&messages)?;
 
     for message in messages {
         match message {
             RunMessage::UserText { text } => {
                 validate_nonempty_user_text(&text)?;
-                flush_unresolved_tool_calls(
+                flush_unresolved_tool_calls_without_future_results(
                     &mut normalized,
                     &mut unresolved_tool_calls,
-                    &mut unresolved_call_ids,
+                    &mut unresolved_canonical_ids,
+                    &mut unresolved_transport_call_ids,
+                    &mut unresolved_canonical_ids_by_raw,
+                    &remaining_tool_result_counts_by_raw,
                 );
                 normalized.push(RunMessage::UserText { text });
             }
             RunMessage::AssistantText { text } => {
                 validate_nonempty_assistant_text(&text)?;
-                flush_unresolved_tool_calls(
+                flush_unresolved_tool_calls_without_future_results(
                     &mut normalized,
                     &mut unresolved_tool_calls,
-                    &mut unresolved_call_ids,
+                    &mut unresolved_canonical_ids,
+                    &mut unresolved_transport_call_ids,
+                    &mut unresolved_canonical_ids_by_raw,
+                    &remaining_tool_result_counts_by_raw,
                 );
                 normalized.push(RunMessage::AssistantText { text });
             }
@@ -675,18 +733,39 @@ fn normalize_run_messages_for_codex(messages: Vec<RunMessage>) -> Result<Vec<Run
                 tool_name,
                 arguments,
             } => {
-                let call_id = sanitize_nonempty_field(&call_id, "tool call call_id")?;
+                let raw_call_id = sanitize_nonempty_field(&call_id, "tool call call_id")?;
+                let normalized_call_id = normalize_tool_call_id_for_codex(raw_call_id.as_str());
                 let tool_name = sanitize_nonempty_field(&tool_name, "tool call tool_name")?;
                 let _arguments_json = encode_tool_call_arguments(&tool_name, &arguments)?;
 
-                if unresolved_call_ids.contains(call_id.as_str()) {
-                    return Err(duplicate_unresolved_tool_call_id_error(call_id.as_str()));
+                if unresolved_canonical_ids.contains(normalized_call_id.canonical.as_str()) {
+                    return Err(duplicate_normalized_unresolved_tool_call_id_error(
+                        normalized_call_id.canonical.as_str(),
+                    ));
                 }
 
-                unresolved_call_ids.insert(call_id.clone());
-                unresolved_tool_calls.push((call_id.clone(), tool_name.clone()));
+                if unresolved_transport_call_ids
+                    .contains(normalized_call_id.transport_call_id.as_str())
+                {
+                    return Err(duplicate_normalized_unresolved_tool_transport_id_error(
+                        normalized_call_id.transport_call_id.as_str(),
+                    ));
+                }
+
+                unresolved_canonical_ids.insert(normalized_call_id.canonical.clone());
+                unresolved_transport_call_ids.insert(normalized_call_id.transport_call_id.clone());
+                unresolved_canonical_ids_by_raw
+                    .entry(raw_call_id.clone())
+                    .or_default()
+                    .push_back(normalized_call_id.canonical.clone());
+                unresolved_tool_calls.push_back(UnresolvedToolCall {
+                    raw_id: raw_call_id,
+                    canonical_id: normalized_call_id.canonical.clone(),
+                    transport_call_id: normalized_call_id.transport_call_id.clone(),
+                    tool_name: tool_name.clone(),
+                });
                 normalized.push(RunMessage::ToolCall {
-                    call_id,
+                    call_id: normalized_call_id.canonical,
                     tool_name,
                     arguments,
                 });
@@ -697,19 +776,31 @@ fn normalize_run_messages_for_codex(messages: Vec<RunMessage>) -> Result<Vec<Run
                 content,
                 is_error,
             } => {
-                let call_id = sanitize_nonempty_field(&call_id, "tool result call_id")?;
+                let raw_call_id = sanitize_nonempty_field(&call_id, "tool result call_id")?;
+                let normalized_call_id = pop_unresolved_canonical_id_for_raw(
+                    &mut unresolved_canonical_ids_by_raw,
+                    raw_call_id.as_str(),
+                )
+                .unwrap_or_else(|| {
+                    normalize_tool_call_id_for_codex(raw_call_id.as_str()).canonical
+                });
                 let tool_name = sanitize_nonempty_field(&tool_name, "tool result tool_name")?;
 
-                unresolved_call_ids.remove(call_id.as_str());
-                if let Some(position) = unresolved_tool_calls
-                    .iter()
-                    .position(|(pending_call_id, _)| pending_call_id == &call_id)
-                {
-                    unresolved_tool_calls.remove(position);
-                }
+                decrement_remaining_tool_result_count(
+                    &mut remaining_tool_result_counts_by_raw,
+                    raw_call_id.as_str(),
+                );
+
+                remove_unresolved_tool_call_by_canonical_id(
+                    &mut unresolved_tool_calls,
+                    &mut unresolved_canonical_ids,
+                    &mut unresolved_transport_call_ids,
+                    &mut unresolved_canonical_ids_by_raw,
+                    normalized_call_id.as_str(),
+                );
 
                 normalized.push(RunMessage::ToolResult {
-                    call_id,
+                    call_id: normalized_call_id,
                     tool_name,
                     content,
                     is_error,
@@ -721,32 +812,250 @@ fn normalize_run_messages_for_codex(messages: Vec<RunMessage>) -> Result<Vec<Run
     flush_unresolved_tool_calls(
         &mut normalized,
         &mut unresolved_tool_calls,
-        &mut unresolved_call_ids,
+        &mut unresolved_canonical_ids,
+        &mut unresolved_transport_call_ids,
+        &mut unresolved_canonical_ids_by_raw,
     );
 
     Ok(normalized)
 }
 
+fn build_remaining_tool_result_counts_by_raw(
+    messages: &[RunMessage],
+) -> Result<HashMap<String, usize>, String> {
+    let mut remaining_tool_result_counts_by_raw = HashMap::new();
+
+    for message in messages {
+        if let RunMessage::ToolResult { call_id, .. } = message {
+            let raw_call_id = sanitize_nonempty_field(call_id, "tool result call_id")?;
+            *remaining_tool_result_counts_by_raw
+                .entry(raw_call_id)
+                .or_insert(0) += 1;
+        }
+    }
+
+    Ok(remaining_tool_result_counts_by_raw)
+}
+
+fn flush_unresolved_tool_calls_without_future_results(
+    normalized: &mut Vec<RunMessage>,
+    unresolved_tool_calls: &mut VecDeque<UnresolvedToolCall>,
+    unresolved_canonical_ids: &mut HashSet<String>,
+    unresolved_transport_call_ids: &mut HashSet<String>,
+    unresolved_canonical_ids_by_raw: &mut HashMap<String, VecDeque<String>>,
+    remaining_tool_result_counts_by_raw: &HashMap<String, usize>,
+) {
+    let mut still_unresolved = VecDeque::new();
+
+    while let Some(unresolved) = unresolved_tool_calls.pop_front() {
+        let has_future_result = remaining_tool_result_counts_by_raw
+            .get(unresolved.raw_id.as_str())
+            .copied()
+            .unwrap_or_default()
+            > 0;
+
+        if has_future_result {
+            still_unresolved.push_back(unresolved);
+        } else {
+            normalized.push(RunMessage::ToolResult {
+                call_id: unresolved.canonical_id,
+                tool_name: unresolved.tool_name,
+                content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                is_error: true,
+            });
+        }
+    }
+
+    *unresolved_tool_calls = still_unresolved;
+    rebuild_unresolved_indexes(
+        unresolved_tool_calls,
+        unresolved_canonical_ids,
+        unresolved_transport_call_ids,
+        unresolved_canonical_ids_by_raw,
+    );
+}
+
+fn pop_unresolved_canonical_id_for_raw(
+    unresolved_canonical_ids_by_raw: &mut HashMap<String, VecDeque<String>>,
+    raw_call_id: &str,
+) -> Option<String> {
+    let mut should_remove = false;
+    let canonical_id = unresolved_canonical_ids_by_raw
+        .get_mut(raw_call_id)
+        .and_then(|canonical_ids| {
+            let canonical_id = canonical_ids.pop_front();
+            should_remove = canonical_ids.is_empty();
+            canonical_id
+        });
+
+    if should_remove {
+        unresolved_canonical_ids_by_raw.remove(raw_call_id);
+    }
+
+    canonical_id
+}
+
+fn remove_unresolved_tool_call_by_canonical_id(
+    unresolved_tool_calls: &mut VecDeque<UnresolvedToolCall>,
+    unresolved_canonical_ids: &mut HashSet<String>,
+    unresolved_transport_call_ids: &mut HashSet<String>,
+    unresolved_canonical_ids_by_raw: &mut HashMap<String, VecDeque<String>>,
+    canonical_id: &str,
+) {
+    let Some(position) = unresolved_tool_calls
+        .iter()
+        .position(|unresolved| unresolved.canonical_id == canonical_id)
+    else {
+        return;
+    };
+
+    let removed = unresolved_tool_calls
+        .remove(position)
+        .expect("position returned from VecDeque::position must be valid");
+    unresolved_canonical_ids.remove(canonical_id);
+    unresolved_transport_call_ids.remove(removed.transport_call_id.as_str());
+
+    if let Some(canonical_ids) = unresolved_canonical_ids_by_raw.get_mut(removed.raw_id.as_str()) {
+        if let Some(index) = canonical_ids
+            .iter()
+            .position(|queued_canonical_id| queued_canonical_id == canonical_id)
+        {
+            canonical_ids.remove(index);
+        }
+
+        if canonical_ids.is_empty() {
+            unresolved_canonical_ids_by_raw.remove(removed.raw_id.as_str());
+        }
+    }
+}
+
+fn rebuild_unresolved_indexes(
+    unresolved_tool_calls: &VecDeque<UnresolvedToolCall>,
+    unresolved_canonical_ids: &mut HashSet<String>,
+    unresolved_transport_call_ids: &mut HashSet<String>,
+    unresolved_canonical_ids_by_raw: &mut HashMap<String, VecDeque<String>>,
+) {
+    unresolved_canonical_ids.clear();
+    unresolved_transport_call_ids.clear();
+    unresolved_canonical_ids_by_raw.clear();
+
+    for unresolved in unresolved_tool_calls {
+        unresolved_canonical_ids.insert(unresolved.canonical_id.clone());
+        unresolved_transport_call_ids.insert(unresolved.transport_call_id.clone());
+        unresolved_canonical_ids_by_raw
+            .entry(unresolved.raw_id.clone())
+            .or_default()
+            .push_back(unresolved.canonical_id.clone());
+    }
+}
+
+fn decrement_remaining_tool_result_count(
+    remaining_tool_result_counts_by_raw: &mut HashMap<String, usize>,
+    raw_call_id: &str,
+) {
+    let mut should_remove = false;
+
+    if let Some(count) = remaining_tool_result_counts_by_raw.get_mut(raw_call_id) {
+        *count = count.saturating_sub(1);
+        should_remove = *count == 0;
+    }
+
+    if should_remove {
+        remaining_tool_result_counts_by_raw.remove(raw_call_id);
+    }
+}
+
+fn normalize_tool_call_id_for_codex(raw: &str) -> NormalizedToolCallId {
+    let trimmed = raw.trim();
+
+    let (call_raw, item_raw) = match trimmed.split_once('|') {
+        Some((call_part, item_part)) => (call_part, Some(item_part)),
+        None => (trimmed, None),
+    };
+
+    let call_segment =
+        normalize_tool_call_id_segment(call_raw.trim(), NORMALIZED_TOOL_CALL_ID_FALLBACK);
+
+    let response_item_id = item_raw.map(|item_part| {
+        let normalized_item =
+            normalize_tool_call_id_segment(item_part.trim(), NORMALIZED_TOOL_ITEM_ID_FALLBACK);
+        if normalized_item.starts_with("fc") {
+            normalized_item
+        } else {
+            format!("fc_{normalized_item}")
+        }
+    });
+
+    let canonical = match response_item_id.as_deref() {
+        Some(item_id) => format!("{call_segment}|{item_id}"),
+        None => call_segment.clone(),
+    };
+
+    NormalizedToolCallId {
+        canonical,
+        transport_call_id: call_segment,
+        response_item_id,
+    }
+}
+
+fn normalize_tool_call_id_segment(raw_segment: &str, fallback: &str) -> String {
+    let mut normalized =
+        String::with_capacity(raw_segment.len().min(NORMALIZED_TOOL_CALL_ID_MAX_LEN));
+
+    for character in raw_segment.chars() {
+        let mapped = if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            character
+        } else {
+            '_'
+        };
+        normalized.push(mapped);
+
+        if normalized.len() >= NORMALIZED_TOOL_CALL_ID_MAX_LEN {
+            break;
+        }
+    }
+
+    while normalized.ends_with('_') {
+        normalized.pop();
+    }
+
+    if normalized.is_empty() {
+        fallback.to_string()
+    } else {
+        normalized
+    }
+}
+
 fn flush_unresolved_tool_calls(
     normalized: &mut Vec<RunMessage>,
-    unresolved_tool_calls: &mut Vec<(String, String)>,
-    unresolved_call_ids: &mut HashSet<String>,
+    unresolved_tool_calls: &mut VecDeque<UnresolvedToolCall>,
+    unresolved_canonical_ids: &mut HashSet<String>,
+    unresolved_transport_call_ids: &mut HashSet<String>,
+    unresolved_canonical_ids_by_raw: &mut HashMap<String, VecDeque<String>>,
 ) {
-    for (call_id, tool_name) in unresolved_tool_calls.drain(..) {
+    while let Some(unresolved) = unresolved_tool_calls.pop_front() {
         normalized.push(RunMessage::ToolResult {
-            call_id,
-            tool_name,
+            call_id: unresolved.canonical_id,
+            tool_name: unresolved.tool_name,
             content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
             is_error: true,
         });
     }
 
-    unresolved_call_ids.clear();
+    unresolved_canonical_ids.clear();
+    unresolved_transport_call_ids.clear();
+    unresolved_canonical_ids_by_raw.clear();
 }
 
-fn duplicate_unresolved_tool_call_id_error(call_id: &str) -> String {
+fn duplicate_normalized_unresolved_tool_call_id_error(call_id: &str) -> String {
     format!(
-        "codex-api provider cannot normalize run history: duplicate unresolved tool call id '{call_id}'"
+        "codex-api provider cannot normalize run history: duplicate normalized unresolved tool call id '{call_id}'"
+    )
+}
+
+fn duplicate_normalized_unresolved_tool_transport_id_error(call_id: &str) -> String {
+    format!(
+        "codex-api provider cannot normalize run history: duplicate normalized unresolved tool transport id '{call_id}'"
     )
 }
 
@@ -881,11 +1190,12 @@ fn sanitize_nonempty_field(value: &str, field_name: &str) -> Result<String, Stri
 }
 
 fn parse_pending_tool_call(
+    id: Option<String>,
     call_id: Option<String>,
     tool_name: Option<String>,
     arguments: Option<Value>,
 ) -> Result<PendingToolCall, String> {
-    let call_id = required_stream_string(call_id, "call_id")?;
+    let execution_call_id = required_stream_string(call_id, "call_id")?;
     let tool_name = required_stream_string(tool_name, "tool_name")?;
 
     if !V1_TOOL_NAMES.contains(&tool_name.as_str()) {
@@ -900,9 +1210,15 @@ fn parse_pending_tool_call(
     })?;
 
     let arguments = normalize_tool_arguments(&tool_name, arguments)?;
+    let replay_raw_call_id = match sanitize_optional_stream_string(id) {
+        Some(item_id) => format!("{}|{item_id}", execution_call_id),
+        None => execution_call_id.clone(),
+    };
+    let replay_call_id = normalize_tool_call_id_for_codex(replay_raw_call_id.as_str()).canonical;
 
     Ok(PendingToolCall {
-        call_id,
+        execution_call_id,
+        replay_call_id,
         tool_name,
         arguments,
     })
@@ -921,6 +1237,17 @@ fn required_stream_string(value: Option<String>, field_name: &str) -> Result<Str
     }
 
     Ok(trimmed.to_string())
+}
+
+fn sanitize_optional_stream_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn normalize_tool_arguments(tool_name: &str, arguments: Value) -> Result<Value, String> {
@@ -1291,6 +1618,422 @@ mod tests {
     }
 
     #[test]
+    fn normalize_run_messages_normalizes_tool_call_ids_and_maps_tool_results() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: " call id! ".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "call id!".to_string(),
+                tool_name: "read".to_string(),
+                content: json!("file contents"),
+                is_error: false,
+            },
+            RunMessage::ToolCall {
+                call_id: "!!!".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "!!!".to_string(),
+                tool_name: "write".to_string(),
+                content: json!("ok"),
+                is_error: false,
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call_id".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call_id".to_string(),
+                    tool_name: "read".to_string(),
+                    content: json!("file contents"),
+                    is_error: false,
+                },
+                RunMessage::ToolCall {
+                    call_id: "call_0".to_string(),
+                    tool_name: "write".to_string(),
+                    arguments: json!({ "path": "README.md", "content": "updated" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call_0".to_string(),
+                    tool_name: "write".to_string(),
+                    content: json!("ok"),
+                    is_error: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_duplicate_normalized_unresolved_call_id_is_hard_fail() {
+        let result = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call 1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolCall {
+                call_id: "call@1".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+        ]);
+
+        let error = result.expect_err("normalization collision should hard-fail");
+        assert!(
+            error.contains("duplicate normalized unresolved tool call id"),
+            "error must report normalized unresolved id collisions"
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_normalization_collision_error_string_is_exact() {
+        let result = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call 1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolCall {
+                call_id: "call@1".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+        ]);
+
+        let error = result.expect_err("normalization collision should hard-fail");
+        assert_eq!(
+            error,
+            "codex-api provider cannot normalize run history: duplicate normalized unresolved tool call id 'call_1'"
+        );
+    }
+
+    #[test]
+    fn normalize_tool_call_id_for_codex_sanitizes_simple_id() {
+        let normalized = normalize_tool_call_id_for_codex(" call id! ");
+
+        assert_eq!(
+            normalized,
+            NormalizedToolCallId {
+                canonical: "call_id".to_string(),
+                transport_call_id: "call_id".to_string(),
+                response_item_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_tool_call_id_for_codex_sanitizes_pipe_segments() {
+        let normalized = normalize_tool_call_id_for_codex(" call id! | item id! ");
+
+        assert_eq!(
+            normalized,
+            NormalizedToolCallId {
+                canonical: "call_id|fc_item_id".to_string(),
+                transport_call_id: "call_id".to_string(),
+                response_item_id: Some("fc_item_id".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_tool_call_id_for_codex_enforces_fc_prefix_on_item_segment() {
+        let normalized = normalize_tool_call_id_for_codex("call_1|item_1");
+
+        assert_eq!(
+            normalized,
+            NormalizedToolCallId {
+                canonical: "call_1|fc_item_1".to_string(),
+                transport_call_id: "call_1".to_string(),
+                response_item_id: Some("fc_item_1".to_string()),
+            }
+        );
+
+        let already_prefixed = normalize_tool_call_id_for_codex("call_1|fc_item_2");
+        assert_eq!(
+            already_prefixed,
+            NormalizedToolCallId {
+                canonical: "call_1|fc_item_2".to_string(),
+                transport_call_id: "call_1".to_string(),
+                response_item_id: Some("fc_item_2".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_tool_call_id_for_codex_truncates_each_segment_to_64() {
+        let call_segment = "a".repeat(80);
+        let item_segment = "b".repeat(80);
+        let raw = format!("{call_segment}|{item_segment}");
+
+        let normalized = normalize_tool_call_id_for_codex(raw.as_str());
+
+        assert_eq!(normalized.transport_call_id, "a".repeat(64));
+        assert_eq!(
+            normalized.response_item_id,
+            Some(format!("fc_{}", "b".repeat(64)))
+        );
+        assert_eq!(
+            normalized.canonical,
+            format!("{}|fc_{}", "a".repeat(64), "b".repeat(64))
+        );
+    }
+
+    #[test]
+    fn normalize_tool_call_id_for_codex_applies_fallbacks_when_segments_empty() {
+        let normalized = normalize_tool_call_id_for_codex("  |   ");
+
+        assert_eq!(
+            normalized,
+            NormalizedToolCallId {
+                canonical: "call_0|fc_0".to_string(),
+                transport_call_id: "call_0".to_string(),
+                response_item_id: Some("fc_0".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_duplicate_unresolved_transport_call_id_is_hard_fail() {
+        let result = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call|fc_1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolCall {
+                call_id: "call|fc_2".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+        ]);
+
+        let error = result.expect_err("transport collision should hard-fail");
+        assert!(
+            error.contains("duplicate normalized unresolved tool transport id"),
+            "error must report unresolved transport id collisions"
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_duplicate_unresolved_transport_call_id_error_string_is_exact() {
+        let result = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call|fc_1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolCall {
+                call_id: "call|fc_2".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+        ]);
+
+        let error = result.expect_err("transport collision should hard-fail");
+        assert_eq!(
+            error,
+            "codex-api provider cannot normalize run history: duplicate normalized unresolved tool transport id 'call'"
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_raw_id_future_result_prevents_false_match_across_normalization_collision(
+    ) {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call!".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::AssistantText {
+                text: "turn-1 assistant".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call@".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "call@".to_string(),
+                tool_name: "write".to_string(),
+                content: json!("ok"),
+                is_error: false,
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call".to_string(),
+                    tool_name: "read".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+                RunMessage::AssistantText {
+                    text: "turn-1 assistant".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call".to_string(),
+                    tool_name: "write".to_string(),
+                    arguments: json!({ "path": "README.md", "content": "updated" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call".to_string(),
+                    tool_name: "write".to_string(),
+                    content: json!("ok"),
+                    is_error: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_boundary_backfill_uses_raw_id_not_normalized_id() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call!".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::AssistantText {
+                text: "turn-1 assistant".to_string(),
+            },
+            RunMessage::ToolResult {
+                call_id: "call@".to_string(),
+                tool_name: "write".to_string(),
+                content: json!("unmatched output"),
+                is_error: false,
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call".to_string(),
+                    tool_name: "read".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+                RunMessage::AssistantText {
+                    text: "turn-1 assistant".to_string(),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call".to_string(),
+                    tool_name: "write".to_string(),
+                    content: json!("unmatched output"),
+                    is_error: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_eof_backfill_remains_deterministic() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "z!".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolCall {
+                call_id: "a!".to_string(),
+                tool_name: "write".to_string(),
+                arguments: json!({ "path": "README.md", "content": "updated" }),
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "z".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolCall {
+                    call_id: "a".to_string(),
+                    tool_name: "write".to_string(),
+                    arguments: json!({ "path": "README.md", "content": "updated" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "z".to_string(),
+                    tool_name: "read".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+                RunMessage::ToolResult {
+                    call_id: "a".to_string(),
+                    tool_name: "write".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn run_initial_request_replays_synthetic_orphan_tool_result_after_normalization() {
         let stream = FakeStreamClient::success(StreamResult {
             events: Vec::new(),
@@ -1354,7 +2097,68 @@ mod tests {
     }
 
     #[test]
-    fn run_fails_before_http_on_duplicate_unresolved_tool_call_id_with_exact_error() {
+    fn run_request_payload_normalizes_tool_call_and_tool_result_call_ids() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        provider
+            .run(
+                RunRequest {
+                    run_id: 9,
+                    messages: vec![
+                        RunMessage::UserText {
+                            text: "turn-1 user".to_string(),
+                        },
+                        RunMessage::ToolCall {
+                            call_id: " call id! ".to_string(),
+                            tool_name: "read".to_string(),
+                            arguments: json!({ "path": "README.md" }),
+                        },
+                        RunMessage::ToolResult {
+                            call_id: "call id!".to_string(),
+                            tool_name: "read".to_string(),
+                            content: json!("file contents"),
+                            is_error: false,
+                        },
+                    ],
+                    instructions: "system instructions".to_string(),
+                },
+                cancel,
+                &mut |_call| ToolResult::error("unused", "unused", "unused"),
+                &mut |event| events.push(event),
+            )
+            .expect("run should succeed");
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 1);
+        let initial_input = requests[0]
+            .input
+            .as_array()
+            .expect("initial request input should be an array");
+        assert_eq!(initial_input[1]["type"], "function_call");
+        assert_eq!(initial_input[1]["call_id"], "call_id");
+        assert_eq!(initial_input[2]["type"], "function_call_output");
+        assert_eq!(initial_input[2]["call_id"], "call_id");
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                RunEvent::Started { run_id: 9 },
+                RunEvent::Finished { run_id: 9 }
+            ]
+        ));
+    }
+
+    #[test]
+    fn run_fails_before_http_on_duplicate_normalized_unresolved_tool_call_id_with_exact_error() {
         let stream = FakeStreamClient::success(StreamResult {
             events: Vec::new(),
             terminal: Some(CodexResponseStatus::Completed),
@@ -1394,7 +2198,7 @@ mod tests {
         let error = result.expect_err("duplicate unresolved call ids should fail fast");
         assert_eq!(
             error,
-            "codex-api provider cannot normalize run history: duplicate unresolved tool call id 'call_1'"
+            "codex-api provider cannot normalize run history: duplicate normalized unresolved tool call id 'call_1'"
         );
         assert!(events.is_empty());
         assert!(stream.observed_requests().is_empty());
@@ -1586,6 +2390,126 @@ mod tests {
             events.last(),
             Some(RunEvent::Finished { run_id: 9 })
         ));
+    }
+
+    #[test]
+    fn process_stream_events_flushes_text_buffer_around_tool_calls() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let mut emitted = Vec::new();
+        let outcome = provider
+            .process_stream_events(
+                42,
+                vec![
+                    CodexStreamEvent::OutputTextDelta {
+                        delta: "A".to_string(),
+                    },
+                    CodexStreamEvent::ToolCallRequested {
+                        id: Some("fc_1".to_string()),
+                        call_id: Some("call_1".to_string()),
+                        tool_name: Some("read".to_string()),
+                        arguments: Some(Value::String("{\"path\":\"README.md\"}".to_string())),
+                    },
+                    CodexStreamEvent::OutputTextDelta {
+                        delta: "B".to_string(),
+                    },
+                    CodexStreamEvent::ToolCallRequested {
+                        id: Some("fc_2".to_string()),
+                        call_id: Some("call_2".to_string()),
+                        tool_name: Some("write".to_string()),
+                        arguments: Some(Value::String(
+                            "{\"path\":\"README.md\",\"content\":\"updated\"}".to_string(),
+                        )),
+                    },
+                    CodexStreamEvent::OutputTextDelta {
+                        delta: "C".to_string(),
+                    },
+                ],
+                &mut |event| emitted.push(event),
+            )
+            .expect("stream events should normalize");
+
+        assert_eq!(
+            emitted,
+            vec![
+                RunEvent::Chunk {
+                    run_id: 42,
+                    text: "A".to_string(),
+                },
+                RunEvent::Chunk {
+                    run_id: 42,
+                    text: "B".to_string(),
+                },
+                RunEvent::Chunk {
+                    run_id: 42,
+                    text: "C".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
+            outcome.replay_items,
+            vec![
+                ReplayStepItem::AssistantText("A".to_string()),
+                ReplayStepItem::ToolCall(PendingToolCall {
+                    execution_call_id: "call_1".to_string(),
+                    replay_call_id: "call_1|fc_1".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                }),
+                ReplayStepItem::AssistantText("B".to_string()),
+                ReplayStepItem::ToolCall(PendingToolCall {
+                    execution_call_id: "call_2".to_string(),
+                    replay_call_id: "call_2|fc_2".to_string(),
+                    tool_name: "write".to_string(),
+                    arguments: json!({ "path": "README.md", "content": "updated" }),
+                }),
+                ReplayStepItem::AssistantText("C".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn process_stream_events_preserves_stream_item_id_in_replay_call_id_when_present() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let mut emitted = Vec::new();
+        let outcome = provider
+            .process_stream_events(
+                42,
+                vec![CodexStreamEvent::ToolCallRequested {
+                    id: Some("item_1".to_string()),
+                    call_id: Some("call_1".to_string()),
+                    tool_name: Some("read".to_string()),
+                    arguments: Some(Value::String("{\"path\":\"README.md\"}".to_string())),
+                }],
+                &mut |event| emitted.push(event),
+            )
+            .expect("stream events should normalize");
+
+        assert!(emitted.is_empty());
+        assert_eq!(
+            outcome.replay_items,
+            vec![ReplayStepItem::ToolCall(PendingToolCall {
+                execution_call_id: "call_1".to_string(),
+                replay_call_id: "call_1|fc_item_1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            })]
+        );
     }
 
     #[test]
@@ -1872,11 +2796,59 @@ mod tests {
         assert_eq!(follow_up_input[0]["content"][0]["type"], "input_text");
         assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
         assert_eq!(follow_up_input[1]["type"], "function_call");
-        assert_eq!(follow_up_input[1]["call_id"], "call_1");
+        assert_eq!(follow_up_input[1]["call_id"], "call_1|fc_1");
         assert_eq!(follow_up_input[1]["name"], "read");
         assert_eq!(follow_up_input[2]["type"], "function_call_output");
-        assert_eq!(follow_up_input[2]["call_id"], "call_1");
+        assert_eq!(follow_up_input[2]["call_id"], "call_1|fc_1");
         assert_eq!(follow_up_input[2]["output"], "file contents");
+
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Finished { run_id: 9 })
+        ));
+    }
+
+    #[test]
+    fn run_tool_execution_uses_transport_call_id_but_replay_uses_canonical_call_id() {
+        let stream = FakeStreamClient::scripted(vec![
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![CodexStreamEvent::ToolCallRequested {
+                    id: Some("fc_1".to_string()),
+                    call_id: Some("call_1".to_string()),
+                    tool_name: Some("read".to_string()),
+                    arguments: Some(Value::String("{\"path\":\"README.md\"}".to_string())),
+                }],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+            FakeStreamOutcome::Success(StreamResult {
+                events: Vec::new(),
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+        ]);
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let mut executed_call_ids = Vec::new();
+        let events = run_events_with_executor(&provider, |call| {
+            executed_call_ids.push(call.call_id.clone());
+            ToolResult::success("mismatched_call_id", call.tool_name, "tool output")
+        });
+
+        assert_eq!(executed_call_ids, vec!["call_1".to_string()]);
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 2);
+        let follow_up_input = requests[1]
+            .input
+            .as_array()
+            .expect("follow-up request input should be an array");
+        assert_eq!(follow_up_input[1]["type"], "function_call");
+        assert_eq!(follow_up_input[1]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[2]["type"], "function_call_output");
+        assert_eq!(follow_up_input[2]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[2]["output"], "tool output");
 
         assert!(matches!(
             events.last(),
@@ -1946,9 +2918,9 @@ mod tests {
         assert_eq!(follow_up_input[2]["role"], "user");
         assert_eq!(follow_up_input[2]["content"][0]["text"], "turn-2 user");
         assert_eq!(follow_up_input[3]["type"], "function_call");
-        assert_eq!(follow_up_input[3]["call_id"], "call_1");
+        assert_eq!(follow_up_input[3]["call_id"], "call_1|fc_1");
         assert_eq!(follow_up_input[4]["type"], "function_call_output");
-        assert_eq!(follow_up_input[4]["call_id"], "call_1");
+        assert_eq!(follow_up_input[4]["call_id"], "call_1|fc_1");
         assert_eq!(follow_up_input[4]["output"], "tool output");
 
         assert!(matches!(
@@ -1957,6 +2929,93 @@ mod tests {
                 RunEvent::Started { run_id: 9 },
                 RunEvent::Finished { run_id: 9 }
             ]
+        ));
+    }
+
+    #[test]
+    fn run_follow_up_replay_preserves_interleaved_text_and_tool_call_order() {
+        let stream = FakeStreamClient::scripted(vec![
+            FakeStreamOutcome::Success(StreamResult {
+                events: vec![
+                    CodexStreamEvent::OutputTextDelta {
+                        delta: "A".to_string(),
+                    },
+                    CodexStreamEvent::ToolCallRequested {
+                        id: Some("fc_1".to_string()),
+                        call_id: Some("call_1".to_string()),
+                        tool_name: Some("read".to_string()),
+                        arguments: Some(Value::String("{\"path\":\"README.md\"}".to_string())),
+                    },
+                    CodexStreamEvent::OutputTextDelta {
+                        delta: "B".to_string(),
+                    },
+                    CodexStreamEvent::ToolCallRequested {
+                        id: Some("fc_2".to_string()),
+                        call_id: Some("call_2".to_string()),
+                        tool_name: Some("bash".to_string()),
+                        arguments: Some(Value::String("{\"command\":\"pwd\"}".to_string())),
+                    },
+                ],
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+            FakeStreamOutcome::Success(StreamResult {
+                events: Vec::new(),
+                terminal: Some(CodexResponseStatus::Completed),
+            }),
+        ]);
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let mut observed_call_ids = Vec::new();
+        let events = run_events_with_executor(&provider, |call| {
+            observed_call_ids.push(call.call_id.clone());
+            ToolResult::success(
+                call.call_id,
+                call.tool_name,
+                format!("result:{}", observed_call_ids.len()),
+            )
+        });
+
+        assert_eq!(
+            observed_call_ids,
+            vec!["call_1".to_string(), "call_2".to_string()]
+        );
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 2);
+        let follow_up_input = requests[1]
+            .input
+            .as_array()
+            .expect("follow-up request input should be an array");
+        assert_eq!(follow_up_input.len(), 7);
+        assert_eq!(follow_up_input[0]["role"], "user");
+        assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
+        assert_eq!(follow_up_input[1]["type"], "message");
+        assert_eq!(follow_up_input[1]["content"][0]["text"], "A");
+        assert_eq!(follow_up_input[2]["type"], "function_call");
+        assert_eq!(follow_up_input[2]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[3]["type"], "message");
+        assert_eq!(follow_up_input[3]["content"][0]["text"], "B");
+        assert_eq!(follow_up_input[4]["type"], "function_call");
+        assert_eq!(follow_up_input[4]["call_id"], "call_2|fc_2");
+        assert_eq!(follow_up_input[5]["type"], "function_call_output");
+        assert_eq!(follow_up_input[5]["call_id"], "call_1|fc_1");
+        assert_eq!(follow_up_input[5]["output"], "result:1");
+        assert_eq!(follow_up_input[6]["type"], "function_call_output");
+        assert_eq!(follow_up_input[6]["call_id"], "call_2|fc_2");
+        assert_eq!(follow_up_input[6]["output"], "result:2");
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Chunk { text, .. } if text == "A")));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, RunEvent::Chunk { text, .. } if text == "B")));
+        assert!(matches!(
+            events.last(),
+            Some(RunEvent::Finished { run_id: 9 })
         ));
     }
 
@@ -2186,13 +3245,13 @@ mod tests {
         assert_eq!(follow_up_input[0]["role"], "user");
         assert_eq!(follow_up_input[0]["content"][0]["text"], "hello");
         assert_eq!(follow_up_input[1]["type"], "function_call");
-        assert_eq!(follow_up_input[1]["call_id"], "call_1");
+        assert_eq!(follow_up_input[1]["call_id"], "call_1|fc_1");
         assert_eq!(follow_up_input[2]["type"], "function_call");
-        assert_eq!(follow_up_input[2]["call_id"], "call_2");
+        assert_eq!(follow_up_input[2]["call_id"], "call_2|fc_2");
         assert_eq!(follow_up_input[3]["type"], "function_call_output");
-        assert_eq!(follow_up_input[3]["call_id"], "call_1");
+        assert_eq!(follow_up_input[3]["call_id"], "call_1|fc_1");
         assert_eq!(follow_up_input[4]["type"], "function_call_output");
-        assert_eq!(follow_up_input[4]["call_id"], "call_2");
+        assert_eq!(follow_up_input[4]["call_id"], "call_2|fc_2");
 
         assert!(matches!(
             events.last(),
