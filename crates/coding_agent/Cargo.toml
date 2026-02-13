@@ -5,10 +5,12 @@ edition = "2021"
 
 [dependencies]
 wait-timeout = "0.2"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tape_tui = { path = "../.." }
 agent_provider = { path = "../agent_provider" }
 agent_provider_mock = { path = "../agent_provider_mock" }
+agent_provider_codex_api = { path = "../agent_provider_codex_api" }
 
 [dev-dependencies]
 tempfile = "3"
