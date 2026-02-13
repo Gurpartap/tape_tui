@@ -126,6 +126,31 @@ fn submit_failure_keeps_user_turn_in_model_history() {
 }
 
 #[test]
+fn run_already_active_start_error_rolls_back_just_added_user_turn() {
+    let mut app = App::new();
+    let mut host = HostSpy::with_start_run_error("Run already active");
+
+    app.on_input_replace("ghost prompt".to_string());
+    app.on_submit(&mut host);
+
+    assert_eq!(host.started_prompts(), vec!["ghost prompt".to_string()]);
+    assert_eq!(app.mode, Mode::Idle);
+    assert_eq!(app.input, "");
+    assert!(app.history_entries().is_empty());
+    assert!(app.conversation_messages().is_empty());
+    assert_eq!(app.transcript.len(), 1);
+    assert_eq!(
+        app.transcript[0],
+        Message {
+            role: Role::System,
+            content: "Run already in progress. Use /cancel to stop it.".to_string(),
+            streaming: false,
+            run_id: None,
+        }
+    );
+}
+
+#[test]
 fn submit_passes_configured_system_instructions_to_host() {
     let mut app = App::with_system_instructions(Some("custom system instructions".to_string()));
     let mut host = HostSpy::with_next_run_id(1);

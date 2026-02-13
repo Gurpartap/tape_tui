@@ -69,6 +69,9 @@ impl HostToolExecutor {
     }
 }
 
+pub const POST_TERMINAL_TOOL_REJECTION_ERROR: &str =
+    "Provider requested tool call after terminal run event";
+
 pub struct RuntimeController {
     app: Arc<Mutex<App>>,
     runtime_handle: RuntimeHandle,
@@ -158,6 +161,7 @@ impl RuntimeController {
 
         let terminal_emitted = Arc::new(AtomicBool::new(false));
         let terminal_emitted_for_emit = Arc::clone(&terminal_emitted);
+        let terminal_emitted_for_tools = Arc::clone(&terminal_emitted);
         let controller_for_emit = Arc::clone(&self);
         let controller_for_tools = Arc::clone(&self);
         let provider = Arc::clone(&self.provider);
@@ -172,7 +176,12 @@ impl RuntimeController {
         };
 
         let mut execute_tool = move |call: ToolCallRequest| {
-            controller_for_tools.dispatch_host_tool_call(run_id, &cancel_for_tools, call)
+            controller_for_tools.dispatch_host_tool_call(
+                run_id,
+                &cancel_for_tools,
+                &terminal_emitted_for_tools,
+                call,
+            )
         };
 
         let run_outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -200,10 +209,15 @@ impl RuntimeController {
         self: &Arc<Self>,
         run_id: RunId,
         cancel: &Arc<AtomicBool>,
+        terminal_emitted: &Arc<AtomicBool>,
         call: ToolCallRequest,
     ) -> ToolResult {
         let call_id = call.call_id.clone();
         let tool_name = call.tool_name.clone();
+
+        if terminal_emitted.load(Ordering::SeqCst) {
+            return ToolResult::error(call_id, tool_name, POST_TERMINAL_TOOL_REJECTION_ERROR);
+        }
 
         self.enqueue_runtime_event(RuntimeEvent::ToolCallStarted {
             run_id,

@@ -92,11 +92,18 @@ impl InputHistory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingRunMemory {
+    run_id: RunId,
+    entries: Vec<RunMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
     pub mode: Mode,
     pub input: String,
     pub transcript: Vec<Message>,
     conversation: Vec<RunMessage>,
+    pending_run_memory: Option<PendingRunMemory>,
     history: InputHistory,
     pub should_exit: bool,
     cancelling_run: Option<RunId>,
@@ -155,6 +162,7 @@ impl App {
             input: String::new(),
             transcript: Vec::new(),
             conversation: Vec::new(),
+            pending_run_memory: None,
             history: InputHistory::default(),
             should_exit: false,
             cancelling_run: None,
@@ -177,6 +185,42 @@ impl App {
             text: prompt.to_string(),
         });
         messages
+    }
+
+    fn rollback_submitted_user_turn(&mut self, prompt: &str) {
+        self.rollback_last_history_entry_if_matches(prompt);
+        self.rollback_last_transcript_user_message_if_matches(prompt);
+        self.rollback_last_conversation_user_message_if_matches(prompt);
+    }
+
+    fn rollback_last_history_entry_if_matches(&mut self, prompt: &str) {
+        if self
+            .history
+            .entries
+            .last()
+            .is_some_and(|entry| entry == prompt)
+        {
+            self.history.entries.pop();
+        }
+    }
+
+    fn rollback_last_transcript_user_message_if_matches(&mut self, prompt: &str) {
+        if self.transcript.last().is_some_and(|message| {
+            message.role == Role::User
+                && message.content == prompt
+                && !message.streaming
+                && message.run_id.is_none()
+        }) {
+            self.transcript.pop();
+        }
+    }
+
+    fn rollback_last_conversation_user_message_if_matches(&mut self, prompt: &str) {
+        if self.conversation.last().is_some_and(
+            |message| matches!(message, RunMessage::UserText { text } if text == prompt),
+        ) {
+            self.conversation.pop();
+        }
     }
 
     pub fn on_input_replace(&mut self, text: String) {
@@ -236,6 +280,7 @@ impl App {
                 SlashCommand::Clear => {
                     self.transcript.clear();
                     self.conversation.clear();
+                    self.pending_run_memory = None;
                     self.push_system("Transcript cleared".to_string());
                     host.request_render();
                 }
@@ -285,6 +330,7 @@ impl App {
             }
             Err(error) => {
                 if error == ERROR_RUN_ALREADY_ACTIVE {
+                    self.rollback_submitted_user_turn(&prompt);
                     self.push_system(
                         "Run already in progress. Use /cancel to stop it.".to_string(),
                     );
@@ -381,6 +427,8 @@ impl App {
                 run_id: Some(run_id),
             });
         }
+
+        self.append_pending_assistant_chunk(run_id, chunk);
     }
 
     pub fn on_tool_call_started(
@@ -394,11 +442,7 @@ impl App {
             return;
         }
 
-        self.conversation.push(RunMessage::ToolCall {
-            call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            arguments: arguments.clone(),
-        });
+        self.append_pending_tool_call(run_id, call_id, tool_name, arguments);
         self.push_tool(run_id, format!("Tool {tool_name} ({call_id}) started"));
     }
 
@@ -415,12 +459,7 @@ impl App {
             return;
         }
 
-        self.conversation.push(RunMessage::ToolResult {
-            call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            content: content.clone(),
-            is_error,
-        });
+        self.append_pending_tool_result(run_id, tool_name, call_id, is_error, content);
 
         let mut message = format!(
             "Tool {tool_name} ({call_id}) {}",
@@ -442,6 +481,7 @@ impl App {
 
         if self.is_cancelling(run_id) {
             self.finalize_stream(run_id);
+            self.discard_pending_run_memory(run_id);
             self.finalize_cancelled_run(run_id);
             return;
         }
@@ -451,7 +491,7 @@ impl App {
         }
 
         self.finalize_stream(run_id);
-        self.record_assistant_message_for_run(run_id);
+        self.commit_pending_run_memory(run_id);
         self.mode = Mode::Idle;
     }
 
@@ -462,6 +502,7 @@ impl App {
 
         if self.is_cancelling(run_id) {
             self.finalize_stream(run_id);
+            self.discard_pending_run_memory(run_id);
             self.finalize_cancelled_run(run_id);
             return;
         }
@@ -471,6 +512,7 @@ impl App {
         }
 
         self.finalize_stream(run_id);
+        self.discard_pending_run_memory(run_id);
         self.mode = Mode::Error(error.to_string());
         self.push_system(format!("Run failed: {error}"));
     }
@@ -481,7 +523,103 @@ impl App {
         }
 
         self.finalize_stream(run_id);
+        self.discard_pending_run_memory(run_id);
         self.finalize_cancelled_run(run_id);
+    }
+
+    fn ensure_pending_run_memory(&mut self, run_id: RunId) -> &mut PendingRunMemory {
+        if self.pending_run_memory.is_none() {
+            self.pending_run_memory = Some(PendingRunMemory {
+                run_id,
+                entries: Vec::new(),
+            });
+        }
+
+        let pending = self
+            .pending_run_memory
+            .as_mut()
+            .expect("pending run memory must be initialized");
+        assert_eq!(
+            pending.run_id, run_id,
+            "pending run memory belongs to run {}, cannot append event for run {run_id}",
+            pending.run_id
+        );
+
+        pending
+    }
+
+    fn append_pending_assistant_chunk(&mut self, run_id: RunId, chunk: &str) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        let pending = self.ensure_pending_run_memory(run_id);
+        if let Some(RunMessage::AssistantText { text }) = pending.entries.last_mut() {
+            text.push_str(chunk);
+            return;
+        }
+
+        pending.entries.push(RunMessage::AssistantText {
+            text: chunk.to_string(),
+        });
+    }
+
+    fn append_pending_tool_call(
+        &mut self,
+        run_id: RunId,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) {
+        let pending = self.ensure_pending_run_memory(run_id);
+        pending.entries.push(RunMessage::ToolCall {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments: arguments.clone(),
+        });
+    }
+
+    fn append_pending_tool_result(
+        &mut self,
+        run_id: RunId,
+        tool_name: &str,
+        call_id: &str,
+        is_error: bool,
+        content: &serde_json::Value,
+    ) {
+        let pending = self.ensure_pending_run_memory(run_id);
+        pending.entries.push(RunMessage::ToolResult {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: content.clone(),
+            is_error,
+        });
+    }
+
+    fn commit_pending_run_memory(&mut self, run_id: RunId) {
+        let Some(pending) = self.pending_run_memory.take() else {
+            return;
+        };
+
+        assert_eq!(
+            pending.run_id, run_id,
+            "pending run memory belongs to run {}, cannot commit run {run_id}",
+            pending.run_id
+        );
+
+        self.conversation.extend(pending.entries);
+    }
+
+    fn discard_pending_run_memory(&mut self, run_id: RunId) {
+        let Some(pending) = self.pending_run_memory.take() else {
+            return;
+        };
+
+        assert_eq!(
+            pending.run_id, run_id,
+            "pending run memory belongs to run {}, cannot discard run {run_id}",
+            pending.run_id
+        );
     }
 
     fn should_apply_run_event(&self, run_id: RunId) -> bool {
@@ -541,24 +679,6 @@ impl App {
         self.cancelling_run = None;
         self.mode = Mode::Idle;
         self.finalize_stream(run_id);
-    }
-
-    fn record_assistant_message_for_run(&mut self, run_id: RunId) {
-        let Some(content) = self
-            .transcript
-            .iter()
-            .find(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
-            .map(|message| message.content.clone())
-        else {
-            return;
-        };
-
-        if content.is_empty() {
-            return;
-        }
-
-        self.conversation
-            .push(RunMessage::AssistantText { text: content });
     }
 
     fn push_tool(&mut self, run_id: RunId, content: String) {
@@ -733,6 +853,7 @@ mod tests {
             "missing file",
         );
         app.on_tool_call_started(999, "stale", "bash", &serde_json::json!({}));
+        app.on_run_finished(9);
 
         let tool_messages: Vec<_> = app
             .transcript
@@ -795,6 +916,7 @@ mod tests {
             &serde_json::json!("ignored success content"),
             "ignored success content",
         );
+        app.on_run_cancelled(14);
 
         let tool_messages: Vec<_> = app
             .transcript
@@ -808,22 +930,7 @@ mod tests {
         assert!(tool_messages
             .iter()
             .all(|message| message.run_id == Some(14)));
-        assert_eq!(
-            app.conversation_messages(),
-            &[
-                RunMessage::ToolCall {
-                    call_id: "call-2".to_string(),
-                    tool_name: "bash".to_string(),
-                    arguments: serde_json::json!({ "command": "pwd" }),
-                },
-                RunMessage::ToolResult {
-                    call_id: "call-2".to_string(),
-                    tool_name: "bash".to_string(),
-                    content: serde_json::json!("ignored success content"),
-                    is_error: false,
-                }
-            ]
-        );
+        assert!(app.conversation_messages().is_empty());
     }
 
     #[test]
@@ -998,23 +1105,41 @@ mod tests {
     }
 
     #[test]
-    fn failed_run_does_not_persist_assistant_text_in_model_history() {
+    fn failed_run_does_not_persist_assistant_or_tool_messages_in_model_history() {
         let mut app = App::new();
         let run_id = 17;
         app.mode = Mode::Running { run_id };
 
         app.on_run_started(run_id);
         app.on_run_chunk(run_id, "partial");
+        app.on_tool_call_started(
+            run_id,
+            "call-fail",
+            "read",
+            &serde_json::json!({ "path": "README.md" }),
+        );
+        app.on_tool_call_finished(
+            run_id,
+            "read",
+            "call-fail",
+            true,
+            &serde_json::json!("missing file"),
+            "missing file",
+        );
         app.on_run_failed(run_id, "boom");
 
-        assert!(app
-            .conversation_messages()
-            .iter()
-            .all(|message| !matches!(message, RunMessage::AssistantText { .. })));
+        assert!(app.conversation_messages().iter().all(|message| {
+            !matches!(
+                message,
+                RunMessage::AssistantText { .. }
+                    | RunMessage::ToolCall { .. }
+                    | RunMessage::ToolResult { .. }
+            )
+        }));
     }
 
     #[test]
-    fn cancelled_run_does_not_persist_assistant_text_in_model_history() {
+    fn cancelled_run_does_not_persist_assistant_or_tool_messages_in_model_history() {
         let mut app = App::new();
         let run_id = 23;
         app.mode = Mode::Running { run_id };
@@ -1023,11 +1148,29 @@ mod tests {
         app.on_run_chunk(run_id, "partial");
         app.mode = Mode::Idle;
         app.cancelling_run = Some(run_id);
+        app.on_tool_call_started(
+            run_id,
+            "call-cancel",
+            "bash",
+            &serde_json::json!({ "command": "pwd" }),
+        );
+        app.on_tool_call_finished(
+            run_id,
+            "bash",
+            "call-cancel",
+            true,
+            &serde_json::json!("cancelled"),
+            "cancelled",
+        );
         app.on_run_cancelled(run_id);
 
-        assert!(app
-            .conversation_messages()
-            .iter()
-            .all(|message| !matches!(message, RunMessage::AssistantText { .. })));
+        assert!(app.conversation_messages().iter().all(|message| {
+            !matches!(
+                message,
+                RunMessage::AssistantText { .. }
+                    | RunMessage::ToolCall { .. }
+                    | RunMessage::ToolResult { .. }
+            )
+        }));
     }
 }
