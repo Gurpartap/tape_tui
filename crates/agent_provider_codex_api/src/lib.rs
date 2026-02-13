@@ -16,6 +16,7 @@ use agent_provider::{
     CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunMessage, RunProvider,
     RunRequest, ToolCallRequest, ToolDefinition, ToolResult,
 };
+use codex_api::payload::CodexReasoning;
 use codex_api::{
     normalize_codex_url, CodexApiClient, CodexApiConfig, CodexApiError, CodexRequest,
     CodexResponseStatus, CodexStreamEvent, StreamResult,
@@ -27,10 +28,13 @@ use url::Url;
 pub const CODEX_API_PROVIDER_ID: &str = "codex-api";
 
 const V1_TOOL_NAMES: [&str; 5] = ["bash", "read", "edit", "write", "apply_patch"];
+const THINKING_LEVELS_BASELINE: [&str; 5] = ["off", "minimal", "low", "medium", "high"];
+const THINKING_LEVELS_WITH_XHIGH: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelectionState {
     model_index: usize,
+    thinking_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,14 +201,37 @@ impl CodexApiProvider {
 
         Ok(Self {
             model_ids,
-            selection: Mutex::new(SelectionState { model_index: 0 }),
+            selection: Mutex::new(SelectionState {
+                model_index: 0,
+                thinking_index: 0,
+            }),
             stream_client,
         })
     }
 
-    fn selected_model(&self) -> String {
+    fn selected_model_and_thinking(&self) -> (String, String) {
         let selection = lock_unpoisoned(&self.selection);
-        self.model_ids[selection.model_index].clone()
+        let model_id = self.model_ids[selection.model_index].clone();
+        let thinking_levels = thinking_levels_for_model(model_id.as_str());
+        let thinking_index = selection
+            .thinking_index
+            .min(thinking_levels.len().saturating_sub(1));
+
+        (model_id, thinking_levels[thinking_index].to_string())
+    }
+
+    fn profile_for_selection(&self, selection: &SelectionState) -> ProviderProfile {
+        let model_id = self.model_ids[selection.model_index].clone();
+        let thinking_levels = thinking_levels_for_model(model_id.as_str());
+        let thinking_index = selection
+            .thinking_index
+            .min(thinking_levels.len().saturating_sub(1));
+
+        ProviderProfile {
+            provider_id: CODEX_API_PROVIDER_ID.to_string(),
+            model_id,
+            thinking_level: Some(thinking_levels[thinking_index].to_string()),
+        }
     }
 
     fn process_stream_events(
@@ -250,6 +277,7 @@ impl CodexApiProvider {
     fn build_initial_request(
         &self,
         model_id: &str,
+        thinking_level: &str,
         messages: &[RunMessage],
         instructions: &str,
     ) -> Result<CodexRequest, String> {
@@ -258,6 +286,7 @@ impl CodexApiProvider {
             Value::Array(codex_input_from_run_messages(messages)?),
             Some(instructions.to_string()),
         );
+        request.reasoning = thinking_reasoning_payload(thinking_level);
         request.tools = codex_tool_payloads();
         Ok(request)
     }
@@ -299,7 +328,10 @@ impl CodexApiProvider {
 
         Self {
             model_ids,
-            selection: Mutex::new(SelectionState { model_index: 0 }),
+            selection: Mutex::new(SelectionState {
+                model_index: 0,
+                thinking_index: 0,
+            }),
             stream_client,
         }
     }
@@ -307,11 +339,8 @@ impl CodexApiProvider {
 
 impl RunProvider for CodexApiProvider {
     fn profile(&self) -> ProviderProfile {
-        ProviderProfile {
-            provider_id: CODEX_API_PROVIDER_ID.to_string(),
-            model_id: self.selected_model(),
-            thinking_level: None,
-        }
+        let selection = lock_unpoisoned(&self.selection);
+        self.profile_for_selection(&selection)
     }
 
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -321,9 +350,21 @@ impl RunProvider for CodexApiProvider {
     fn cycle_model(&self) -> Result<ProviderProfile, String> {
         let mut selection = lock_unpoisoned(&self.selection);
         selection.model_index = (selection.model_index + 1) % self.model_ids.len();
-        drop(selection);
+        selection.thinking_index = normalize_thinking_index(
+            self.model_ids[selection.model_index].as_str(),
+            selection.thinking_index,
+        );
 
-        Ok(self.profile())
+        Ok(self.profile_for_selection(&selection))
+    }
+
+    fn cycle_thinking_level(&self) -> Result<ProviderProfile, String> {
+        let mut selection = lock_unpoisoned(&self.selection);
+        let thinking_levels =
+            thinking_levels_for_model(self.model_ids[selection.model_index].as_str());
+        selection.thinking_index = (selection.thinking_index + 1) % thinking_levels.len();
+
+        Ok(self.profile_for_selection(&selection))
     }
 
     fn run(
@@ -338,12 +379,17 @@ impl RunProvider for CodexApiProvider {
             messages,
             instructions,
         } = req;
-        let model_id = self.selected_model();
+        let (model_id, thinking_level) = self.selected_model_and_thinking();
         let messages = sanitize_run_messages(messages)?;
         let instructions = sanitize_run_instructions(instructions)?;
 
         let mut replay_messages = messages;
-        let mut request = self.build_initial_request(&model_id, &replay_messages, &instructions)?;
+        let mut request = self.build_initial_request(
+            &model_id,
+            &thinking_level,
+            &replay_messages,
+            &instructions,
+        )?;
 
         emit(RunEvent::Started { run_id });
 
@@ -453,7 +499,12 @@ impl RunProvider for CodexApiProvider {
                 });
             }
 
-            request = match self.build_initial_request(&model_id, &replay_messages, &instructions) {
+            request = match self.build_initial_request(
+                &model_id,
+                &thinking_level,
+                &replay_messages,
+                &instructions,
+            ) {
                 Ok(request) => request,
                 Err(error) => {
                     emit(RunEvent::Failed { run_id, error });
@@ -462,6 +513,42 @@ impl RunProvider for CodexApiProvider {
             };
         }
     }
+}
+
+fn thinking_reasoning_payload(thinking_level: &str) -> Option<CodexReasoning> {
+    let thinking_level = thinking_level.trim();
+    if thinking_level.eq_ignore_ascii_case("off") {
+        return None;
+    }
+
+    Some(CodexReasoning {
+        effort: Some(thinking_level.to_ascii_lowercase()),
+        summary: None,
+    })
+}
+
+fn normalize_thinking_index(model_id: &str, thinking_index: usize) -> usize {
+    let thinking_levels = thinking_levels_for_model(model_id);
+    thinking_index.min(thinking_levels.len().saturating_sub(1))
+}
+
+fn thinking_levels_for_model(model_id: &str) -> &'static [&'static str] {
+    if supports_xhigh_thinking(model_id) {
+        &THINKING_LEVELS_WITH_XHIGH
+    } else {
+        &THINKING_LEVELS_BASELINE
+    }
+}
+
+fn supports_xhigh_thinking(model_id: &str) -> bool {
+    let canonical = model_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .to_ascii_lowercase();
+
+    canonical.contains("codex")
+        && (canonical.starts_with("gpt-5.2") || canonical.starts_with("gpt-5.3"))
 }
 
 fn v1_tool_definitions() -> Vec<ToolDefinition> {
@@ -973,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_reports_codex_provider_id_and_selected_model() {
+    fn profile_reports_codex_provider_id_selected_model_and_thinking_level() {
         let stream = FakeStreamClient::success(StreamResult {
             events: Vec::new(),
             terminal: Some(CodexResponseStatus::Completed),
@@ -986,11 +1073,88 @@ mod tests {
         let initial = provider.profile();
         assert_eq!(initial.provider_id, CODEX_API_PROVIDER_ID);
         assert_eq!(initial.model_id, "gpt-5.1-codex");
+        assert_eq!(initial.thinking_level.as_deref(), Some("off"));
 
         let switched = provider
             .cycle_model()
             .expect("codex provider should support model cycling");
         assert_eq!(switched.model_id, "gpt-5.2-codex");
+        assert_eq!(switched.thinking_level.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn thinking_cycle_order_is_deterministic_and_model_family_aware() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string(), "gpt-5.3-codex".to_string()],
+            stream,
+        );
+
+        let mut first_family = Vec::new();
+        for _ in 0..5 {
+            let profile = provider
+                .cycle_thinking_level()
+                .expect("thinking cycling should be supported");
+            first_family.push(
+                profile
+                    .thinking_level
+                    .expect("profile should include thinking level"),
+            );
+        }
+        assert_eq!(
+            first_family,
+            vec!["minimal", "low", "medium", "high", "off"]
+        );
+
+        let switched = provider
+            .cycle_model()
+            .expect("model cycling should be supported");
+        assert_eq!(switched.model_id, "gpt-5.3-codex");
+        assert_eq!(switched.thinking_level.as_deref(), Some("off"));
+
+        let mut xhigh_family = Vec::new();
+        for _ in 0..6 {
+            let profile = provider
+                .cycle_thinking_level()
+                .expect("thinking cycling should be supported");
+            xhigh_family.push(
+                profile
+                    .thinking_level
+                    .expect("profile should include thinking level"),
+            );
+        }
+        assert_eq!(
+            xhigh_family,
+            vec!["minimal", "low", "medium", "high", "xhigh", "off"]
+        );
+    }
+
+    #[test]
+    fn model_cycle_clamps_xhigh_to_high_when_next_model_does_not_support_it() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.3-codex".to_string(), "gpt-5.1-codex".to_string()],
+            stream,
+        );
+
+        for _ in 0..5 {
+            provider
+                .cycle_thinking_level()
+                .expect("thinking cycling should be supported");
+        }
+        assert_eq!(provider.profile().thinking_level.as_deref(), Some("xhigh"));
+
+        let switched = provider
+            .cycle_model()
+            .expect("model cycling should be supported");
+        assert_eq!(switched.model_id, "gpt-5.1-codex");
+        assert_eq!(switched.thinking_level.as_deref(), Some("high"));
     }
 
     #[test]
@@ -1107,6 +1271,47 @@ mod tests {
         assert!(
             !requests[0].input.is_string(),
             "initial codex request input must never be a plain string"
+        );
+        assert!(
+            requests[0].reasoning.is_none(),
+            "off thinking level must omit request.reasoning"
+        );
+    }
+
+    #[test]
+    fn run_initial_request_includes_reasoning_effort_when_thinking_is_enabled() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.3-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        provider
+            .cycle_thinking_level()
+            .expect("thinking cycling should be supported");
+
+        let _events = run_events_with_executor(&provider, |_call| {
+            panic!("tool executor should not be called when no tool calls are emitted")
+        });
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.effort.as_deref()),
+            Some("minimal")
+        );
+        assert_eq!(
+            requests[0]
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.summary.as_deref()),
+            None
         );
     }
 

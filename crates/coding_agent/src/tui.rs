@@ -788,6 +788,21 @@ mod tests {
     }
 
     #[test]
+    fn provider_metadata_includes_off_thinking_level() {
+        let profile = ProviderProfile {
+            provider_id: "codex-api".to_string(),
+            model_id: "gpt-5.3-codex".to_string(),
+            thinking_level: Some("off".to_string()),
+        };
+
+        let line = strip_ansi(&render_provider_metadata(&profile));
+        assert_eq!(
+            line,
+            "provider codex-api • model gpt-5.3-codex • thinking off"
+        );
+    }
+
+    #[test]
     fn provider_metadata_omits_thinking_when_profile_has_none() {
         let profile = ProviderProfile {
             provider_id: "mock".to_string(),
