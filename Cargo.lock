@@ -7,6 +7,15 @@ name = "agent_provider"
 version = "0.1.0"
 
 [[package]]
+name = "agent_provider_codex_api"
+version = "0.1.0"
+dependencies = [
+ "agent_provider",
+ "codex_api",
+ "tokio",
+]
+
+[[package]]
 name = "agent_provider_mock"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,9 @@
+[package]
+name = "agent_provider_codex_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+agent_provider = { path = "../agent_provider" }
+codex_api = { path = "../codex_api" }
+tokio = { version = "1", features = ["rt", "time"] }
