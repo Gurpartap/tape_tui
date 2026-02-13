@@ -133,6 +133,35 @@ fn run_until(
     predicate()
 }
 
+fn strip_ansi(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'[' {
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (b'@'..=b'~').contains(&byte) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        output.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(output).unwrap_or_default()
+}
+
+fn rendered_output_plain(state: &Arc<Mutex<support::TerminalTrace>>) -> String {
+    strip_ansi(&support::rendered_output(state))
+}
+
 #[test]
 fn prompt_is_visible_on_start() {
     let (mut tui, _app, terminal_trace) = setup_runtime();
@@ -414,6 +443,115 @@ fn ctrl_c_clears_text_input_and_does_not_exit() {
         app.input.is_empty() && !app.should_exit
     });
     assert!(cleared, "ctrl+c did not clear input without exiting");
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn ctrl_p_cycles_model_and_syncs_footer_metadata() {
+    let (mut tui, app, terminal_trace) = setup_runtime();
+
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "\x10");
+
+    let switched = run_until(&mut tui, Duration::from_secs(2), || {
+        support::lock_unpoisoned(&app)
+            .transcript
+            .iter()
+            .any(|message| {
+                message.role == Role::System && message.content == "Switched model to mock-alt"
+            })
+    });
+    assert!(switched, "ctrl+p did not produce model-switch feedback");
+
+    let footer_synced = run_until(&mut tui, Duration::from_secs(2), || {
+        rendered_output_plain(&terminal_trace)
+            .contains("provider mock • model mock-alt • thinking balanced")
+    });
+    assert!(
+        footer_synced,
+        "footer metadata did not reflect switched model"
+    );
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn ctrl_t_cycles_thinking_and_syncs_footer_metadata() {
+    let (mut tui, app, terminal_trace) = setup_runtime();
+
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "\x14");
+
+    let switched = run_until(&mut tui, Duration::from_secs(2), || {
+        support::lock_unpoisoned(&app)
+            .transcript
+            .iter()
+            .any(|message| {
+                message.role == Role::System && message.content == "Switched thinking mode to deep"
+            })
+    });
+    assert!(switched, "ctrl+t did not produce thinking-switch feedback");
+
+    let footer_synced = run_until(&mut tui, Duration::from_secs(2), || {
+        rendered_output_plain(&terminal_trace)
+            .contains("provider mock • model mock • thinking deep")
+    });
+    assert!(
+        footer_synced,
+        "footer metadata did not reflect switched thinking mode"
+    );
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn profile_switch_shortcuts_are_blocked_while_run_is_active() {
+    let (mut tui, app, terminal_trace) = setup_runtime_with_provider(Arc::new(BlockingProvider));
+
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "long run");
+    support::inject_input(&terminal_trace, "\r");
+
+    let running = run_until(&mut tui, Duration::from_secs(2), || {
+        matches!(support::lock_unpoisoned(&app).mode, Mode::Running { .. })
+    });
+    assert!(running, "run did not enter running mode");
+
+    support::inject_input(&terminal_trace, "\x10");
+    support::inject_input(&terminal_trace, "\x14");
+
+    let blocked_feedback = run_until(&mut tui, Duration::from_secs(2), || {
+        let app = support::lock_unpoisoned(&app);
+        let blocked_model = app.transcript.iter().any(|message| {
+            message.role == Role::System
+                && message.content == "Cannot switch model while a run is active"
+        });
+        let blocked_thinking = app.transcript.iter().any(|message| {
+            message.role == Role::System
+                && message.content == "Cannot switch thinking mode while a run is active"
+        });
+        blocked_model && blocked_thinking && matches!(app.mode, Mode::Running { .. })
+    });
+    assert!(
+        blocked_feedback,
+        "run-active switch guard did not emit both blocked messages"
+    );
+
+    support::inject_input(&terminal_trace, "\x1b");
+    let cancelled = run_until(&mut tui, Duration::from_secs(2), || {
+        matches!(support::lock_unpoisoned(&app).mode, Mode::Idle)
+    });
+    assert!(
+        cancelled,
+        "run did not cancel after blocked-switch assertions"
+    );
 
     tui.stop().expect("runtime stop");
 }
