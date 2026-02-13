@@ -5,8 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role, RunId};
-use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
-use coding_agent::runtime::{RunEvent, RuntimeController};
+use coding_agent::provider::{CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest};
+use coding_agent::runtime::RuntimeController;
 use tape_tui::{Terminal, TUI};
 
 #[derive(Default)]
@@ -56,7 +56,7 @@ impl RunProvider for LifecycleProvider {
     fn run(
         &self,
         req: RunRequest,
-        _cancel: Arc<AtomicBool>,
+        _cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         emit(RunEvent::Started { run_id: req.run_id });
@@ -83,7 +83,7 @@ impl RunProvider for NoisyTerminalProvider {
     fn run(
         &self,
         req: RunRequest,
-        _cancel: Arc<AtomicBool>,
+        _cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         emit(RunEvent::Started { run_id: req.run_id });
@@ -126,7 +126,7 @@ impl RunProvider for CancelAwareProvider {
     fn run(
         &self,
         req: RunRequest,
-        cancel: Arc<AtomicBool>,
+        cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         emit(RunEvent::Started { run_id: req.run_id });
@@ -155,7 +155,7 @@ impl RunProvider for StaleEventProvider {
     fn run(
         &self,
         req: RunRequest,
-        _cancel: Arc<AtomicBool>,
+        _cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let stale_run_id = req.run_id + 10_000;

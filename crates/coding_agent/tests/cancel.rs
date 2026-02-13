@@ -1,12 +1,12 @@
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role, RunId};
-use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
-use coding_agent::runtime::{RunEvent, RuntimeController};
+use coding_agent::provider::{CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest};
+use coding_agent::runtime::RuntimeController;
 use tape_tui::{Terminal, TUI};
 
 #[derive(Default)]
@@ -57,7 +57,7 @@ impl RunProvider for BlockingCancelProvider {
     fn run(
         &self,
         req: RunRequest,
-        cancel: Arc<AtomicBool>,
+        cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -88,7 +88,7 @@ impl RunProvider for RacingCancelProvider {
     fn run(
         &self,
         req: RunRequest,
-        cancel: Arc<AtomicBool>,
+        cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -124,7 +124,7 @@ impl RunProvider for FlushFallbackProvider {
     fn run(
         &self,
         req: RunRequest,
-        _cancel: Arc<AtomicBool>,
+        _cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;

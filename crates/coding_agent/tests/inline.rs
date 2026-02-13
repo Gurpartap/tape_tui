@@ -1,12 +1,12 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role};
-use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
+use coding_agent::provider::{CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest};
 use coding_agent::providers::MockProvider;
-use coding_agent::runtime::{RunEvent, RuntimeController};
+use coding_agent::runtime::RuntimeController;
 use coding_agent::tui::AppComponent;
 use tape_tui::TUI;
 
@@ -31,7 +31,7 @@ impl RunProvider for BlockingProvider {
     fn run(
         &self,
         req: RunRequest,
-        cancel: Arc<AtomicBool>,
+        cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -62,7 +62,7 @@ impl RunProvider for OrderedChunkProvider {
     fn run(
         &self,
         req: RunRequest,
-        _cancel: Arc<AtomicBool>,
+        _cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;

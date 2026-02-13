@@ -9,9 +9,7 @@ use tape_tui::runtime::tui::{
 };
 
 use crate::app::{App, HostOps, Mode, RunId};
-use crate::provider::{RunProvider, RunRequest};
-
-pub use crate::provider::RunEvent;
+use crate::provider::{RunEvent, RunProvider, RunRequest};
 
 struct ActiveRun {
     run_id: RunId,
