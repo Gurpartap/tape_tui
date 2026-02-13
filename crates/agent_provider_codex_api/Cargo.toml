@@ -7,4 +7,5 @@ edition = "2021"
 agent_provider = { path = "../agent_provider" }
 codex_api = { path = "../codex_api" }
 tokio = { version = "1", features = ["rt", "time"] }
+serde_json = "1"
 url = "2"
