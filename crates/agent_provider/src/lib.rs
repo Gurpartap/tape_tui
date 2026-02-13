@@ -73,3 +73,51 @@ pub trait RunProvider: Send + Sync + 'static {
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RunEvent;
+
+    #[test]
+    fn run_event_run_id_returns_event_run_id() {
+        let run_id = 42;
+        let events = [
+            RunEvent::Started { run_id },
+            RunEvent::Chunk {
+                run_id,
+                text: "partial".to_string(),
+            },
+            RunEvent::Finished { run_id },
+            RunEvent::Failed {
+                run_id,
+                error: "failure".to_string(),
+            },
+            RunEvent::Cancelled { run_id },
+        ];
+
+        for event in events {
+            assert_eq!(event.run_id(), run_id);
+        }
+    }
+
+    #[test]
+    fn run_event_terminal_detection_matches_lifecycle() {
+        assert!(!RunEvent::Started { run_id: 1 }.is_terminal());
+        assert!(
+            !RunEvent::Chunk {
+                run_id: 1,
+                text: "hello".to_string(),
+            }
+            .is_terminal()
+        );
+        assert!(RunEvent::Finished { run_id: 1 }.is_terminal());
+        assert!(
+            RunEvent::Failed {
+                run_id: 1,
+                error: "boom".to_string(),
+            }
+            .is_terminal()
+        );
+        assert!(RunEvent::Cancelled { run_id: 1 }.is_terminal());
+    }
+}
