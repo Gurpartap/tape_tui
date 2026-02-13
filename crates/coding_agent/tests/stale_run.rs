@@ -23,7 +23,7 @@ impl HostOps for HostStub {
 }
 
 #[test]
-fn stale_run_callbacks_are_ignored_while_different_run_is_active() {
+fn stale_run_events_are_ignored_while_different_run_is_active() {
     let stale_run = 10;
     let active_run = 20;
 
