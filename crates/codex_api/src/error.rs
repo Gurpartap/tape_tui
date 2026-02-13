@@ -9,6 +9,7 @@ pub enum CodexApiError {
     MissingAccessToken,
     MissingAccountId,
     InvalidBaseUrl(String),
+    InvalidRequestPayload(String),
     UrlNormalization(String),
     Request(reqwest::Error),
     Status(StatusCode, String),
@@ -83,10 +84,7 @@ impl ErrorPayloadFields {
     }
 
     pub fn message_or_fallback(&self) -> Option<String> {
-        let explicit = self
-            .message
-            .as_deref()
-            .and_then(non_empty_string)?;
+        let explicit = self.message.as_deref().and_then(non_empty_string)?;
         Some(explicit.to_owned())
     }
 }
@@ -108,6 +106,9 @@ impl fmt::Display for CodexApiError {
             Self::MissingAccessToken => write!(f, "access token is required"),
             Self::MissingAccountId => write!(f, "account id is required"),
             Self::InvalidBaseUrl(value) => write!(f, "invalid base URL: {value}"),
+            Self::InvalidRequestPayload(message) => {
+                write!(f, "invalid request payload: {message}")
+            }
             Self::UrlNormalization(message) => write!(f, "URL normalization failed: {message}"),
             Self::Request(error) => write!(f, "request error: {error}"),
             Self::Status(status, message) => write!(f, "HTTP {status} {message}"),

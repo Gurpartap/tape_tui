@@ -244,11 +244,14 @@ impl CodexApiProvider {
     fn build_initial_request(
         &self,
         model_id: &str,
-        prompt: String,
+        prompt: &str,
         instructions: &str,
     ) -> CodexRequest {
-        let mut request =
-            CodexRequest::new(model_id.to_owned(), prompt, Some(instructions.to_string()));
+        let mut request = CodexRequest::new(
+            model_id.to_owned(),
+            codex_initial_user_input(prompt),
+            Some(instructions.to_string()),
+        );
         request.tools = codex_tool_payloads();
         request
     }
@@ -359,6 +362,7 @@ impl RunProvider for CodexApiProvider {
             instructions,
         } = req;
         let model_id = self.selected_model();
+        let prompt = sanitize_run_prompt(prompt)?;
         let instructions = sanitize_run_instructions(instructions)?;
 
         emit(RunEvent::Started { run_id });
@@ -368,7 +372,7 @@ impl RunProvider for CodexApiProvider {
             return Ok(());
         }
 
-        let mut request = self.build_initial_request(&model_id, prompt, &instructions);
+        let mut request = self.build_initial_request(&model_id, &prompt, &instructions);
 
         loop {
             if cancel.load(Ordering::Acquire) {
@@ -532,6 +536,18 @@ fn codex_tool_payloads() -> Vec<Value> {
         .collect()
 }
 
+fn codex_initial_user_input(prompt: &str) -> Value {
+    Value::Array(vec![json!({
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": prompt,
+            }
+        ],
+    })])
+}
+
 fn parse_pending_tool_call(
     call_id: Option<String>,
     tool_name: Option<String>,
@@ -621,6 +637,17 @@ fn tool_result_content_text(value: &Value) -> String {
         Value::String(content) => content.clone(),
         other => other.to_string(),
     }
+}
+
+fn sanitize_run_prompt(prompt: String) -> Result<String, String> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return Err(
+            "codex-api provider requires non-empty run prompt before sending requests".to_string(),
+        );
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn sanitize_run_instructions(instructions: String) -> Result<String, String> {
@@ -883,6 +910,14 @@ mod tests {
             requests[0].instructions.as_deref(),
             Some("system instructions")
         );
+        let initial_input = requests[0]
+            .input
+            .as_array()
+            .expect("initial request input should be an array");
+        assert_eq!(initial_input.len(), 1);
+        assert_eq!(initial_input[0]["role"], "user");
+        assert_eq!(initial_input[0]["content"][0]["type"], "input_text");
+        assert_eq!(initial_input[0]["content"][0]["text"], "hello");
         assert_eq!(
             request_tool_names(&requests[0]),
             V1_TOOL_NAMES
@@ -905,6 +940,33 @@ mod tests {
             events.last(),
             Some(RunEvent::Finished { run_id: 9 })
         ));
+    }
+
+    #[test]
+    fn run_initial_request_uses_list_shaped_input_payload() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let _events = run_events_with_executor(&provider, |_call| {
+            panic!("tool executor should not be called when no tool calls are emitted")
+        });
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].input.is_array(),
+            "initial codex request input must be a list/array"
+        );
+        assert!(
+            !requests[0].input.is_string(),
+            "initial codex request input must never be a plain string"
+        );
     }
 
     #[test]
@@ -1228,6 +1290,36 @@ mod tests {
             events.last(),
             Some(RunEvent::Failed { run_id: 9, error }) if error.contains("in_progress")
         ));
+    }
+
+    #[test]
+    fn run_rejects_empty_prompt_before_http_call() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        let result = provider.run(
+            RunRequest {
+                run_id: 12,
+                prompt: "  \n\t ".to_string(),
+                instructions: "system instructions".to_string(),
+            },
+            cancel,
+            &mut |_call| ToolResult::error("unused", "unused", "unused"),
+            &mut |event| events.push(event),
+        );
+
+        let error = result.expect_err("empty prompt should fail fast");
+        assert!(error.contains("requires non-empty run prompt"));
+        assert!(events.is_empty());
+        assert!(stream.observed_requests().is_empty());
     }
 
     #[test]

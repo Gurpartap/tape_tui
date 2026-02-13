@@ -31,6 +31,9 @@
 //! Set `CODING_AGENT_SYSTEM_INSTRUCTIONS` to override the built-in default base
 //! block; runtime appends a concise tool-use policy and tool inventory before
 //! dispatching each provider run.
+//!
+//! Codex transport contract: Responses API `input` must be list-shaped JSON.
+//! Plain string `input` payloads are rejected during codex_api request preflight.
 
 pub mod app;
 pub mod commands;

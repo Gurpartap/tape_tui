@@ -71,6 +71,8 @@ impl CodexApiClient {
         &self,
         request: &CodexRequest,
     ) -> Result<reqwest::RequestBuilder, CodexApiError> {
+        validate_request_payload_shape(request)?;
+
         let headers = self.build_headers(self.config.user_agent.as_deref())?;
         let payload = self.request_with_transport_defaults(request);
         Ok(self
@@ -213,6 +215,28 @@ impl CodexApiClient {
 
         let terminal = terminal_status(&events);
         Ok(StreamResult { events, terminal })
+    }
+}
+
+fn validate_request_payload_shape(request: &CodexRequest) -> Result<(), CodexApiError> {
+    if request.input.is_array() {
+        return Ok(());
+    }
+
+    Err(CodexApiError::InvalidRequestPayload(format!(
+        "'input' must be a JSON array/list, got {}",
+        value_type_name(&request.input)
+    )))
+}
+
+fn value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 

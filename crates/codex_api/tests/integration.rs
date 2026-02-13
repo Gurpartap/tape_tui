@@ -128,6 +128,20 @@ fn token_with_account_id(account_id: &str) -> String {
     format!("header.{payload}.signature")
 }
 
+fn user_input(text: &str) -> serde_json::Value {
+    json!([
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": text,
+                }
+            ],
+        }
+    ])
+}
+
 #[tokio::test]
 async fn stream_integration_successful_completion() {
     let server = ScriptedServer::new(vec![response_sse(
@@ -139,7 +153,7 @@ async fn stream_integration_successful_completion() {
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -159,6 +173,33 @@ async fn stream_integration_successful_completion() {
 }
 
 #[tokio::test]
+async fn stream_integration_rejects_non_list_input_before_http_call() {
+    let server = ScriptedServer::new(vec![response_sse(
+        200,
+        &[r##"{"type":"response.completed","response":{"status":"completed"}}"##],
+    )])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let error = client
+        .stream(&request, None)
+        .await
+        .expect_err("string input should fail preflight before transport send");
+
+    assert!(matches!(
+        error,
+        CodexApiError::InvalidRequestPayload(ref message)
+            if message == "'input' must be a JSON array/list, got string"
+    ));
+    assert_eq!(server.request_count(), 0);
+
+    server.shutdown();
+}
+
+#[tokio::test]
 async fn stream_integration_done_alias_maps_to_completed_status() {
     let server = ScriptedServer::new(vec![response_sse(
         200,
@@ -166,7 +207,7 @@ async fn stream_integration_done_alias_maps_to_completed_status() {
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -189,7 +230,7 @@ async fn stream_integration_unknown_completed_status_is_none() {
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -215,7 +256,7 @@ async fn stream_integration_response_failed_event_returns_error() {
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -240,7 +281,7 @@ async fn stream_integration_error_event_returns_error() {
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -262,7 +303,7 @@ async fn stream_integration_error_event_returns_error() {
 async fn stream_integration_error_event_without_details_uses_serialized_event_fallback() {
     let server = ScriptedServer::new(vec![response_sse(200, &[r##"{"type":"error"}"##])]).await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -288,7 +329,7 @@ async fn stream_integration_error_event_with_empty_fields_uses_serialized_event_
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -314,7 +355,7 @@ async fn stream_integration_response_failed_with_empty_message_uses_default_mess
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -342,7 +383,7 @@ async fn stream_integration_retryable_then_success() {
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -367,7 +408,7 @@ async fn stream_integration_non_retryable_status_retries_then_fails() {
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -391,7 +432,7 @@ async fn stream_integration_non_retryable_lowercase_usage_limit_message_does_not
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -422,7 +463,7 @@ async fn stream_integration_non_retryable_capitalized_usage_limit_message_retrie
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -465,7 +506,7 @@ async fn stream_integration_usage_limit_status_retries_due_retryable_status_rule
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -496,7 +537,7 @@ async fn stream_integration_non_json_empty_body_uses_status_reason() {
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 
@@ -534,7 +575,7 @@ async fn stream_integration_cancellation_during_stream() {
     }])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = Arc::new(CodexApiClient::new(config).expect("client"));
 
@@ -573,7 +614,7 @@ async fn stream_integration_cancellation_during_retry_backoff() {
     )])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = Arc::new(CodexApiClient::new(config).expect("client"));
 
@@ -617,7 +658,7 @@ async fn stream_integration_cancellation_during_retryable_error_body_read() {
     }])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = Arc::new(CodexApiClient::new(config).expect("client"));
 
@@ -669,7 +710,7 @@ async fn stream_integration_timeout_then_retryable_success() {
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct"))
         .with_base_url(&server.base_url)
         .with_timeout(Duration::from_millis(80));
@@ -695,7 +736,7 @@ async fn stream_integration_connection_reset_then_retry_exhausted() {
     ])
     .await;
 
-    let request = CodexRequest::new("gpt-codex", json!("hi"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
     let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
     let client = CodexApiClient::new(config).expect("client");
 

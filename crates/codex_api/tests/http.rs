@@ -10,7 +10,17 @@ fn http_request_builds_codex_endpoint() {
     let client = CodexApiClient::new(config).expect("client");
     let request = CodexRequest::new(
         "model",
-        serde_json::json!("payload"),
+        serde_json::json!([
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "payload",
+                    }
+                ],
+            }
+        ]),
         Some("sys".to_string()),
     );
 

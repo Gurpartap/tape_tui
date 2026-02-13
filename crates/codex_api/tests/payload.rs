@@ -5,11 +5,7 @@ use serde_json::{json, Value};
 
 #[test]
 fn payload_serialization_defaults_match_parity_shape() {
-    let request = CodexRequest::new(
-        "gpt-codex",
-        json!([{"role":"user","content":"hi"}]),
-        Some("sys".to_string()),
-    );
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), Some("sys".to_string()));
     let body = serde_json::to_value(&request).expect("serialize payload");
 
     assert_eq!(body["store"], Value::Bool(false));
@@ -34,11 +30,7 @@ fn payload_serialization_defaults_match_parity_shape() {
 
 #[test]
 fn payload_serialization_includes_optional_fields_when_set() {
-    let mut request = CodexRequest::new(
-        "gpt-codex",
-        json!([{"role":"user","content":"hi"}]),
-        Some("sys".to_string()),
-    );
+    let mut request = CodexRequest::new("gpt-codex", user_input("hi"), Some("sys".to_string()));
     request.prompt_cache_key = Some("session-1".to_string());
     request.temperature = Some(0.2);
     request.reasoning = Some(CodexReasoning {
@@ -72,7 +64,7 @@ fn payload_serialization_includes_optional_fields_when_set() {
 
 #[test]
 fn build_request_uses_session_id_for_prompt_cache_key_when_missing() {
-    let request = CodexRequest::new("gpt-codex", json!("payload"), None);
+    let request = CodexRequest::new("gpt-codex", user_input("payload"), None);
     let config = CodexApiConfig::new(token_with_account_id("account"))
         .with_base_url("https://chatgpt.com/backend-api")
         .with_session_id("session-42");
@@ -93,7 +85,7 @@ fn build_request_uses_session_id_for_prompt_cache_key_when_missing() {
 
 #[test]
 fn build_request_preserves_explicit_prompt_cache_key() {
-    let mut request = CodexRequest::new("gpt-codex", json!("payload"), None);
+    let mut request = CodexRequest::new("gpt-codex", user_input("payload"), None);
     request.prompt_cache_key = Some("explicit-key".to_string());
 
     let config = CodexApiConfig::new(token_with_account_id("account"))
@@ -116,7 +108,7 @@ fn build_request_preserves_explicit_prompt_cache_key() {
 
 #[test]
 fn build_request_enforces_pi_transport_defaults() {
-    let mut request = CodexRequest::new("gpt-codex", json!("payload"), None);
+    let mut request = CodexRequest::new("gpt-codex", user_input("payload"), None);
     request.store = true;
     request.stream = false;
     request.text.verbosity = String::new();
@@ -153,7 +145,7 @@ fn build_request_enforces_pi_transport_defaults() {
 
 #[test]
 fn build_request_clamps_reasoning_effort_and_sets_summary_default() {
-    let mut request = CodexRequest::new("gpt-5.3-codex", json!("payload"), None);
+    let mut request = CodexRequest::new("gpt-5.3-codex", user_input("payload"), None);
     request.reasoning = Some(CodexReasoning {
         effort: Some("minimal".to_owned()),
         summary: None,
@@ -183,7 +175,7 @@ fn build_request_clamps_model_specific_reasoning_effort_variants() {
         .with_base_url("https://chatgpt.com/backend-api");
     let client = CodexApiClient::new(config).expect("client");
 
-    let mut gpt_51 = CodexRequest::new("gpt-5.1", json!("payload"), None);
+    let mut gpt_51 = CodexRequest::new("gpt-5.1", user_input("payload"), None);
     gpt_51.reasoning = Some(CodexReasoning {
         effort: Some("xhigh".to_owned()),
         summary: Some("concise".to_owned()),
@@ -203,7 +195,7 @@ fn build_request_clamps_model_specific_reasoning_effort_variants() {
         Value::String("concise".to_owned())
     );
 
-    let mut codex_mini = CodexRequest::new("gpt-5.1-codex-mini", json!("payload"), None);
+    let mut codex_mini = CodexRequest::new("gpt-5.1-codex-mini", user_input("payload"), None);
     codex_mini.reasoning = Some(CodexReasoning {
         effort: Some("low".to_owned()),
         summary: None,
@@ -222,6 +214,38 @@ fn build_request_clamps_model_specific_reasoning_effort_variants() {
         codex_mini_body["reasoning"]["summary"],
         Value::String("auto".to_owned())
     );
+}
+
+#[test]
+fn build_request_rejects_non_list_input_preflight() {
+    let request = CodexRequest::new("gpt-codex", json!("payload"), None);
+    let config = CodexApiConfig::new(token_with_account_id("account"))
+        .with_base_url("https://chatgpt.com/backend-api");
+    let client = CodexApiClient::new(config).expect("client");
+
+    let error = client
+        .build_request(&request)
+        .expect_err("string input should fail request preflight");
+
+    assert!(matches!(
+        error,
+        codex_api::CodexApiError::InvalidRequestPayload(ref message)
+            if message == "'input' must be a JSON array/list, got string"
+    ));
+}
+
+fn user_input(text: &str) -> Value {
+    json!([
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": text,
+                }
+            ],
+        }
+    ])
 }
 
 fn request_body_json(request: &reqwest::Request) -> Value {
