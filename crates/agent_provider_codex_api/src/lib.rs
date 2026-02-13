@@ -11,9 +11,10 @@ use agent_provider::{
     CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunProvider, RunRequest,
 };
 use codex_api::{
-    CodexApiClient, CodexApiConfig, CodexApiError, CodexRequest, CodexResponseStatus,
-    CodexStreamEvent, StreamResult,
+    normalize_codex_url, CodexApiClient, CodexApiConfig, CodexApiError, CodexRequest,
+    CodexResponseStatus, CodexStreamEvent, StreamResult,
 };
+use url::Url;
 
 /// Stable provider identifier used by `coding_agent` startup selection.
 pub const CODEX_API_PROVIDER_ID: &str = "codex-api";
@@ -21,6 +22,35 @@ pub const CODEX_API_PROVIDER_ID: &str = "codex-api";
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelectionState {
     model_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedConfig {
+    access_token: String,
+    model_ids: Vec<String>,
+    base_url: Option<String>,
+    session_id: Option<String>,
+    timeout: Option<Duration>,
+}
+
+impl ValidatedConfig {
+    fn into_codex_api_config(self) -> CodexApiConfig {
+        let mut config = CodexApiConfig::new(self.access_token);
+
+        if let Some(base_url) = self.base_url {
+            config = config.with_base_url(base_url);
+        }
+
+        if let Some(session_id) = self.session_id {
+            config = config.with_session_id(session_id);
+        }
+
+        if let Some(timeout) = self.timeout {
+            config = config.with_timeout(timeout);
+        }
+
+        config
+    }
 }
 
 /// Runtime configuration for the Codex API provider.
@@ -63,22 +93,36 @@ impl CodexApiProviderConfig {
         self
     }
 
-    fn into_codex_api_config(self) -> CodexApiConfig {
-        let mut config = CodexApiConfig::new(self.access_token);
-
-        if let Some(base_url) = self.base_url {
-            config = config.with_base_url(base_url);
-        }
-
-        if let Some(session_id) = self.session_id {
-            config = config.with_session_id(session_id);
-        }
+    fn validate(self) -> Result<ValidatedConfig, ProviderInitError> {
+        let access_token = sanitize_required_string(self.access_token, "access token")?;
+        let model_ids = sanitize_model_ids(self.model_ids)?;
+        let base_url = sanitize_optional_string(self.base_url, "base URL")?;
+        let session_id = sanitize_optional_string(self.session_id, "session id")?;
 
         if let Some(timeout) = self.timeout {
-            config = config.with_timeout(timeout);
+            if timeout.is_zero() {
+                return Err(ProviderInitError::new(
+                    "codex-api provider timeout must be greater than zero when provided",
+                ));
+            }
         }
 
-        config
+        if let Some(base_url) = base_url.as_deref() {
+            let endpoint = normalize_codex_url(base_url);
+            Url::parse(&endpoint).map_err(|error| {
+                ProviderInitError::new(format!(
+                    "codex-api provider base URL is invalid: {error}"
+                ))
+            })?;
+        }
+
+        Ok(ValidatedConfig {
+            access_token,
+            model_ids,
+            base_url,
+            session_id,
+            timeout: self.timeout,
+        })
     }
 }
 
@@ -122,10 +166,13 @@ pub struct CodexApiProvider {
 impl CodexApiProvider {
     /// Creates a provider using real Codex API transport.
     pub fn new(config: CodexApiProviderConfig) -> Result<Self, ProviderInitError> {
-        let model_ids = sanitize_model_ids(config.model_ids.clone());
-        let stream_client = Arc::new(DefaultStreamClient {
-            client: CodexApiClient::new(config.into_codex_api_config()).map_err(map_init_error)?,
-        });
+        let validated = config.validate()?;
+        let model_ids = validated.model_ids.clone();
+
+        let client = CodexApiClient::new(validated.into_codex_api_config()).map_err(map_init_error)?;
+        client.build_headers(None).map_err(map_init_error)?;
+
+        let stream_client = Arc::new(DefaultStreamClient { client });
 
         Ok(Self {
             model_ids,
@@ -139,7 +186,12 @@ impl CodexApiProvider {
         self.model_ids[selection.model_index].clone()
     }
 
-    fn emit_stream_chunks(&self, run_id: u64, stream_events: Vec<CodexStreamEvent>, emit: &mut dyn FnMut(RunEvent)) {
+    fn emit_stream_chunks(
+        &self,
+        run_id: u64,
+        stream_events: Vec<CodexStreamEvent>,
+        emit: &mut dyn FnMut(RunEvent),
+    ) {
         for stream_event in stream_events {
             match stream_event {
                 CodexStreamEvent::OutputTextDelta { delta }
@@ -188,8 +240,11 @@ impl CodexApiProvider {
         model_ids: Vec<String>,
         stream_client: Arc<dyn StreamClient>,
     ) -> Self {
+        let model_ids = sanitize_model_ids(model_ids)
+            .expect("tests must provide at least one non-empty model id");
+
         Self {
-            model_ids: sanitize_model_ids(model_ids),
+            model_ids,
             selection: Mutex::new(SelectionState { model_index: 0 }),
             stream_client,
         }
@@ -245,18 +300,50 @@ impl RunProvider for CodexApiProvider {
     }
 }
 
-fn sanitize_model_ids(model_ids: Vec<String>) -> Vec<String> {
-    let mut sanitized: Vec<String> = model_ids
+fn sanitize_required_string(value: String, field_name: &str) -> Result<String, ProviderInitError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ProviderInitError::new(format!(
+            "codex-api provider requires a non-empty {field_name}",
+        )));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn sanitize_optional_string(
+    value: Option<String>,
+    field_name: &str,
+) -> Result<Option<String>, ProviderInitError> {
+    match value {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(ProviderInitError::new(format!(
+                    "codex-api provider field '{field_name}' cannot be empty when provided",
+                )))
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+fn sanitize_model_ids(model_ids: Vec<String>) -> Result<Vec<String>, ProviderInitError> {
+    let sanitized: Vec<String> = model_ids
         .into_iter()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect();
 
     if sanitized.is_empty() {
-        sanitized.push("gpt-5.1-codex".to_string());
+        return Err(ProviderInitError::new(
+            "codex-api provider requires at least one non-empty model id",
+        ));
     }
 
-    sanitized
+    Ok(sanitized)
 }
 
 fn map_init_error(error: CodexApiError) -> ProviderInitError {
@@ -338,6 +425,13 @@ mod tests {
             .expect("run should not return provider-level failure");
 
         events
+    }
+
+    fn init_error(config: CodexApiProviderConfig) -> ProviderInitError {
+        match CodexApiProvider::new(config) {
+            Ok(_) => panic!("provider init should fail for this test case"),
+            Err(error) => error,
+        }
     }
 
     #[test]
@@ -450,13 +544,54 @@ mod tests {
     }
 
     #[test]
-    fn empty_model_list_defaults_to_safe_codex_model() {
-        let stream = FakeStreamClient::success(StreamResult {
-            events: Vec::new(),
-            terminal: Some(CodexResponseStatus::Completed),
-        });
-        let provider = CodexApiProvider::with_stream_client_for_tests(Vec::new(), stream);
+    fn new_rejects_empty_access_token() {
+        let error = init_error(CodexApiProviderConfig::new(
+            "   ",
+            vec!["gpt-5.1-codex".to_string()],
+        ));
 
-        assert_eq!(provider.profile().model_id, "gpt-5.1-codex");
+        assert!(error.message().contains("non-empty access token"));
+    }
+
+    #[test]
+    fn new_rejects_empty_model_list() {
+        let error = init_error(CodexApiProviderConfig::new("token", Vec::new()));
+
+        assert!(error.message().contains("at least one non-empty model id"));
+    }
+
+    #[test]
+    fn new_rejects_blank_optional_fields() {
+        let error = init_error(
+            CodexApiProviderConfig::new("token", vec!["gpt-5.1-codex".to_string()])
+                .with_base_url("  "),
+        );
+        assert!(error.message().contains("base URL"));
+
+        let error = init_error(
+            CodexApiProviderConfig::new("token", vec!["gpt-5.1-codex".to_string()])
+                .with_session_id("   "),
+        );
+        assert!(error.message().contains("session id"));
+    }
+
+    #[test]
+    fn new_rejects_zero_timeout() {
+        let error = init_error(
+            CodexApiProviderConfig::new("token", vec!["gpt-5.1-codex".to_string()])
+                .with_timeout(Duration::from_secs(0)),
+        );
+
+        assert!(error.message().contains("greater than zero"));
+    }
+
+    #[test]
+    fn new_rejects_invalid_base_url() {
+        let error = init_error(
+            CodexApiProviderConfig::new("token", vec!["gpt-5.1-codex".to_string()])
+                .with_base_url("https://exa mple.com"),
+        );
+
+        assert!(error.message().contains("base URL is invalid"));
     }
 }

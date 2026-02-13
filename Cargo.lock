@@ -13,6 +13,7 @@ dependencies = [
  "agent_provider",
  "codex_api",
  "tokio",
+ "url",
 ]
 
 [[package]]
