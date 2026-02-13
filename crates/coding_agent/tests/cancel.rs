@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role, RunId};
-use coding_agent::provider::{RunProvider, RunRequest};
+use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
 use coding_agent::runtime::{RunEvent, RuntimeController};
 use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
 use tape_tui::{Terminal, TUI};
@@ -42,7 +42,19 @@ impl Terminal for NullTerminal {
 #[derive(Default)]
 struct BlockingCancelProvider;
 
+fn test_provider_profile() -> ProviderProfile {
+    ProviderProfile {
+        provider_id: "test".to_string(),
+        model_id: "test-model".to_string(),
+        thinking_label: Some("test-thinking".to_string()),
+    }
+}
+
 impl RunProvider for BlockingCancelProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
     fn run(
         &self,
         req: RunRequest,
@@ -71,6 +83,10 @@ impl RunProvider for BlockingCancelProvider {
 struct RacingCancelProvider;
 
 impl RunProvider for RacingCancelProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
     fn run(
         &self,
         req: RunRequest,
@@ -104,6 +120,10 @@ impl RunProvider for RacingCancelProvider {
 struct FlushFallbackProvider;
 
 impl RunProvider for FlushFallbackProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
     fn run(
         &self,
         req: RunRequest,

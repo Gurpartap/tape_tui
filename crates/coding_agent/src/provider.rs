@@ -11,7 +11,16 @@ pub struct RunRequest {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderProfile {
+    pub provider_id: String,
+    pub model_id: String,
+    pub thinking_label: Option<String>,
+}
+
 pub trait RunProvider: Send + Sync + 'static {
+    fn profile(&self) -> ProviderProfile;
+
     fn run(
         &self,
         req: RunRequest,

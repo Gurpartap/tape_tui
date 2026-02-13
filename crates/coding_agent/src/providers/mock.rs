@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::provider::{RunProvider, RunRequest};
+use crate::provider::{ProviderProfile, RunProvider, RunRequest};
 use crate::runtime::RunEvent;
 use crate::tools::ToolExecutor;
 
@@ -79,6 +79,14 @@ impl Default for MockProvider {
 }
 
 impl RunProvider for MockProvider {
+    fn profile(&self) -> ProviderProfile {
+        ProviderProfile {
+            provider_id: "mock".to_string(),
+            model_id: "mock".to_string(),
+            thinking_label: Some("balanced".to_string()),
+        }
+    }
+
     fn run(
         &self,
         req: RunRequest,

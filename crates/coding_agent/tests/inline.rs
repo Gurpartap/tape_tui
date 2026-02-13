@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role};
-use coding_agent::provider::{RunProvider, RunRequest};
+use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
 use coding_agent::providers::MockProvider;
 use coding_agent::runtime::{RunEvent, RuntimeController};
 use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
@@ -16,7 +16,19 @@ mod support;
 #[derive(Default)]
 struct BlockingProvider;
 
+fn test_provider_profile() -> ProviderProfile {
+    ProviderProfile {
+        provider_id: "test".to_string(),
+        model_id: "test-model".to_string(),
+        thinking_label: Some("test-thinking".to_string()),
+    }
+}
+
 impl RunProvider for BlockingProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
     fn run(
         &self,
         req: RunRequest,
@@ -45,6 +57,10 @@ impl RunProvider for BlockingProvider {
 struct OrderedChunkProvider;
 
 impl RunProvider for OrderedChunkProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
     fn run(
         &self,
         req: RunRequest,
