@@ -97,10 +97,11 @@ fn setup_runtime_with_provider(
     let mut tui = TUI::new(terminal);
 
     let runtime_handle = tui.runtime_handle();
+    let provider_profile = provider.profile();
     let tools = BuiltinToolExecutor::new(".").expect("workspace root resolves");
     let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider, tools);
 
-    let root = tui.register_component(AppComponent::new(Arc::clone(&app), host));
+    let root = tui.register_component(AppComponent::new(Arc::clone(&app), host, provider_profile));
     tui.set_root(vec![root]);
     tui.set_focus(root);
 

@@ -13,6 +13,7 @@ use tape_tui::{
 };
 
 use crate::app::{App, HostOps, Message, Mode, Role};
+use crate::provider::ProviderProfile;
 use crate::runtime::RuntimeController;
 
 struct HistoryUpdateGuard(Arc<AtomicBool>);
@@ -113,6 +114,7 @@ fn editor_theme() -> EditorTheme {
 pub struct AppComponent {
     app: Arc<Mutex<App>>,
     host: Arc<RuntimeController>,
+    provider_profile: ProviderProfile,
     editor: Editor,
     is_applying_history: Arc<AtomicBool>,
     cursor_pos: Option<CursorPos>,
@@ -120,7 +122,11 @@ pub struct AppComponent {
 }
 
 impl AppComponent {
-    pub fn new(app: Arc<Mutex<App>>, host: Arc<RuntimeController>) -> Self {
+    pub fn new(
+        app: Arc<Mutex<App>>,
+        host: Arc<RuntimeController>,
+        provider_profile: ProviderProfile,
+    ) -> Self {
         let app_for_change = Arc::clone(&app);
         let app_for_submit = Arc::clone(&app);
         let host_for_submit = Arc::clone(&host);
@@ -169,6 +175,7 @@ impl AppComponent {
         Self {
             app,
             host,
+            provider_profile,
             editor,
             is_applying_history,
             cursor_pos: None,
@@ -217,7 +224,13 @@ impl Component for AppComponent {
             *editor_border = render_mode_line(width, self.view_mode);
         }
         lines.extend(editor_lines);
-        append_wrapped_text(&mut lines, width, &render_status_footer(width), "", "");
+        append_wrapped_text(
+            &mut lines,
+            width,
+            &render_status_footer(width, &self.provider_profile),
+            "",
+            "",
+        );
 
         self.cursor_pos = self.editor.cursor_pos().map(|position| CursorPos {
             row: position.row + editor_start_row,
@@ -340,23 +353,45 @@ fn render_working_directory() -> String {
     }
 }
 
-fn render_model_and_thinking() -> String {
-    let model = std::env::var("CODING_AGENT_MODEL").unwrap_or_else(|_| "mock".to_string());
-    let thinking =
-        std::env::var("CODING_AGENT_THINKING").unwrap_or_else(|_| "balanced".to_string());
+fn render_provider_metadata(profile: &ProviderProfile) -> String {
+    let provider_id = profile.provider_id.trim();
+    let provider_id = if provider_id.is_empty() {
+        "unknown"
+    } else {
+        provider_id
+    };
 
-    render_model_and_thinking_with(&model, &thinking)
-}
+    let model_id = profile.model_id.trim();
+    let model_id = if model_id.is_empty() {
+        "unknown"
+    } else {
+        model_id
+    };
 
-fn render_model_and_thinking_with(model: &str, thinking: &str) -> String {
-    format!(
+    let mut metadata = format!(
         "{} {} {} {} {}",
-        dim("model"),
-        cyan(model),
+        dim("provider"),
+        cyan(provider_id),
         dim("•"),
-        dim("thinking"),
-        yellow(thinking)
-    )
+        dim("model"),
+        cyan(model_id)
+    );
+
+    if let Some(thinking_label) = profile
+        .thinking_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+    {
+        metadata.push_str(&format!(
+            " {} {} {}",
+            dim("•"),
+            dim("thinking"),
+            yellow(thinking_label)
+        ));
+    }
+
+    metadata
 }
 
 fn format_working_directory_with_home(cwd: &str, branch: &str, home: Option<&str>) -> String {
@@ -374,9 +409,9 @@ fn format_working_directory_with_home(cwd: &str, branch: &str, home: Option<&str
     format!("{} {}", dim(&display_path), dim(&format!("({branch})")))
 }
 
-fn render_status_footer(width: usize) -> String {
+fn render_status_footer(width: usize, provider_profile: &ProviderProfile) -> String {
     let left = render_working_directory();
-    let right = render_model_and_thinking();
+    let right = render_provider_metadata(provider_profile);
     let left_width = visible_text_width(&left);
     let right_width = visible_text_width(&right);
 
@@ -686,9 +721,27 @@ mod tests {
     }
 
     #[test]
-    fn model_and_thinking_has_bullet_separator() {
-        let line = strip_ansi(&render_model_and_thinking_with("gpt-5-codex", "medium"));
-        assert_eq!(line, "model gpt-5-codex • thinking medium");
+    fn provider_metadata_includes_provider_model_and_thinking() {
+        let profile = ProviderProfile {
+            provider_id: "mock".to_string(),
+            model_id: "gpt-5-codex".to_string(),
+            thinking_label: Some("medium".to_string()),
+        };
+
+        let line = strip_ansi(&render_provider_metadata(&profile));
+        assert_eq!(line, "provider mock • model gpt-5-codex • thinking medium");
+    }
+
+    #[test]
+    fn provider_metadata_omits_thinking_when_profile_has_none() {
+        let profile = ProviderProfile {
+            provider_id: "mock".to_string(),
+            model_id: "gpt-5-codex".to_string(),
+            thinking_label: None,
+        };
+
+        let line = strip_ansi(&render_provider_metadata(&profile));
+        assert_eq!(line, "provider mock • model gpt-5-codex");
     }
 
     #[test]
