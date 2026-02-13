@@ -563,6 +563,12 @@ fn render_message_lines(app: &App, message: &Message, width: usize, lines: &mut 
                 lines.push(format!("  {line}"));
             }
         }
+        Role::Tool => {
+            let text_lines = message_display_lines(app, message);
+            for line in text_lines {
+                append_wrapped_text(lines, width, line.as_str(), "", "");
+            }
+        }
         _ => {
             let text_lines = message_display_lines(app, message);
             for (index, line) in text_lines.iter().enumerate() {
@@ -589,36 +595,41 @@ fn message_display_lines(app: &App, message: &Message) -> Vec<String> {
 }
 
 fn tool_message_display_lines(app: &App, message: &Message) -> Vec<String> {
-    let mut lines: Vec<String> = message
+    let fallback_lines: Vec<String> = message
         .content
         .split('\n')
         .map(ToString::to_string)
         .collect();
 
     let Some(run_id) = message.run_id else {
-        return lines;
+        return fallback_lines;
     };
 
-    let Some((_tool_name, call_id, kind)) = parse_tool_timeline_message(message.content.as_str())
+    let Some((tool_name, call_id, kind)) = parse_tool_timeline_message(message.content.as_str())
     else {
-        return lines;
+        return fallback_lines;
     };
 
     match kind {
         ToolMessageKind::Started => {
-            if let Some(arguments) = app.tool_call_arguments(run_id, call_id) {
-                lines.extend(render_value_block("input", arguments));
-            }
+            let Some(arguments) = app.tool_call_arguments(run_id, call_id) else {
+                return fallback_lines;
+            };
+
+            vec![format_tool_started_line(tool_name, arguments)]
         }
         ToolMessageKind::Completed | ToolMessageKind::Failed => {
-            if let Some((content, is_error)) = app.tool_call_result(run_id, call_id) {
-                lines.push(format!("↳ is_error: {is_error}"));
-                lines.extend(render_value_block("output", content));
-            }
+            let Some((content, is_error)) = app.tool_call_result(run_id, call_id) else {
+                return fallback_lines;
+            };
+
+            let mut lines = Vec::new();
+            let status = if is_error { "failed" } else { "completed" };
+            lines.push(dim(&format!("{tool_name} {status}")));
+            lines.extend(render_value_content(content));
+            lines
         }
     }
-
-    lines
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -646,29 +657,67 @@ fn parse_tool_timeline_message(content: &str) -> Option<(&str, &str, ToolMessage
     Some((tool_name, call_id, kind))
 }
 
-fn render_value_block(label: &str, value: &Value) -> Vec<String> {
-    let mut lines = vec![format!("↳ {label}:")];
+fn format_tool_started_line(tool_name: &str, arguments: &Value) -> String {
+    match tool_name {
+        "bash" => {
+            let command = argument_string(arguments, "command").unwrap_or("<missing command>");
+            let mut line = format!("$ {command}");
+            if let Some(timeout_sec) = argument_u64(arguments, "timeout_sec") {
+                line.push(' ');
+                line.push_str(&dim(&format!("(timeout {timeout_sec}s)")));
+            }
+            line
+        }
+        "read" => {
+            let path = argument_string(arguments, "path").unwrap_or("<missing path>");
+            format!("read {path}")
+        }
+        "write" => {
+            let path = argument_string(arguments, "path").unwrap_or("<missing path>");
+            format!("write {path}")
+        }
+        "edit" => {
+            let path = argument_string(arguments, "path").unwrap_or("<missing path>");
+            format!("edit {path}")
+        }
+        "apply_patch" => {
+            let input = argument_string(arguments, "input").unwrap_or_default();
+            format!(
+                "apply_patch {}",
+                dim(&format!("({} chars)", input.chars().count()))
+            )
+        }
+        _ => format!("{tool_name} {arguments}"),
+    }
+}
 
+fn render_value_content(value: &Value) -> Vec<String> {
     match value {
         Value::String(content) => {
             if content.is_empty() {
-                lines.push("  <empty>".to_string());
+                vec![dim("<empty>")]
             } else {
-                for line in content.lines() {
-                    lines.push(format!("  {line}"));
-                }
+                content.lines().map(ToString::to_string).collect()
             }
         }
-        _ => {
-            let rendered =
-                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-            for line in rendered.lines() {
-                lines.push(format!("  {line}"));
-            }
-        }
+        _ => serde_json::to_string_pretty(value)
+            .unwrap_or_else(|_| value.to_string())
+            .lines()
+            .map(ToString::to_string)
+            .collect(),
     }
+}
 
-    lines
+fn argument_string<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn argument_u64(arguments: &Value, key: &str) -> Option<u64> {
+    arguments.get(key).and_then(Value::as_u64)
 }
 
 fn render_markdown_lines(width: usize, text: &str) -> Vec<String> {
@@ -912,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_message_display_lines_include_exact_started_tool_input_content() {
+    fn tool_message_display_lines_include_clean_bash_started_command() {
         let mut app = App::new();
         app.mode = Mode::Running { run_id: 7 };
         app.on_tool_call_started(
@@ -933,19 +982,11 @@ mod tests {
             .expect("tool message should exist");
 
         let lines = tool_message_display_lines(&app, message);
-        assert_eq!(lines[0], "Tool bash (call-1) started");
-        assert!(lines.iter().any(|line| line == "↳ input:"));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("\"command\": \"echo hello\"")));
-        assert!(lines.iter().any(|line| line.contains("\"cwd\": \"/tmp\"")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("\"timeout_sec\": 30")));
+        assert_eq!(strip_ansi(&lines[0]), "$ echo hello (timeout 30s)");
     }
 
     #[test]
-    fn tool_message_display_lines_include_exact_completed_tool_output_content() {
+    fn tool_message_display_lines_include_clean_completed_tool_output_content() {
         let mut app = App::new();
         app.mode = Mode::Running { run_id: 7 };
         app.on_tool_call_started(
@@ -970,11 +1011,9 @@ mod tests {
             .expect("completed tool message should exist");
 
         let lines = tool_message_display_lines(&app, message);
-        assert_eq!(lines[0], "Tool bash (call-1) completed");
-        assert!(lines.iter().any(|line| line == "↳ is_error: false"));
-        assert!(lines.iter().any(|line| line == "↳ output:"));
-        assert!(lines.iter().any(|line| line == "  line-1"));
-        assert!(lines.iter().any(|line| line == "  line-2"));
+        assert_eq!(strip_ansi(&lines[0]), "bash completed");
+        assert!(lines.iter().any(|line| line == "line-1"));
+        assert!(lines.iter().any(|line| line == "line-2"));
     }
 
     #[test]
@@ -989,5 +1028,35 @@ mod tests {
 
         let lines = tool_message_display_lines(&app, &message);
         assert_eq!(lines, vec!["Tool bash (call-1) completed".to_string()]);
+    }
+
+    #[test]
+    fn render_message_lines_renders_tool_rows_without_role_prefix() {
+        let mut app = App::new();
+        app.mode = Mode::Running { run_id: 7 };
+        app.on_tool_call_started(
+            7,
+            "call-1",
+            "bash",
+            &serde_json::json!({
+                "command": "head -c 16 /dev/urandom | xxd -p > hi.txt",
+                "timeout_sec": 5
+            }),
+        );
+
+        let message = app
+            .transcript
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .expect("tool message should exist")
+            .clone();
+
+        let mut lines = Vec::new();
+        render_message_lines(&app, &message, 200, &mut lines);
+
+        assert_eq!(
+            strip_ansi(&lines[0]),
+            "$ head -c 16 /dev/urandom | xxd -p > hi.txt (timeout 5s)"
+        );
     }
 }
