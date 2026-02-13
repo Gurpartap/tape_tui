@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 use coding_agent::app::{App, Mode, Role, RunId};
 use coding_agent::provider::{
     CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest, ToolCallRequest, ToolResult,
@@ -145,6 +147,44 @@ impl RunProvider for FlushFallbackProvider {
         });
         emit(RunEvent::Finished { run_id });
 
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ToolCallCancelProvider;
+
+impl RunProvider for ToolCallCancelProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        cancel: CancelSignal,
+        execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        let run_id = req.run_id;
+
+        emit(RunEvent::Started { run_id });
+
+        let _result = execute_tool(ToolCallRequest {
+            call_id: "slow-tool".to_string(),
+            tool_name: "bash".to_string(),
+            arguments: json!({
+                "command": "sleep 1",
+                "timeout_sec": 5,
+                "cwd": "."
+            }),
+        });
+
+        while !cancel.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        emit(RunEvent::Cancelled { run_id });
         Ok(())
     }
 }
@@ -420,6 +460,87 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
                 || assistant_messages[0].content == "first second"
         );
         assert!(!assistant_messages[0].streaming);
+    });
+}
+
+#[test]
+fn cancellation_during_tool_execution_remains_idempotent() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(ToolCallCancelProvider);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let run_id = {
+            let mut app = lock_unpoisoned(&app);
+            app.on_input_replace("cancel while tool runs".to_string());
+            app.on_submit(&mut host);
+            running_run_id(&app.mode)
+        };
+
+        let tool_started = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                app.transcript.iter().any(|message| {
+                    message.role == Role::Tool
+                        && message.run_id == Some(run_id)
+                        && message.content == "Tool bash (slow-tool) started"
+                })
+            },
+        );
+        assert!(tool_started, "tool call did not start before cancellation");
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_cancel(&mut host);
+        }
+
+        let settled = wait_until(
+            Duration::from_secs(4),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Tool
+                            && message.run_id == Some(run_id)
+                            && message.content.contains(
+                                "Tool bash (slow-tool) failed: Run cancellation requested during host tool execution",
+                            )
+                    })
+            },
+        );
+        assert!(settled, "tool-cancel run did not settle");
+
+        let cancelled_count_after_settle = {
+            let app = lock_unpoisoned(&app);
+            app.transcript
+                .iter()
+                .filter(|message| message.role == Role::System && message.content == "Run cancelled")
+                .count()
+        };
+        assert_eq!(cancelled_count_after_settle, 1);
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_cancel(&mut host);
+        }
+
+        let cancelled_count_after_extra_cancel = {
+            let app = lock_unpoisoned(&app);
+            app.transcript
+                .iter()
+                .filter(|message| message.role == Role::System && message.content == "Run cancelled")
+                .count()
+        };
+        assert_eq!(cancelled_count_after_extra_cancel, 1);
     });
 }
 
