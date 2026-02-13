@@ -6,6 +6,7 @@ edition = "2021"
 [workspace]
 members = [
   ".",
+  "crates/agent_provider",
   "crates/coding_agent",
   "crates/codex_api",
 ]
