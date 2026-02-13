@@ -83,7 +83,7 @@ impl RunProvider for MockProvider {
         ProviderProfile {
             provider_id: "mock".to_string(),
             model_id: "mock".to_string(),
-            thinking_label: Some("balanced".to_string()),
+            thinking_level: Some("balanced".to_string()),
         }
     }
 

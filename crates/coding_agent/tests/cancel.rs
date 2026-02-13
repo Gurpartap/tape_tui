@@ -46,7 +46,7 @@ fn test_provider_profile() -> ProviderProfile {
     ProviderProfile {
         provider_id: "test".to_string(),
         model_id: "test-model".to_string(),
-        thinking_label: Some("test-thinking".to_string()),
+        thinking_level: Some("test-thinking".to_string()),
     }
 }
 

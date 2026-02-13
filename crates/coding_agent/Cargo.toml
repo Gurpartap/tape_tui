@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 wait-timeout = "0.2"
 tape_tui = { path = "../.." }
+agent_provider = { path = "../agent_provider" }
 
 [dev-dependencies]
 tempfile = "3"

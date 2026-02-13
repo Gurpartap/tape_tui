@@ -43,7 +43,7 @@ fn test_provider_profile() -> ProviderProfile {
     ProviderProfile {
         provider_id: "contract-test".to_string(),
         model_id: "contract-model".to_string(),
-        thinking_label: Some("balanced".to_string()),
+        thinking_level: Some("balanced".to_string()),
     }
 }
 
@@ -264,11 +264,7 @@ fn wait_until(
     predicate()
 }
 
-fn submit_prompt(
-    app: &Arc<Mutex<App>>,
-    host: &mut Arc<RuntimeController>,
-    prompt: &str,
-) -> RunId {
+fn submit_prompt(app: &Arc<Mutex<App>>, host: &mut Arc<RuntimeController>, prompt: &str) -> RunId {
     let mut app = lock_unpoisoned(app);
     app.on_input_replace(prompt.to_string());
     app.on_submit(host);
@@ -285,7 +281,8 @@ fn provider_lifecycle_transitions_to_single_completed_assistant_message() {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host =
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
 
         let run_id = submit_prompt(&app, &mut host, "verify lifecycle");
         let settled = wait_until(
@@ -317,10 +314,9 @@ fn provider_lifecycle_transitions_to_single_completed_assistant_message() {
         assert_eq!(assistant_messages.len(), 1);
         assert_eq!(assistant_messages[0].content, "hello world");
         assert!(!assistant_messages[0].streaming);
-        assert!(!app
-            .transcript
-            .iter()
-            .any(|message| message.role == Role::System && message.content.starts_with("Run failed")));
+        assert!(!app.transcript.iter().any(
+            |message| message.role == Role::System && message.content.starts_with("Run failed")
+        ));
     });
 }
 
@@ -330,7 +326,8 @@ fn terminal_state_remains_stable_when_provider_emits_extra_terminal_events() {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(NoisyTerminalProvider);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host =
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
 
         let first_run_id = submit_prompt(&app, &mut host, "first noisy run");
         let first_settled = wait_until(
@@ -383,10 +380,9 @@ fn terminal_state_remains_stable_when_provider_emits_extra_terminal_events() {
             assert!(!assistant_messages[0].streaming);
         }
 
-        assert!(!app
-            .transcript
-            .iter()
-            .any(|message| message.role == Role::System && message.content.starts_with("Run failed")));
+        assert!(!app.transcript.iter().any(
+            |message| message.role == Role::System && message.content.starts_with("Run failed")
+        ));
         assert!(!app
             .transcript
             .iter()
@@ -402,7 +398,8 @@ fn cancellation_signal_reaches_provider_and_preserves_cancelled_state() {
         let provider: Arc<dyn RunProvider> =
             Arc::new(CancelAwareProvider::new(Arc::clone(&cancel_observed)));
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host =
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
 
         let run_id = submit_prompt(&app, &mut host, "cancel this run");
 
@@ -457,7 +454,8 @@ fn stale_run_events_are_ignored_and_do_not_corrupt_active_run_output() {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(StaleEventProvider);
         let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host =
+            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
 
         let run_id = submit_prompt(&app, &mut host, "stale event guard");
 

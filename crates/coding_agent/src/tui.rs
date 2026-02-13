@@ -377,8 +377,8 @@ fn render_provider_metadata(profile: &ProviderProfile) -> String {
         cyan(model_id)
     );
 
-    if let Some(thinking_label) = profile
-        .thinking_label
+    if let Some(thinking_level) = profile
+        .thinking_level
         .as_deref()
         .map(str::trim)
         .filter(|label| !label.is_empty())
@@ -387,7 +387,7 @@ fn render_provider_metadata(profile: &ProviderProfile) -> String {
             " {} {} {}",
             dim("•"),
             dim("thinking"),
-            yellow(thinking_label)
+            yellow(thinking_level)
         ));
     }
 
@@ -725,7 +725,7 @@ mod tests {
         let profile = ProviderProfile {
             provider_id: "mock".to_string(),
             model_id: "gpt-5-codex".to_string(),
-            thinking_label: Some("medium".to_string()),
+            thinking_level: Some("medium".to_string()),
         };
 
         let line = strip_ansi(&render_provider_metadata(&profile));
@@ -737,7 +737,7 @@ mod tests {
         let profile = ProviderProfile {
             provider_id: "mock".to_string(),
             model_id: "gpt-5-codex".to_string(),
-            thinking_label: None,
+            thinking_level: None,
         };
 
         let line = strip_ansi(&render_provider_metadata(&profile));
