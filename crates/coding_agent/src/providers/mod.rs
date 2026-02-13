@@ -6,9 +6,12 @@ mod mock;
 
 pub use mock::MockProvider;
 
+/// Provider ID selected when `CODING_AGENT_PROVIDER` is unset.
 pub const DEFAULT_PROVIDER_ID: &str = "mock";
+/// Environment variable used to select a run provider implementation.
 pub const PROVIDER_ENV_VAR: &str = "CODING_AGENT_PROVIDER";
 
+/// Resolves the configured run provider from environment selection.
 pub fn provider_from_env() -> Result<Arc<dyn RunProvider>, String> {
     let provider_id = std::env::var(PROVIDER_ENV_VAR)
         .ok()
@@ -18,6 +21,7 @@ pub fn provider_from_env() -> Result<Arc<dyn RunProvider>, String> {
     provider_for_id(provider_id.as_deref().unwrap_or(DEFAULT_PROVIDER_ID))
 }
 
+/// Resolves a run provider by provider ID.
 pub fn provider_for_id(provider_id: &str) -> Result<Arc<dyn RunProvider>, String> {
     match provider_id {
         DEFAULT_PROVIDER_ID => Ok(Arc::new(MockProvider::default())),

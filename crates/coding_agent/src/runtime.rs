@@ -12,16 +12,23 @@ use crate::app::{App, HostOps, Mode, RunId};
 use crate::provider::{RunProvider, RunRequest};
 use crate::tools::BuiltinToolExecutor;
 
+/// Runtime event stream emitted by a [`RunProvider`](crate::provider::RunProvider).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunEvent {
+    /// Provider acknowledged the run and started streaming work.
     Started { run_id: RunId },
+    /// Incremental assistant output for the run.
     Chunk { run_id: RunId, text: String },
+    /// Successful terminal state for the run.
     Finished { run_id: RunId },
+    /// Failed terminal state for the run.
     Failed { run_id: RunId, error: String },
+    /// Cancelled terminal state for the run.
     Cancelled { run_id: RunId },
 }
 
 impl RunEvent {
+    /// Returns the run identifier attached to this event.
     fn run_id(&self) -> RunId {
         match self {
             Self::Started { run_id } | Self::Finished { run_id } | Self::Cancelled { run_id } => {
@@ -31,6 +38,7 @@ impl RunEvent {
         }
     }
 
+    /// Returns true when the event settles run state.
     fn is_terminal(&self) -> bool {
         matches!(
             self,
