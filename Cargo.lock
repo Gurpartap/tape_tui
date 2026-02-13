@@ -99,6 +99,7 @@ name = "coding_agent"
 version = "0.1.0"
 dependencies = [
  "agent_provider",
+ "agent_provider_mock",
  "tape_tui",
  "tempfile",
  "wait-timeout",
