@@ -6,7 +6,6 @@ use coding_agent::app::{App, Mode};
 use coding_agent::provider::RunProvider;
 use coding_agent::providers::MockProvider;
 use coding_agent::runtime::RuntimeController;
-use coding_agent::tools::BuiltinToolExecutor;
 use coding_agent::tui::AppComponent;
 use tape_tui::TUI;
 
@@ -24,8 +23,7 @@ fn setup_runtime() -> (
     let runtime_handle = tui.runtime_handle();
     let provider: Arc<dyn RunProvider> = Arc::new(MockProvider::default());
     let provider_profile = provider.profile();
-    let tools = BuiltinToolExecutor::new(".").expect("workspace root resolves");
-    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider, tools);
+    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider);
 
     let root = tui.register_component(AppComponent::new(Arc::clone(&app), host, provider_profile));
     tui.set_root(vec![root]);

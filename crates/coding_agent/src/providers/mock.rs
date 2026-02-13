@@ -1,11 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
-use crate::provider::{ProviderProfile, RunProvider, RunRequest};
-use crate::runtime::RunEvent;
-use crate::tools::ToolExecutor;
+use crate::provider::{CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MockProvider {
@@ -90,9 +87,8 @@ impl RunProvider for MockProvider {
     fn run(
         &self,
         req: RunRequest,
-        cancel: Arc<AtomicBool>,
+        cancel: CancelSignal,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         let run_id = req.run_id;
         let _ = req.prompt;

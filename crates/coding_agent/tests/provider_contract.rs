@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use coding_agent::app::{App, Mode, Role, RunId};
 use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
 use coding_agent::runtime::{RunEvent, RuntimeController};
-use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
 use tape_tui::{Terminal, TUI};
 
 #[derive(Default)]
@@ -59,7 +58,6 @@ impl RunProvider for LifecycleProvider {
         req: RunRequest,
         _cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         emit(RunEvent::Started { run_id: req.run_id });
         emit(RunEvent::Chunk {
@@ -87,7 +85,6 @@ impl RunProvider for NoisyTerminalProvider {
         req: RunRequest,
         _cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         emit(RunEvent::Started { run_id: req.run_id });
         emit(RunEvent::Chunk {
@@ -131,7 +128,6 @@ impl RunProvider for CancelAwareProvider {
         req: RunRequest,
         cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         emit(RunEvent::Started { run_id: req.run_id });
         emit(RunEvent::Chunk {
@@ -161,7 +157,6 @@ impl RunProvider for StaleEventProvider {
         req: RunRequest,
         _cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         let stale_run_id = req.run_id + 10_000;
 
@@ -280,9 +275,7 @@ fn provider_lifecycle_transitions_to_single_completed_assistant_message() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
 
         let run_id = submit_prompt(&app, &mut host, "verify lifecycle");
         let settled = wait_until(
@@ -325,9 +318,7 @@ fn terminal_state_remains_stable_when_provider_emits_extra_terminal_events() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(NoisyTerminalProvider);
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
 
         let first_run_id = submit_prompt(&app, &mut host, "first noisy run");
         let first_settled = wait_until(
@@ -397,9 +388,7 @@ fn cancellation_signal_reaches_provider_and_preserves_cancelled_state() {
         let cancel_observed = Arc::new(AtomicBool::new(false));
         let provider: Arc<dyn RunProvider> =
             Arc::new(CancelAwareProvider::new(Arc::clone(&cancel_observed)));
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
 
         let run_id = submit_prompt(&app, &mut host, "cancel this run");
 
@@ -453,9 +442,7 @@ fn stale_run_events_are_ignored_and_do_not_corrupt_active_run_output() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(StaleEventProvider);
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
 
         let run_id = submit_prompt(&app, &mut host, "stale event guard");
 

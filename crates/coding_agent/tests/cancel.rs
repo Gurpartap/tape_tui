@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use coding_agent::app::{App, Mode, Role, RunId};
 use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
 use coding_agent::runtime::{RunEvent, RuntimeController};
-use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
 use tape_tui::{Terminal, TUI};
 
 #[derive(Default)]
@@ -60,7 +59,6 @@ impl RunProvider for BlockingCancelProvider {
         req: RunRequest,
         cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         let run_id = req.run_id;
 
@@ -92,7 +90,6 @@ impl RunProvider for RacingCancelProvider {
         req: RunRequest,
         cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         let run_id = req.run_id;
 
@@ -129,7 +126,6 @@ impl RunProvider for FlushFallbackProvider {
         req: RunRequest,
         _cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         let run_id = req.run_id;
 
@@ -238,9 +234,7 @@ fn cancel_while_running_results_in_cancelled_state() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(BlockingCancelProvider);
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -293,9 +287,7 @@ fn repeated_cancel_is_a_noop_after_first_signal() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(BlockingCancelProvider);
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
 
         let _run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -359,9 +351,7 @@ fn cancel_race_keeps_single_non_streaming_assistant_message() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(RacingCancelProvider);
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
-        let mut host =
-            RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);
@@ -433,12 +423,11 @@ fn flush_pending_events_in_headless_usage() {
     with_runtime_loop(|runtime_loop| {
         let app = Arc::new(Mutex::new(App::new()));
         let provider: Arc<dyn RunProvider> = Arc::new(FlushFallbackProvider);
-        let tools = BuiltinToolExecutor::new(".").expect("workspace root must resolve");
 
         // This test intentionally avoids running the TUI loop to emulate a headless caller
         // that must drive event application explicitly via flush_pending_run_events.
         let runtime_handle = runtime_loop.runtime_handle();
-        let mut host = RuntimeController::new(app.clone(), runtime_handle, provider, tools);
+        let mut host = RuntimeController::new(app.clone(), runtime_handle, provider);
 
         let run_id = {
             let mut app = lock_unpoisoned(&app);

@@ -7,7 +7,6 @@ use coding_agent::app::{App, Mode, Role};
 use coding_agent::provider::{ProviderProfile, RunProvider, RunRequest};
 use coding_agent::providers::MockProvider;
 use coding_agent::runtime::{RunEvent, RuntimeController};
-use coding_agent::tools::{BuiltinToolExecutor, ToolExecutor};
 use coding_agent::tui::AppComponent;
 use tape_tui::TUI;
 
@@ -34,7 +33,6 @@ impl RunProvider for BlockingProvider {
         req: RunRequest,
         cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         let run_id = req.run_id;
 
@@ -66,7 +64,6 @@ impl RunProvider for OrderedChunkProvider {
         req: RunRequest,
         _cancel: Arc<AtomicBool>,
         emit: &mut dyn FnMut(RunEvent),
-        _tools: &mut dyn ToolExecutor,
     ) -> Result<(), String> {
         let run_id = req.run_id;
 
@@ -98,8 +95,7 @@ fn setup_runtime_with_provider(
 
     let runtime_handle = tui.runtime_handle();
     let provider_profile = provider.profile();
-    let tools = BuiltinToolExecutor::new(".").expect("workspace root resolves");
-    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider, tools);
+    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider);
 
     let root = tui.register_component(AppComponent::new(Arc::clone(&app), host, provider_profile));
     tui.set_root(vec![root]);

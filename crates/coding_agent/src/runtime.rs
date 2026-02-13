@@ -10,7 +10,6 @@ use tape_tui::runtime::tui::{
 
 use crate::app::{App, HostOps, Mode, RunId};
 use crate::provider::{RunProvider, RunRequest};
-use crate::tools::BuiltinToolExecutor;
 
 pub use crate::provider::RunEvent;
 
@@ -27,7 +26,6 @@ pub struct RuntimeController {
     next_run_id: AtomicU64,
     active_run: Mutex<Option<ActiveRun>>,
     provider: Arc<dyn RunProvider>,
-    tools: Mutex<BuiltinToolExecutor>,
 }
 
 impl RuntimeController {
@@ -40,7 +38,6 @@ impl RuntimeController {
         app: Arc<Mutex<App>>,
         runtime_handle: RuntimeHandle,
         provider: Arc<dyn RunProvider>,
-        tools: BuiltinToolExecutor,
     ) -> Arc<Self> {
         Arc::new(Self {
             app,
@@ -49,7 +46,6 @@ impl RuntimeController {
             next_run_id: AtomicU64::new(1),
             active_run: Mutex::new(None),
             provider,
-            tools: Mutex::new(tools),
         })
     }
 
@@ -94,7 +90,6 @@ impl RuntimeController {
         let terminal_emitted_for_emit = Arc::clone(&terminal_emitted);
         let controller = Arc::clone(&self);
         let provider = Arc::clone(&self.provider);
-        let tools = &self.tools;
 
         let mut emit = move |event: RunEvent| {
             if event.is_terminal() {
@@ -104,8 +99,7 @@ impl RuntimeController {
             controller.enqueue_run_event(event);
         };
         let run_outcome = catch_unwind(AssertUnwindSafe(|| {
-            let mut tools = lock_unpoisoned(tools);
-            provider.run(request, Arc::clone(&cancel), &mut emit, &mut *tools)
+            provider.run(request, Arc::clone(&cancel), &mut emit)
         }));
 
         match run_outcome {
