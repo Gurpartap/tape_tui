@@ -6,6 +6,10 @@
 //!
 //! The parity target for this transport layer is the PI/OpenCode Codex wire
 //! contract described in the repository plan and specs.
+//!
+//! SSE normalization includes host-mediated tool-call extraction via
+//! [`CodexStreamEvent::ToolCallRequested`], while preserving malformed tool
+//! payloads for explicit caller-side failure handling.
 
 pub mod client;
 pub mod config;

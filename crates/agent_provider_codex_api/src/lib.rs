@@ -2,6 +2,9 @@
 //!
 //! This adapter translates `codex_api` stream semantics into deterministic
 //! `RunEvent` lifecycle events expected by `coding_agent`.
+//! Host-mediated tool execution is serial and limited to the v1 tool pack
+//! (`bash`, `read`, `edit`, `write`), with explicit failure/cancel outcomes for
+//! malformed payloads or non-complete terminal statuses.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};

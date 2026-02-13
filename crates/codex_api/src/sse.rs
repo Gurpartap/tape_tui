@@ -3,6 +3,10 @@ use serde_json::Value;
 use crate::events::{CodexResponseStatus, CodexStreamEvent};
 
 /// Incremental parser for SSE text streams.
+///
+/// Function-call output items are normalized into `OutputItemDone` plus
+/// `ToolCallRequested` events. The parser preserves malformed tool payload fields
+/// so adapters can fail explicitly instead of relying on fallback coercions.
 #[derive(Debug, Default)]
 pub struct SseStreamParser {
     buffer: Vec<u8>,

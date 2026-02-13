@@ -16,6 +16,15 @@ Transport-focused crate for ChatGPT Codex API HTTP + SSE parity work.
   - transport events as `CodexStreamEvent`
   - optional terminal status in `StreamResult::terminal` (absent when stream ends
     without a known terminal state).
+- Function-call output items are normalized into ordered event pairs:
+  - `CodexStreamEvent::OutputItemDone` for raw item completion metadata
+  - `CodexStreamEvent::ToolCallRequested` for host-mediated tool execution payloads
+- Tool-call payloads are never silently repaired by the parser; malformed
+  `call_id`/`tool_name`/`arguments` content is preserved for explicit adapter-level
+  failure handling.
+- Consumers implementing host-mediated tool loops should only execute pending
+  tool calls when terminal status is `completed`; non-complete or missing
+  terminal states remain explicit failure conditions.
 - Unknown typed SSE frames are retained as `CodexStreamEvent::Unknown`.
 - Retry policy is bounded by `MAX_RETRIES` with exponential backoff and PI-parity
   retry behavior for retryable HTTP/transient failures.
