@@ -189,6 +189,48 @@ impl RunProvider for ToolCallCancelProvider {
     }
 }
 
+#[derive(Default)]
+struct ApplyPatchAfterCancelProvider;
+
+impl RunProvider for ApplyPatchAfterCancelProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        cancel: CancelSignal,
+        execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        let run_id = req.run_id;
+
+        emit(RunEvent::Started { run_id });
+
+        while !cancel.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let result = execute_tool(ToolCallRequest {
+            call_id: "cancelled-apply-patch".to_string(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({
+                "input": "*** Begin Patch\n*** Add File: should-not-run.txt\n+blocked\n*** End Patch"
+            }),
+        });
+        if !result.is_error {
+            return Err(
+                "expected apply_patch call after cancel signal to return explicit error"
+                    .to_string(),
+            );
+        }
+
+        emit(RunEvent::Cancelled { run_id });
+        Ok(())
+    }
+}
+
 struct RuntimeLoopHandle {
     runtime: TUI<NullTerminal>,
     stopped: bool,
@@ -562,6 +604,71 @@ fn cancellation_during_tool_execution_remains_idempotent() {
                 .count()
         };
         assert_eq!(cancelled_count_after_extra_cancel, 1);
+    });
+}
+
+#[test]
+fn cancel_before_apply_patch_tool_execution_remains_idempotent() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(ApplyPatchAfterCancelProvider);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let run_id = {
+            let mut app = lock_unpoisoned(&app);
+            app.on_input_replace("cancel before apply_patch executes".to_string());
+            app.on_submit(&mut host);
+            running_run_id(&app.mode)
+        };
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_cancel(&mut host);
+            app.on_cancel(&mut host);
+        }
+
+        let settled = wait_until(
+            Duration::from_secs(3),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Tool
+                            && message.run_id == Some(run_id)
+                            && message.content.contains(
+                                "Tool apply_patch (cancelled-apply-patch) failed: Run cancellation requested before host tool execution",
+                            )
+                    })
+            },
+        );
+        assert!(settled, "cancel-before-apply_patch run did not settle");
+
+        let app = lock_unpoisoned(&app);
+        let cancelled_count = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::System && message.content == "Run cancelled")
+            .count();
+        assert_eq!(cancelled_count, 1);
+
+        let tool_messages: Vec<String> = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::Tool && message.run_id == Some(run_id))
+            .map(|message| message.content.clone())
+            .collect();
+        assert_eq!(
+            tool_messages,
+            vec![
+                "Tool apply_patch (cancelled-apply-patch) started".to_string(),
+                "Tool apply_patch (cancelled-apply-patch) failed: Run cancellation requested before host tool execution"
+                    .to_string(),
+            ]
+        );
     });
 }
 

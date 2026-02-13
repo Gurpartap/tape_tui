@@ -459,6 +459,54 @@ impl RunProvider for ToolFlowWithStaleProviderEvents {
     }
 }
 
+struct ApplyPatchToolFlowWithStaleProviderEvents;
+
+impl RunProvider for ApplyPatchToolFlowWithStaleProviderEvents {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        let stale_run_id = req.run_id + 10_000;
+
+        emit(RunEvent::Started { run_id: req.run_id });
+
+        let result = execute_tool(ToolCallRequest {
+            call_id: "call-stale-apply-patch".to_string(),
+            tool_name: "apply_patch".to_string(),
+            arguments: json!({
+                "input": "*** Begin Patch\n*** Add File: broken.txt\n+oops"
+            }),
+        });
+
+        if !result.is_error {
+            return Err("expected malformed apply_patch call to return explicit error".to_string());
+        }
+
+        emit(RunEvent::Chunk {
+            run_id: req.run_id,
+            text: format!("apply-patch-scope:{}", tool_result_content_text(&result)),
+        });
+
+        emit(RunEvent::Chunk {
+            run_id: stale_run_id,
+            text: "stale apply_patch provider chunk".to_string(),
+        });
+        emit(RunEvent::Finished {
+            run_id: stale_run_id,
+        });
+        emit(RunEvent::Finished { run_id: req.run_id });
+
+        Ok(())
+    }
+}
+
 struct RuntimeLoopHandle {
     runtime: TUI<NullTerminal>,
     stopped: bool,
@@ -981,6 +1029,98 @@ fn tool_timeline_stays_scoped_to_active_run_when_provider_emits_stale_events() {
                 },
             ]
         );
+    });
+}
+
+#[test]
+fn apply_patch_tool_timeline_stays_scoped_to_active_run_when_provider_emits_stale_events() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(ApplyPatchToolFlowWithStaleProviderEvents);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let run_id = submit_prompt(&app, &mut host, "apply_patch stale scope");
+
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message
+                                .content
+                                .contains("apply-patch-scope:apply_patch parse error")
+                    })
+            },
+        );
+        assert!(settled, "apply_patch+stale run did not settle");
+
+        let app = lock_unpoisoned(&app);
+        let tool_messages: Vec<_> = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+        assert_eq!(tool_messages.len(), 2);
+        assert_eq!(tool_messages[0].run_id, Some(run_id));
+        assert_eq!(
+            tool_messages[0].content,
+            "Tool apply_patch (call-stale-apply-patch) started"
+        );
+        assert_eq!(tool_messages[1].run_id, Some(run_id));
+        assert!(tool_messages[1]
+            .content
+            .contains("Tool apply_patch (call-stale-apply-patch) failed: apply_patch parse error"));
+        assert!(!app
+            .transcript
+            .iter()
+            .any(|message| message.content.contains("stale apply_patch provider chunk")));
+
+        let model_tool_messages: Vec<_> = app
+            .conversation_messages()
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    RunMessage::ToolCall { .. } | RunMessage::ToolResult { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(model_tool_messages.len(), 2);
+        assert_eq!(
+            model_tool_messages[0],
+            RunMessage::ToolCall {
+                call_id: "call-stale-apply-patch".to_string(),
+                tool_name: "apply_patch".to_string(),
+                arguments: json!({
+                    "input": "*** Begin Patch\n*** Add File: broken.txt\n+oops"
+                }),
+            }
+        );
+
+        let RunMessage::ToolResult {
+            call_id,
+            tool_name,
+            content,
+            is_error,
+        } = &model_tool_messages[1]
+        else {
+            panic!("expected tool result message");
+        };
+        assert_eq!(call_id, "call-stale-apply-patch");
+        assert_eq!(tool_name, "apply_patch");
+        assert!(*is_error);
+        let content = content
+            .as_str()
+            .expect("apply_patch stale tool result content should be string");
+        assert!(content.starts_with("apply_patch parse error:"), "{content}");
     });
 }
 
