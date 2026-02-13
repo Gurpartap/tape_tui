@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use agent_provider::{
     CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunProvider, RunRequest,
+    ToolCallRequest, ToolResult,
 };
 use codex_api::{
     normalize_codex_url, CodexApiClient, CodexApiConfig, CodexApiError, CodexRequest,
@@ -110,9 +111,7 @@ impl CodexApiProviderConfig {
         if let Some(base_url) = base_url.as_deref() {
             let endpoint = normalize_codex_url(base_url);
             Url::parse(&endpoint).map_err(|error| {
-                ProviderInitError::new(format!(
-                    "codex-api provider base URL is invalid: {error}"
-                ))
+                ProviderInitError::new(format!("codex-api provider base URL is invalid: {error}"))
             })?;
         }
 
@@ -169,7 +168,8 @@ impl CodexApiProvider {
         let validated = config.validate()?;
         let model_ids = validated.model_ids.clone();
 
-        let client = CodexApiClient::new(validated.into_codex_api_config()).map_err(map_init_error)?;
+        let client =
+            CodexApiClient::new(validated.into_codex_api_config()).map_err(map_init_error)?;
         client.build_headers(None).map_err(map_init_error)?;
 
         let stream_client = Arc::new(DefaultStreamClient { client });
@@ -272,6 +272,7 @@ impl RunProvider for CodexApiProvider {
         &self,
         req: RunRequest,
         cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -420,6 +421,9 @@ mod tests {
                     prompt: "hello".to_string(),
                 },
                 cancel,
+                &mut |_call| {
+                    ToolResult::error("unused", "unused", "not used in codex adapter tests")
+                },
                 &mut |event| events.push(event),
             )
             .expect("run should not return provider-level failure");
@@ -476,7 +480,10 @@ mod tests {
         let events = run_events(&provider);
 
         assert_eq!(stream.observed_model().as_deref(), Some("gpt-5.1-codex"));
-        assert!(matches!(events.first(), Some(RunEvent::Started { run_id: 9 })));
+        assert!(matches!(
+            events.first(),
+            Some(RunEvent::Started { run_id: 9 })
+        ));
         assert!(events
             .iter()
             .any(|event| matches!(event, RunEvent::Chunk { text, .. } if text == "Hello")));
@@ -499,7 +506,10 @@ mod tests {
 
         let events = run_events(&provider);
 
-        assert!(matches!(events.first(), Some(RunEvent::Started { run_id: 9 })));
+        assert!(matches!(
+            events.first(),
+            Some(RunEvent::Started { run_id: 9 })
+        ));
         assert!(matches!(
             events.last(),
             Some(RunEvent::Cancelled { run_id: 9 })
@@ -516,7 +526,10 @@ mod tests {
 
         let events = run_events(&provider);
 
-        assert!(matches!(events.first(), Some(RunEvent::Started { run_id: 9 })));
+        assert!(matches!(
+            events.first(),
+            Some(RunEvent::Started { run_id: 9 })
+        ));
         assert!(matches!(
             events.last(),
             Some(RunEvent::Failed { run_id: 9, error }) if error.contains("boom")
@@ -536,7 +549,10 @@ mod tests {
 
         let events = run_events(&provider);
 
-        assert!(matches!(events.first(), Some(RunEvent::Started { run_id: 9 })));
+        assert!(matches!(
+            events.first(),
+            Some(RunEvent::Started { run_id: 9 })
+        ));
         assert!(matches!(
             events.last(),
             Some(RunEvent::Failed { run_id: 9, error }) if error.contains("in_progress")

@@ -9,7 +9,9 @@ use tape_tui::runtime::tui::{
 };
 
 use crate::app::{App, HostOps, Mode, RunId};
-use crate::provider::{ProviderProfile, RunEvent, RunProvider, RunRequest};
+use crate::provider::{
+    ProviderProfile, RunEvent, RunProvider, RunRequest, ToolCallRequest, ToolResult,
+};
 
 struct ActiveRun {
     run_id: RunId,
@@ -103,8 +105,15 @@ impl RuntimeController {
 
             controller.enqueue_run_event(event);
         };
+        let mut execute_tool = |call: ToolCallRequest| {
+            ToolResult::error(
+                call.call_id,
+                call.tool_name,
+                "Host tool dispatch is unavailable in this runtime configuration",
+            )
+        };
         let run_outcome = catch_unwind(AssertUnwindSafe(|| {
-            provider.run(request, Arc::clone(&cancel), &mut emit)
+            provider.run(request, Arc::clone(&cancel), &mut execute_tool, &mut emit)
         }));
 
         match run_outcome {

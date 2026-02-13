@@ -5,7 +5,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role, RunId};
-use coding_agent::provider::{CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest};
+use coding_agent::provider::{
+    CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest, ToolCallRequest, ToolResult,
+};
 use coding_agent::runtime::RuntimeController;
 use tape_tui::{Terminal, TUI};
 
@@ -58,6 +60,7 @@ impl RunProvider for BlockingCancelProvider {
         &self,
         req: RunRequest,
         cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -89,6 +92,7 @@ impl RunProvider for RacingCancelProvider {
         &self,
         req: RunRequest,
         cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -125,6 +129,7 @@ impl RunProvider for FlushFallbackProvider {
         &self,
         req: RunRequest,
         _cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;

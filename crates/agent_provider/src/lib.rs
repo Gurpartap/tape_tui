@@ -1,11 +1,13 @@
 //! Minimal provider-agnostic contract for executing a single model run.
 //!
-//! This crate intentionally defines only shared run lifecycle types.
-//! It excludes provider transport details, protocol payloads, tool-calling
-//! contracts, and multi-run orchestration concerns.
+//! This crate intentionally defines only shared run lifecycle and host-mediated
+//! tool-calling contract types. It excludes provider transport details,
+//! protocol payloads, and multi-run orchestration concerns.
 
 use std::fmt;
 use std::sync::{atomic::AtomicBool, Arc};
+
+use serde_json::Value;
 
 /// Identifier for one provider run.
 pub type RunId = u64;
@@ -62,6 +64,63 @@ pub struct RunRequest {
     pub prompt: String,
 }
 
+/// Generic host-mediated tool definition exposed by a provider.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
+
+/// Provider request envelope for one host tool call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCallRequest {
+    pub call_id: String,
+    pub tool_name: String,
+    pub arguments: Value,
+}
+
+/// Host tool call result returned back to providers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolResult {
+    pub call_id: String,
+    pub tool_name: String,
+    pub is_error: bool,
+    pub content: Value,
+}
+
+impl ToolResult {
+    /// Constructs a successful tool result.
+    #[must_use]
+    pub fn success(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<Value>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            is_error: false,
+            content: content.into(),
+        }
+    }
+
+    /// Constructs a tool error result.
+    #[must_use]
+    pub fn error(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<Value>,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            is_error: true,
+            content: content.into(),
+        }
+    }
+}
+
 /// Provider-emitted lifecycle event for a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunEvent {
@@ -108,6 +167,11 @@ pub trait RunProvider: Send + Sync + 'static {
     /// Returns provider/model identity metadata.
     fn profile(&self) -> ProviderProfile;
 
+    /// Returns provider-specific host-mediated tool definitions available during runs.
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        Vec::new()
+    }
+
     /// Cycles to the next model selection for future runs.
     ///
     /// Providers may return an error when model cycling is unsupported.
@@ -123,18 +187,25 @@ pub trait RunProvider: Send + Sync + 'static {
     }
 
     /// Executes a run request and emits lifecycle events in provider order.
+    ///
+    /// Providers can synchronously request host tool execution through `execute_tool`.
+    /// The callback is deterministic and serial from the caller perspective.
     fn run(
         &self,
         req: RunRequest,
         cancel: CancelSignal,
+        execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String>;
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{
         CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunProvider, RunRequest,
+        ToolCallRequest, ToolDefinition, ToolResult,
     };
 
     struct MinimalProvider;
@@ -152,6 +223,7 @@ mod tests {
             &self,
             req: RunRequest,
             _cancel: CancelSignal,
+            _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
             emit: &mut dyn FnMut(RunEvent),
         ) -> Result<(), String> {
             emit(RunEvent::Started { run_id: req.run_id });
@@ -204,6 +276,62 @@ mod tests {
         let error = ProviderInitError::new("missing token");
         assert_eq!(error.message(), "missing token");
         assert_eq!(error.to_string(), "missing token");
+    }
+
+    #[test]
+    fn default_tool_definitions_are_empty() {
+        let provider = MinimalProvider;
+        assert!(provider.tool_definitions().is_empty());
+    }
+
+    #[test]
+    fn tool_result_constructors_set_error_flag_and_content() {
+        let success = ToolResult::success("call-1", "bash", json!({"output": "ok"}));
+        assert_eq!(
+            success,
+            ToolResult {
+                call_id: "call-1".to_string(),
+                tool_name: "bash".to_string(),
+                is_error: false,
+                content: json!({"output": "ok"}),
+            }
+        );
+
+        let error = ToolResult::error("call-2", "read", "missing file");
+        assert_eq!(
+            error,
+            ToolResult {
+                call_id: "call-2".to_string(),
+                tool_name: "read".to_string(),
+                is_error: true,
+                content: json!("missing file"),
+            }
+        );
+    }
+
+    #[test]
+    fn tool_definition_and_call_request_are_provider_neutral_json_envelopes() {
+        let definition = ToolDefinition {
+            name: "read".to_string(),
+            description: Some("Reads UTF-8 text from a path".to_string()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                },
+                "required": ["path"]
+            }),
+        };
+
+        let call = ToolCallRequest {
+            call_id: "call-42".to_string(),
+            tool_name: definition.name.clone(),
+            arguments: json!({ "path": "README.md" }),
+        };
+
+        assert_eq!(definition.name, "read");
+        assert_eq!(call.call_id, "call-42");
+        assert_eq!(call.arguments["path"], "README.md");
     }
 
     #[test]

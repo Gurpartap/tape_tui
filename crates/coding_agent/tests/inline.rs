@@ -4,7 +4,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use coding_agent::app::{App, Mode, Role};
-use coding_agent::provider::{CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest};
+use coding_agent::provider::{
+    CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest, ToolCallRequest, ToolResult,
+};
 use coding_agent::providers::MockProvider;
 use coding_agent::runtime::RuntimeController;
 use coding_agent::tui::AppComponent;
@@ -32,6 +34,7 @@ impl RunProvider for BlockingProvider {
         &self,
         req: RunRequest,
         cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -63,6 +66,7 @@ impl RunProvider for OrderedChunkProvider {
         &self,
         req: RunRequest,
         _cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;

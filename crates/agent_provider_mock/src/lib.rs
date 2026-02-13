@@ -8,7 +8,9 @@ use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
-use agent_provider::{CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest};
+use agent_provider::{
+    CancelSignal, ProviderProfile, RunEvent, RunProvider, RunRequest, ToolCallRequest, ToolResult,
+};
 
 /// Stable provider identifier used for explicit startup selection.
 pub const MOCK_PROVIDER_ID: &str = "mock";
@@ -150,6 +152,7 @@ impl RunProvider for MockProvider {
         &self,
         req: RunRequest,
         cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
         emit: &mut dyn FnMut(RunEvent),
     ) -> Result<(), String> {
         let run_id = req.run_id;
@@ -265,6 +268,7 @@ mod tests {
                     prompt: "test".to_string(),
                 },
                 cancel,
+                &mut |_call| ToolResult::error("unused", "unused", "not used in mock tests"),
                 &mut |event| events.push(event),
             )
             .expect("mock run should succeed");

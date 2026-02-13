@@ -2,4 +2,5 @@
 
 pub use agent_provider::{
     CancelSignal, ProviderInitError, ProviderProfile, RunEvent, RunProvider, RunRequest,
+    ToolCallRequest, ToolDefinition, ToolResult,
 };
