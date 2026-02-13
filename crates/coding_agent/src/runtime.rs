@@ -9,7 +9,7 @@ use tape_tui::runtime::tui::{
 };
 
 use crate::app::{App, HostOps, Mode, RunId};
-use crate::provider::{RunEvent, RunProvider, RunRequest};
+use crate::provider::{ProviderProfile, RunEvent, RunProvider, RunRequest};
 
 struct ActiveRun {
     run_id: RunId,
@@ -234,6 +234,14 @@ impl RuntimeController {
                 active_run.cancel.store(true, Ordering::SeqCst);
             }
         }
+    }
+
+    pub fn cycle_model_profile(&self) -> Result<ProviderProfile, String> {
+        self.provider.cycle_model()
+    }
+
+    pub fn cycle_thinking_profile(&self) -> Result<ProviderProfile, String> {
+        self.provider.cycle_thinking_level()
     }
 
     fn lock_active_run(&self) -> MutexGuard<'_, Option<ActiveRun>> {

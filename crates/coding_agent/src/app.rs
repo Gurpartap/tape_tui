@@ -162,6 +162,11 @@ impl App {
         }
     }
 
+    /// Appends a system message to transcript without mutating control state.
+    pub fn push_system_message(&mut self, content: impl Into<String>) {
+        self.push_system(content.into());
+    }
+
     pub fn on_submit(&mut self, host: &mut dyn HostOps) {
         let submitted = std::mem::take(&mut self.input);
         let prompt = submitted.trim().to_string();

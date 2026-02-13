@@ -198,6 +198,54 @@ impl AppComponent {
         self.is_applying_history.store(true, Ordering::SeqCst);
         self.editor.set_text(text);
     }
+
+    fn cycle_model_shortcut(&mut self) {
+        match self.host.cycle_model_profile() {
+            Ok(profile) => {
+                let model = profile.model_id.trim();
+                let model = if model.is_empty() { "unknown" } else { model };
+                let message = format!("Switched model to {model}");
+                self.provider_profile = profile;
+                self.with_app_mut(|app, host| {
+                    app.push_system_message(message.clone());
+                    host.request_render();
+                });
+            }
+            Err(error) => {
+                let message = format!("Model switch failed: {error}");
+                self.with_app_mut(|app, host| {
+                    app.push_system_message(message.clone());
+                    host.request_render();
+                });
+            }
+        }
+    }
+
+    fn cycle_thinking_shortcut(&mut self) {
+        match self.host.cycle_thinking_profile() {
+            Ok(profile) => {
+                let thinking = profile
+                    .thinking_level
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("none");
+                let message = format!("Switched thinking mode to {thinking}");
+                self.provider_profile = profile;
+                self.with_app_mut(|app, host| {
+                    app.push_system_message(message.clone());
+                    host.request_render();
+                });
+            }
+            Err(error) => {
+                let message = format!("Thinking mode switch failed: {error}");
+                self.with_app_mut(|app, host| {
+                    app.push_system_message(message.clone());
+                    host.request_render();
+                });
+            }
+        }
+    }
 }
 
 impl Component for AppComponent {
@@ -272,6 +320,12 @@ impl Component for AppComponent {
                     if let Some(next_input) = next_input {
                         self.set_editor_text_with_history_bypass(&next_input);
                     }
+                }
+                "ctrl+p" => {
+                    self.cycle_model_shortcut();
+                }
+                "ctrl+t" => {
+                    self.cycle_thinking_shortcut();
                 }
                 "shift+tab" => {
                     self.view_mode = self.view_mode.next();
