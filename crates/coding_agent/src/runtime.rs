@@ -17,6 +17,13 @@ struct ActiveRun {
     join_handle: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileSwitchResult {
+    Updated(ProviderProfile),
+    RejectedWhileRunning,
+    Failed(String),
+}
+
 pub struct RuntimeController {
     app: Arc<Mutex<App>>,
     runtime_handle: RuntimeHandle,
@@ -236,12 +243,28 @@ impl RuntimeController {
         }
     }
 
-    pub fn cycle_model_profile(&self) -> Result<ProviderProfile, String> {
-        self.provider.cycle_model()
+    pub fn cycle_model_profile(&self) -> ProfileSwitchResult {
+        let active_run = self.lock_active_run();
+        if active_run.is_some() {
+            return ProfileSwitchResult::RejectedWhileRunning;
+        }
+
+        match self.provider.cycle_model() {
+            Ok(profile) => ProfileSwitchResult::Updated(profile),
+            Err(error) => ProfileSwitchResult::Failed(error),
+        }
     }
 
-    pub fn cycle_thinking_profile(&self) -> Result<ProviderProfile, String> {
-        self.provider.cycle_thinking_level()
+    pub fn cycle_thinking_profile(&self) -> ProfileSwitchResult {
+        let active_run = self.lock_active_run();
+        if active_run.is_some() {
+            return ProfileSwitchResult::RejectedWhileRunning;
+        }
+
+        match self.provider.cycle_thinking_level() {
+            Ok(profile) => ProfileSwitchResult::Updated(profile),
+            Err(error) => ProfileSwitchResult::Failed(error),
+        }
     }
 
     fn lock_active_run(&self) -> MutexGuard<'_, Option<ActiveRun>> {

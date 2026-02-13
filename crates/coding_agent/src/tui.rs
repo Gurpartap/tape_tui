@@ -14,7 +14,7 @@ use tape_tui::{
 
 use crate::app::{App, HostOps, Message, Mode, Role};
 use crate::provider::ProviderProfile;
-use crate::runtime::RuntimeController;
+use crate::runtime::{ProfileSwitchResult, RuntimeController};
 
 struct HistoryUpdateGuard(Arc<AtomicBool>);
 
@@ -200,51 +200,52 @@ impl AppComponent {
     }
 
     fn cycle_model_shortcut(&mut self) {
-        match self.host.cycle_model_profile() {
-            Ok(profile) => {
+        let message = match self.host.cycle_model_profile() {
+            ProfileSwitchResult::Updated(profile) => {
                 let model = profile.model_id.trim();
-                let model = if model.is_empty() { "unknown" } else { model };
-                let message = format!("Switched model to {model}");
+                let model = if model.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    model.to_string()
+                };
                 self.provider_profile = profile;
-                self.with_app_mut(|app, host| {
-                    app.push_system_message(message.clone());
-                    host.request_render();
-                });
+                format!("Switched model to {model}")
             }
-            Err(error) => {
-                let message = format!("Model switch failed: {error}");
-                self.with_app_mut(|app, host| {
-                    app.push_system_message(message.clone());
-                    host.request_render();
-                });
+            ProfileSwitchResult::RejectedWhileRunning => {
+                "Cannot switch model while a run is active".to_string()
             }
-        }
+            ProfileSwitchResult::Failed(error) => format!("Model switch failed: {error}"),
+        };
+
+        self.with_app_mut(|app, host| {
+            app.push_system_message(message.as_str());
+            host.request_render();
+        });
     }
 
     fn cycle_thinking_shortcut(&mut self) {
-        match self.host.cycle_thinking_profile() {
-            Ok(profile) => {
+        let message = match self.host.cycle_thinking_profile() {
+            ProfileSwitchResult::Updated(profile) => {
                 let thinking = profile
                     .thinking_level
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .unwrap_or("none");
-                let message = format!("Switched thinking mode to {thinking}");
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "none".to_string());
                 self.provider_profile = profile;
-                self.with_app_mut(|app, host| {
-                    app.push_system_message(message.clone());
-                    host.request_render();
-                });
+                format!("Switched thinking mode to {thinking}")
             }
-            Err(error) => {
-                let message = format!("Thinking mode switch failed: {error}");
-                self.with_app_mut(|app, host| {
-                    app.push_system_message(message.clone());
-                    host.request_render();
-                });
+            ProfileSwitchResult::RejectedWhileRunning => {
+                "Cannot switch thinking mode while a run is active".to_string()
             }
-        }
+            ProfileSwitchResult::Failed(error) => format!("Thinking mode switch failed: {error}"),
+        };
+
+        self.with_app_mut(|app, host| {
+            app.push_system_message(message.as_str());
+            host.request_render();
+        });
     }
 }
 
