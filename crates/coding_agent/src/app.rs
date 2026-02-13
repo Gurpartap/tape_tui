@@ -326,6 +326,42 @@ impl App {
         }
     }
 
+    pub fn on_tool_call_started(&mut self, run_id: RunId, call_id: &str, tool_name: &str) {
+        if !self.should_apply_run_event(run_id) {
+            return;
+        }
+
+        self.push_tool(
+            run_id,
+            format!("Tool {tool_name} ({call_id}) started"),
+        );
+    }
+
+    pub fn on_tool_call_finished(
+        &mut self,
+        run_id: RunId,
+        tool_name: &str,
+        call_id: &str,
+        is_error: bool,
+        content: &str,
+    ) {
+        if !self.should_apply_run_event(run_id) {
+            return;
+        }
+
+        let mut message = format!(
+            "Tool {tool_name} ({call_id}) {}",
+            if is_error { "failed" } else { "completed" }
+        );
+
+        if is_error && !content.is_empty() {
+            message.push_str(": ");
+            message.push_str(content);
+        }
+
+        self.push_tool(run_id, message);
+    }
+
     pub fn on_run_finished(&mut self, run_id: RunId) {
         if !self.should_apply_run_event(run_id) {
             return;
@@ -433,6 +469,15 @@ impl App {
         self.finalize_stream(run_id);
     }
 
+    fn push_tool(&mut self, run_id: RunId, content: String) {
+        self.transcript.push(Message {
+            role: Role::Tool,
+            content,
+            streaming: false,
+            run_id: Some(run_id),
+        });
+    }
+
     fn push_system(&mut self, content: String) {
         self.transcript.push(Message {
             role: Role::System,
@@ -512,6 +557,31 @@ mod tests {
                 .count(),
             assistant_count_before
         );
+    }
+
+    #[test]
+    fn tool_timeline_messages_are_scoped_to_active_run() {
+        let mut app = App::new();
+        app.mode = Mode::Running { run_id: 9 };
+
+        app.on_tool_call_started(9, "call-1", "read");
+        app.on_tool_call_finished(9, "read", "call-1", true, "missing file");
+        app.on_tool_call_started(999, "stale", "bash");
+
+        let tool_messages: Vec<_> = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+
+        assert_eq!(tool_messages.len(), 2);
+        assert_eq!(tool_messages[0].content, "Tool read (call-1) started");
+        assert_eq!(
+            tool_messages[1].content,
+            "Tool read (call-1) failed: missing file"
+        );
+        assert_eq!(tool_messages[0].run_id, Some(9));
+        assert_eq!(tool_messages[1].run_id, Some(9));
     }
 
     #[test]

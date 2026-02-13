@@ -113,6 +113,7 @@ version = "0.1.0"
 dependencies = [
  "agent_provider",
  "agent_provider_mock",
+ "serde_json",
  "tape_tui",
  "tempfile",
  "wait-timeout",
