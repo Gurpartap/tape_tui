@@ -528,6 +528,23 @@ fn cancellation_during_tool_execution_remains_idempotent() {
         };
         assert_eq!(cancelled_count_after_settle, 1);
 
+        let tool_messages_after_settle: Vec<String> = {
+            let app = lock_unpoisoned(&app);
+            app.transcript
+                .iter()
+                .filter(|message| message.role == Role::Tool && message.run_id == Some(run_id))
+                .map(|message| message.content.clone())
+                .collect()
+        };
+        assert_eq!(
+            tool_messages_after_settle,
+            vec![
+                "Tool bash (slow-tool) started".to_string(),
+                "Tool bash (slow-tool) failed: Run cancellation requested during host tool execution"
+                    .to_string(),
+            ]
+        );
+
         {
             let mut app = lock_unpoisoned(&app);
             app.on_cancel(&mut host);

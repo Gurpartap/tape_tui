@@ -273,6 +273,48 @@ impl RunProvider for ExecutionFailureToolProvider {
     }
 }
 
+struct ToolFlowWithStaleProviderEvents;
+
+impl RunProvider for ToolFlowWithStaleProviderEvents {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        let stale_run_id = req.run_id + 10_000;
+
+        emit(RunEvent::Started { run_id: req.run_id });
+
+        let result = execute_tool(ToolCallRequest {
+            call_id: "call-stale-scope".to_string(),
+            tool_name: "not-a-tool".to_string(),
+            arguments: json!({}),
+        });
+
+        emit(RunEvent::Chunk {
+            run_id: req.run_id,
+            text: format!("tool-scope:{}", tool_result_content_text(&result)),
+        });
+
+        emit(RunEvent::Chunk {
+            run_id: stale_run_id,
+            text: "stale provider chunk".to_string(),
+        });
+        emit(RunEvent::Finished {
+            run_id: stale_run_id,
+        });
+        emit(RunEvent::Finished { run_id: req.run_id });
+
+        Ok(())
+    }
+}
+
 struct RuntimeLoopHandle {
     runtime: TUI<NullTerminal>,
     stopped: bool,
@@ -571,6 +613,53 @@ fn stale_run_events_are_ignored_and_do_not_corrupt_active_run_output() {
             .iter()
             .any(|message| message.content.contains("stale-before")
                 || message.content.contains("stale-after")));
+    });
+}
+
+#[test]
+fn tool_timeline_stays_scoped_to_active_run_when_provider_emits_stale_events() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(ToolFlowWithStaleProviderEvents);
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let run_id = submit_prompt(&app, &mut host, "tool stale scope");
+
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content.contains("tool-scope:Unknown host tool")
+                    })
+            },
+        );
+        assert!(settled, "tool+stale run did not settle");
+
+        let app = lock_unpoisoned(&app);
+        let tool_messages: Vec<_> = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+        assert_eq!(tool_messages.len(), 2);
+        assert_eq!(tool_messages[0].run_id, Some(run_id));
+        assert_eq!(tool_messages[0].content, "Tool not-a-tool (call-stale-scope) started");
+        assert_eq!(tool_messages[1].run_id, Some(run_id));
+        assert!(tool_messages[1]
+            .content
+            .contains("Tool not-a-tool (call-stale-scope) failed: Unknown host tool"));
+        assert!(!app
+            .transcript
+            .iter()
+            .any(|message| message.content.contains("stale provider chunk")));
     });
 }
 

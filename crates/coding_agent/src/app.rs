@@ -585,6 +585,29 @@ mod tests {
     }
 
     #[test]
+    fn tool_timeline_messages_ignore_stale_run_while_cancelling() {
+        let mut app = App::new();
+        app.mode = Mode::Idle;
+        app.cancelling_run = Some(14);
+
+        app.on_tool_call_started(99, "stale-start", "write");
+        app.on_tool_call_started(14, "call-2", "bash");
+        app.on_tool_call_finished(99, "write", "stale-finish", true, "stale");
+        app.on_tool_call_finished(14, "bash", "call-2", false, "ignored success content");
+
+        let tool_messages: Vec<_> = app
+            .transcript
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .collect();
+
+        assert_eq!(tool_messages.len(), 2);
+        assert_eq!(tool_messages[0].content, "Tool bash (call-2) started");
+        assert_eq!(tool_messages[1].content, "Tool bash (call-2) completed");
+        assert!(tool_messages.iter().all(|message| message.run_id == Some(14)));
+    }
+
+    #[test]
     fn input_history_up_down_recall() {
         let mut app = App::new();
         app.history.entries.push("first command".to_string());
