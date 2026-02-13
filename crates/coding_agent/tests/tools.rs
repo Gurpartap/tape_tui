@@ -236,11 +236,15 @@ fn apply_patch_context_mismatch_is_non_mutating_even_with_prior_valid_hunks() {
             .to_string(),
     });
 
+    let canonical_file_path = file_path.canonicalize().expect("canonical context path");
+
     assert!(!result.ok);
-    assert!(
-        result.content.contains("apply_patch context mismatch"),
-        "{}",
-        result.content
+    assert_eq!(
+        result.content,
+        format!(
+            "apply_patch context mismatch: Failed to find expected lines in {}:\nmissing-line",
+            canonical_file_path.display()
+        )
     );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read context file"),
@@ -285,6 +289,72 @@ fn apply_patch_preserves_move_then_follow_up_update_order() {
     assert_eq!(
         fs::read_to_string(&destination_path).expect("read moved file"),
         "done\n"
+    );
+}
+
+#[test]
+fn apply_patch_success_summary_is_deterministic_and_workspace_relative() {
+    let workspace = tempdir().expect("temp workspace");
+    let modified_path = workspace.path().join("modified.txt");
+    let deleted_path = workspace.path().join("deleted.txt");
+    fs::write(&modified_path, "before\n").expect("seed modified file");
+    fs::write(&deleted_path, "obsolete\n").expect("seed deleted file");
+
+    let mut executor = new_executor(workspace.path());
+    let result = executor.execute(ToolCall::ApplyPatch {
+        input: "*** Begin Patch\n*** Add File: zeta.txt\n+zeta\n*** Update File: modified.txt\n@@\n-before\n+after\n*** Add File: alpha.txt\n+alpha\n*** Delete File: deleted.txt\n*** End Patch"
+            .to_string(),
+    });
+
+    assert!(result.ok, "{}", result.content);
+    assert_eq!(
+        result.content,
+        "Success. Updated the following files:\nA alpha.txt\nA zeta.txt\nM modified.txt\nD deleted.txt"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("alpha.txt")).expect("read alpha"),
+        "alpha\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("zeta.txt")).expect("read zeta"),
+        "zeta\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&modified_path).expect("read modified"),
+        "after\n"
+    );
+    assert!(!deleted_path.exists());
+}
+
+#[test]
+fn apply_patch_second_identical_application_fails_deterministically() {
+    let workspace = tempdir().expect("temp workspace");
+    let file_path = workspace.path().join("repeat.txt");
+    fs::write(&file_path, "before\n").expect("seed repeat file");
+
+    let patch = "*** Begin Patch\n*** Update File: repeat.txt\n@@\n-before\n+after\n*** End Patch"
+        .to_string();
+
+    let mut executor = new_executor(workspace.path());
+    let first = executor.execute(ToolCall::ApplyPatch {
+        input: patch.clone(),
+    });
+    assert!(first.ok, "{}", first.content);
+
+    let second = executor.execute(ToolCall::ApplyPatch { input: patch });
+    let canonical_file_path = file_path.canonicalize().expect("canonical repeat path");
+
+    assert!(!second.ok);
+    assert_eq!(
+        second.content,
+        format!(
+            "apply_patch context mismatch: Failed to find expected lines in {}:\nbefore",
+            canonical_file_path.display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read repeat file"),
+        "after\n"
     );
 }
 
