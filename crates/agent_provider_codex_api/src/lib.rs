@@ -8,6 +8,7 @@
 //! (`bash`, `read`, `edit`, `write`, `apply_patch`), with explicit failure/cancel outcomes for
 //! malformed payloads or non-complete terminal statuses.
 
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -30,6 +31,7 @@ pub const CODEX_API_PROVIDER_ID: &str = "codex-api";
 const V1_TOOL_NAMES: [&str; 5] = ["bash", "read", "edit", "write", "apply_patch"];
 const THINKING_LEVELS_BASELINE: [&str; 5] = ["off", "minimal", "low", "medium", "high"];
 const THINKING_LEVELS_WITH_XHIGH: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT: &str = "No result provided";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SelectionState {
@@ -281,9 +283,10 @@ impl CodexApiProvider {
         messages: &[RunMessage],
         instructions: &str,
     ) -> Result<CodexRequest, String> {
+        let normalized_messages = normalize_run_messages_for_codex(messages.to_vec())?;
         let mut request = CodexRequest::new(
             model_id.to_owned(),
-            Value::Array(codex_input_from_run_messages(messages)?),
+            Value::Array(codex_input_from_run_messages(&normalized_messages)?),
             Some(instructions.to_string()),
         );
         request.reasoning = thinking_reasoning_payload(thinking_level);
@@ -642,6 +645,111 @@ fn codex_tool_payloads() -> Vec<Value> {
         .collect()
 }
 
+fn normalize_run_messages_for_codex(messages: Vec<RunMessage>) -> Result<Vec<RunMessage>, String> {
+    let mut normalized = Vec::with_capacity(messages.len());
+    let mut unresolved_tool_calls: Vec<(String, String)> = Vec::new();
+    let mut unresolved_call_ids = HashSet::new();
+
+    for message in messages {
+        match message {
+            RunMessage::UserText { text } => {
+                validate_nonempty_user_text(&text)?;
+                flush_unresolved_tool_calls(
+                    &mut normalized,
+                    &mut unresolved_tool_calls,
+                    &mut unresolved_call_ids,
+                );
+                normalized.push(RunMessage::UserText { text });
+            }
+            RunMessage::AssistantText { text } => {
+                validate_nonempty_assistant_text(&text)?;
+                flush_unresolved_tool_calls(
+                    &mut normalized,
+                    &mut unresolved_tool_calls,
+                    &mut unresolved_call_ids,
+                );
+                normalized.push(RunMessage::AssistantText { text });
+            }
+            RunMessage::ToolCall {
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                let call_id = sanitize_nonempty_field(&call_id, "tool call call_id")?;
+                let tool_name = sanitize_nonempty_field(&tool_name, "tool call tool_name")?;
+                let _arguments_json = encode_tool_call_arguments(&tool_name, &arguments)?;
+
+                if unresolved_call_ids.contains(call_id.as_str()) {
+                    return Err(duplicate_unresolved_tool_call_id_error(call_id.as_str()));
+                }
+
+                unresolved_call_ids.insert(call_id.clone());
+                unresolved_tool_calls.push((call_id.clone(), tool_name.clone()));
+                normalized.push(RunMessage::ToolCall {
+                    call_id,
+                    tool_name,
+                    arguments,
+                });
+            }
+            RunMessage::ToolResult {
+                call_id,
+                tool_name,
+                content,
+                is_error,
+            } => {
+                let call_id = sanitize_nonempty_field(&call_id, "tool result call_id")?;
+                let tool_name = sanitize_nonempty_field(&tool_name, "tool result tool_name")?;
+
+                unresolved_call_ids.remove(call_id.as_str());
+                if let Some(position) = unresolved_tool_calls
+                    .iter()
+                    .position(|(pending_call_id, _)| pending_call_id == &call_id)
+                {
+                    unresolved_tool_calls.remove(position);
+                }
+
+                normalized.push(RunMessage::ToolResult {
+                    call_id,
+                    tool_name,
+                    content,
+                    is_error,
+                });
+            }
+        }
+    }
+
+    flush_unresolved_tool_calls(
+        &mut normalized,
+        &mut unresolved_tool_calls,
+        &mut unresolved_call_ids,
+    );
+
+    Ok(normalized)
+}
+
+fn flush_unresolved_tool_calls(
+    normalized: &mut Vec<RunMessage>,
+    unresolved_tool_calls: &mut Vec<(String, String)>,
+    unresolved_call_ids: &mut HashSet<String>,
+) {
+    for (call_id, tool_name) in unresolved_tool_calls.drain(..) {
+        normalized.push(RunMessage::ToolResult {
+            call_id,
+            tool_name,
+            content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+            is_error: true,
+        });
+    }
+
+    unresolved_call_ids.clear();
+}
+
+fn duplicate_unresolved_tool_call_id_error(call_id: &str) -> String {
+    format!(
+        "codex-api provider cannot normalize run history: duplicate unresolved tool call id '{call_id}'"
+    )
+}
+
 fn codex_input_from_run_messages(messages: &[RunMessage]) -> Result<Vec<Value>, String> {
     let mut input = Vec::with_capacity(messages.len());
     let mut assistant_message_index = 0usize;
@@ -694,12 +802,29 @@ fn codex_input_from_run_messages(messages: &[RunMessage]) -> Result<Vec<Value>, 
     Ok(input)
 }
 
-fn codex_user_text_message(text: &str) -> Result<Value, String> {
+fn validate_nonempty_user_text(text: &str) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err(
             "codex-api provider requires non-empty user text messages in run history".to_string(),
         );
     }
+
+    Ok(())
+}
+
+fn validate_nonempty_assistant_text(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err(
+            "codex-api provider requires non-empty assistant text messages in run history"
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
+fn codex_user_text_message(text: &str) -> Result<Value, String> {
+    validate_nonempty_user_text(text)?;
 
     Ok(json!({
         "role": "user",
@@ -713,12 +838,7 @@ fn codex_user_text_message(text: &str) -> Result<Value, String> {
 }
 
 fn codex_assistant_output_message(text: &str, message_index: usize) -> Result<Value, String> {
-    if text.trim().is_empty() {
-        return Err(
-            "codex-api provider requires non-empty assistant text messages in run history"
-                .to_string(),
-        );
-    }
+    validate_nonempty_assistant_text(text)?;
 
     Ok(json!({
         "type": "message",
@@ -1057,6 +1177,227 @@ mod tests {
             request.parallel_tool_calls,
             "request must force parallel_tool_calls=true"
         );
+    }
+
+    #[test]
+    fn normalize_run_messages_backfills_orphan_tool_call_before_assistant_boundary() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::AssistantText {
+                text: "turn-1 assistant".to_string(),
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+                RunMessage::AssistantText {
+                    text: "turn-1 assistant".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_backfills_orphan_tool_call_at_end_of_history() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(
+            normalized,
+            vec![
+                RunMessage::UserText {
+                    text: "turn-1 user".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    arguments: json!({ "path": "README.md" }),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call_1".to_string(),
+                    tool_name: "read".to_string(),
+                    content: Value::String(SYNTHETIC_ORPHAN_TOOL_RESULT_CONTENT.to_string()),
+                    is_error: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_run_messages_preserves_real_tool_result_without_synthetic_backfill() {
+        let normalized = normalize_run_messages_for_codex(vec![
+            RunMessage::UserText {
+                text: "turn-1 user".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call_1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "call_1".to_string(),
+                tool_name: "read".to_string(),
+                content: json!("file contents"),
+                is_error: false,
+            },
+            RunMessage::AssistantText {
+                text: "turn-1 assistant".to_string(),
+            },
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(normalized.len(), 4);
+        assert_eq!(
+            normalized[2],
+            RunMessage::ToolResult {
+                call_id: "call_1".to_string(),
+                tool_name: "read".to_string(),
+                content: json!("file contents"),
+                is_error: false,
+            }
+        );
+    }
+
+    #[test]
+    fn run_initial_request_replays_synthetic_orphan_tool_result_after_normalization() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        provider
+            .run(
+                RunRequest {
+                    run_id: 9,
+                    messages: vec![
+                        RunMessage::UserText {
+                            text: "turn-1 user".to_string(),
+                        },
+                        RunMessage::ToolCall {
+                            call_id: "call_1".to_string(),
+                            tool_name: "read".to_string(),
+                            arguments: json!({ "path": "README.md" }),
+                        },
+                        RunMessage::AssistantText {
+                            text: "turn-1 assistant".to_string(),
+                        },
+                    ],
+                    instructions: "system instructions".to_string(),
+                },
+                cancel,
+                &mut |_call| ToolResult::error("unused", "unused", "unused"),
+                &mut |event| events.push(event),
+            )
+            .expect("run should succeed");
+
+        let requests = stream.observed_requests();
+        assert_eq!(requests.len(), 1);
+        let initial_input = requests[0]
+            .input
+            .as_array()
+            .expect("initial request input should be an array");
+        assert_eq!(initial_input.len(), 4);
+        assert_eq!(initial_input[0]["role"], "user");
+        assert_eq!(initial_input[1]["type"], "function_call");
+        assert_eq!(initial_input[1]["call_id"], "call_1");
+        assert_eq!(initial_input[2]["type"], "function_call_output");
+        assert_eq!(initial_input[2]["call_id"], "call_1");
+        assert_eq!(initial_input[2]["output"], "No result provided");
+        assert_eq!(initial_input[3]["type"], "message");
+        assert_eq!(initial_input[3]["role"], "assistant");
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                RunEvent::Started { run_id: 9 },
+                RunEvent::Finished { run_id: 9 }
+            ]
+        ));
+    }
+
+    #[test]
+    fn run_fails_before_http_on_duplicate_unresolved_tool_call_id_with_exact_error() {
+        let stream = FakeStreamClient::success(StreamResult {
+            events: Vec::new(),
+            terminal: Some(CodexResponseStatus::Completed),
+        });
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        let result = provider.run(
+            RunRequest {
+                run_id: 9,
+                messages: vec![
+                    RunMessage::UserText {
+                        text: "turn-1 user".to_string(),
+                    },
+                    RunMessage::ToolCall {
+                        call_id: "call_1".to_string(),
+                        tool_name: "read".to_string(),
+                        arguments: json!({ "path": "README.md" }),
+                    },
+                    RunMessage::ToolCall {
+                        call_id: "call_1".to_string(),
+                        tool_name: "write".to_string(),
+                        arguments: json!({ "path": "README.md", "content": "file contents" }),
+                    },
+                ],
+                instructions: "system instructions".to_string(),
+            },
+            cancel,
+            &mut |_call| ToolResult::error("unused", "unused", "unused"),
+            &mut |event| events.push(event),
+        );
+
+        let error = result.expect_err("duplicate unresolved call ids should fail fast");
+        assert_eq!(
+            error,
+            "codex-api provider cannot normalize run history: duplicate unresolved tool call id 'call_1'"
+        );
+        assert!(events.is_empty());
+        assert!(stream.observed_requests().is_empty());
     }
 
     #[test]
