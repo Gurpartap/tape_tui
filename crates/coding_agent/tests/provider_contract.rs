@@ -1482,12 +1482,16 @@ fn runtime_replays_interleaved_assistant_and_tool_history_in_exact_order() {
             },
             || {
                 let app = lock_unpoisoned(&app);
-                matches!(app.mode, Mode::Idle)
-                    && app.transcript.iter().any(|message| {
-                        message.role == Role::Assistant
-                            && message.run_id == Some(first_run_id)
-                            && message.content == "prefix suffix"
+                let assistant_segments: Vec<&str> = app
+                    .transcript
+                    .iter()
+                    .filter(|message| {
+                        message.role == Role::Assistant && message.run_id == Some(first_run_id)
                     })
+                    .map(|message| message.content.as_str())
+                    .collect();
+
+                matches!(app.mode, Mode::Idle) && assistant_segments == vec!["prefix ", "suffix"]
             },
         );
         assert!(first_settled, "first tool-memory run did not settle");

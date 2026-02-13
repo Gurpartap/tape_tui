@@ -481,15 +481,19 @@ impl App {
 
         let stream_active = !self.is_cancelling(run_id);
 
-        if let Some(message) = self
-            .transcript
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == Role::Assistant && message.run_id == Some(run_id))
-        {
-            message.content.push_str(chunk);
-            if !stream_active {
-                message.streaming = false;
+        if let Some(last_message) = self.transcript.last_mut() {
+            if last_message.role == Role::Assistant && last_message.run_id == Some(run_id) {
+                last_message.content.push_str(chunk);
+                if !stream_active {
+                    last_message.streaming = false;
+                }
+            } else {
+                self.transcript.push(Message {
+                    role: Role::Assistant,
+                    content: chunk.to_string(),
+                    streaming: stream_active,
+                    run_id: Some(run_id),
+                });
             }
         } else {
             self.transcript.push(Message {
@@ -703,33 +707,43 @@ impl App {
     }
 
     fn finalize_stream(&mut self, run_id: RunId) {
-        let mut first_index = None;
-        let mut merged = String::new();
-
-        for (index, message) in self.transcript.iter().enumerate() {
+        for message in &mut self.transcript {
             if message.role == Role::Assistant && message.run_id == Some(run_id) {
-                if first_index.is_none() {
-                    first_index = Some(index);
-                }
-                merged.push_str(&message.content);
+                message.streaming = false;
             }
         }
 
-        let Some(first_index) = first_index else {
-            return;
-        };
+        let has_non_empty_assistant = self.transcript.iter().any(|message| {
+            message.role == Role::Assistant
+                && message.run_id == Some(run_id)
+                && !message.content.is_empty()
+        });
 
-        self.transcript[first_index].content = merged;
-        self.transcript[first_index].streaming = false;
+        if has_non_empty_assistant {
+            self.transcript.retain(|message| {
+                !(message.role == Role::Assistant
+                    && message.run_id == Some(run_id)
+                    && message.content.is_empty())
+            });
+        }
 
-        let mut index = self.transcript.len();
-        while index > first_index + 1 {
-            index -= 1;
-            if self.transcript[index].role == Role::Assistant
-                && self.transcript[index].run_id == Some(run_id)
-            {
+        let mut index = 1usize;
+        while index < self.transcript.len() {
+            let should_merge = self.transcript[index - 1].role == Role::Assistant
+                && self.transcript[index - 1].run_id == Some(run_id)
+                && self.transcript[index].role == Role::Assistant
+                && self.transcript[index].run_id == Some(run_id);
+
+            if should_merge {
+                let next_content = self.transcript[index].content.clone();
+                self.transcript[index - 1]
+                    .content
+                    .push_str(next_content.as_str());
                 self.transcript.remove(index);
+                continue;
             }
+
+            index += 1;
         }
     }
 
@@ -848,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_stream_merges_assistant_chunks_for_same_run() {
+    fn finalize_stream_preserves_non_adjacent_assistant_segments_for_same_run() {
         let mut app = App::new();
         app.transcript
             .push(assistant_message("first ", true, Some(42)));
@@ -863,21 +877,17 @@ mod tests {
 
         app.finalize_stream(42);
 
-        assert_eq!(app.transcript.len(), 2);
-        assert_eq!(
-            app.transcript
-                .iter()
-                .filter(|message| message.role == Role::Assistant && message.run_id == Some(42))
-                .count(),
-            1
-        );
-        let merged = app
+        assert_eq!(app.transcript.len(), 3);
+        let assistant_messages: Vec<&Message> = app
             .transcript
             .iter()
-            .find(|message| message.role == Role::Assistant && message.run_id == Some(42))
-            .expect("merged assistant message exists");
-        assert_eq!(merged.content, "first second");
-        assert!(!merged.streaming);
+            .filter(|message| message.role == Role::Assistant && message.run_id == Some(42))
+            .collect();
+        assert_eq!(assistant_messages.len(), 2);
+        assert_eq!(assistant_messages[0].content, "first ");
+        assert_eq!(assistant_messages[1].content, "second");
+        assert!(!assistant_messages[0].streaming);
+        assert!(!assistant_messages[1].streaming);
     }
 
     #[test]
@@ -902,6 +912,41 @@ mod tests {
                 .filter(|message| message.role == Role::Assistant && message.run_id == Some(7))
                 .count(),
             assistant_count_before
+        );
+    }
+
+    #[test]
+    fn transcript_preserves_assistant_segments_after_tool_boundaries() {
+        let mut app = App::new();
+        app.mode = Mode::Running { run_id: 9 };
+
+        app.on_run_started(9);
+        app.on_run_chunk(9, "prefix ");
+        app.on_tool_call_started(
+            9,
+            "call-1",
+            "read",
+            &serde_json::json!({ "path": "README.md" }),
+        );
+        app.on_tool_call_finished(9, "read", "call-1", false, &serde_json::json!("ok"), "ok");
+        app.on_run_chunk(9, "suffix");
+        app.on_run_finished(9);
+
+        let ordered: Vec<(Role, String)> = app
+            .transcript
+            .iter()
+            .filter(|message| message.run_id == Some(9))
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect();
+
+        assert_eq!(
+            ordered,
+            vec![
+                (Role::Assistant, "prefix ".to_string()),
+                (Role::Tool, "Tool read (call-1) started".to_string()),
+                (Role::Tool, "Tool read (call-1) completed".to_string()),
+                (Role::Assistant, "suffix".to_string()),
+            ]
         );
     }
 
