@@ -37,6 +37,26 @@
 //!
 //! Codex transport contract: Responses API `input` must be list-shaped JSON.
 //! Plain string `input` payloads are rejected during codex_api request preflight.
+//!
+//! ## Persistent sessions (v1 fail-closed contract)
+//!
+//! `coding_agent` startup creates a new append-only JSONL session under
+//! `<cwd>/.agent/sessions/` and wires that session id into provider bootstrap.
+//! Session durability is strict: the header write and every appended entry are
+//! persisted with `sync_data` before reporting success.
+//!
+//! Failure policy is fail-closed:
+//! - startup session creation/open/parse/validation failures are hard errors;
+//! - runtime append/sync failures are fatal (error mode + stop request + exit);
+//! - no degraded persistence fallback mode is used by the binary startup path.
+//!
+//! Replay is strict and deterministic over graph-valid entries only. Malformed
+//! JSON, unknown fields/kinds, unsupported versions, duplicate ids, dangling
+//! parent ids, and unknown leaf replays are explicit hard errors.
+//!
+//! Deferred scope note for v1: no persistence reset markers are defined yet.
+//! `/clear` and `memory_reset` persistence semantics are intentionally deferred;
+//! `/clear` only affects in-memory state for the running process.
 
 pub mod app;
 pub mod commands;
