@@ -118,6 +118,11 @@ pub struct AppComponent {
     provider_profile: ProviderProfile,
     working_directory_label: String,
     transcript_render_cache: Option<TranscriptRenderCache>,
+    terminal_rows: usize,
+    transcript_scroll_lines: usize,
+    last_transcript_budget_rows: usize,
+    last_rendered_transcript_line_count: usize,
+    last_rendered_transcript_revision: Option<u64>,
     editor: Editor,
     is_applying_history: Arc<AtomicBool>,
     cursor_pos: Option<CursorPos>,
@@ -188,6 +193,11 @@ impl AppComponent {
             provider_profile,
             working_directory_label: render_working_directory(),
             transcript_render_cache: None,
+            terminal_rows: 0,
+            transcript_scroll_lines: 0,
+            last_transcript_budget_rows: 0,
+            last_rendered_transcript_line_count: 0,
+            last_rendered_transcript_revision: None,
             editor,
             is_applying_history,
             cursor_pos: None,
@@ -201,7 +211,7 @@ impl AppComponent {
         f(&mut app, &mut host);
     }
 
-    fn render_transcript_lines_cached(&mut self, width: usize) -> (Arc<Vec<String>>, Mode) {
+    fn render_transcript_lines_cached(&mut self, width: usize) -> (Arc<Vec<String>>, Mode, u64) {
         let (mode, transcript_revision) = {
             let app = lock_unpoisoned(&self.app);
             (app.mode.clone(), app.transcript_revision())
@@ -209,7 +219,7 @@ impl AppComponent {
 
         if let Some(cache) = self.transcript_render_cache.as_ref() {
             if cache.width == width && cache.transcript_revision == transcript_revision {
-                return (Arc::clone(&cache.lines), mode);
+                return (Arc::clone(&cache.lines), mode, transcript_revision);
             }
         }
 
@@ -231,7 +241,7 @@ impl AppComponent {
             lines: Arc::clone(&rendered_lines),
         });
 
-        (rendered_lines, mode)
+        (rendered_lines, mode, transcript_revision)
     }
 
     fn set_editor_text_with_history_bypass(&mut self, text: &str) {
@@ -288,30 +298,129 @@ impl AppComponent {
             host.request_render();
         });
     }
+
+    fn cached_transcript_line_count(&self) -> usize {
+        self.transcript_render_cache
+            .as_ref()
+            .map(|cache| cache.lines.len())
+            .unwrap_or(self.last_rendered_transcript_line_count)
+    }
+
+    fn transcript_scroll_jump_rows(&self) -> usize {
+        self.last_transcript_budget_rows.max(1)
+    }
+
+    fn scroll_transcript_page_up(&mut self) {
+        let total_lines = self.cached_transcript_line_count();
+        self.transcript_scroll_lines = scroll_transcript_page_up(
+            self.transcript_scroll_lines,
+            total_lines,
+            self.transcript_scroll_jump_rows(),
+        );
+    }
+
+    fn scroll_transcript_page_down(&mut self) {
+        let total_lines = self.cached_transcript_line_count();
+        self.transcript_scroll_lines = scroll_transcript_page_down(
+            self.transcript_scroll_lines,
+            total_lines,
+            self.transcript_scroll_jump_rows(),
+        );
+    }
+
+    fn scroll_transcript_home(&mut self) {
+        let total_lines = self.cached_transcript_line_count();
+        self.transcript_scroll_lines = max_transcript_scroll_lines(total_lines);
+    }
+
+    fn scroll_transcript_end(&mut self) {
+        self.transcript_scroll_lines = 0;
+    }
 }
 
 impl Component for AppComponent {
     fn render(&mut self, width: usize) -> Vec<String> {
-        let (transcript_lines, mode) = self.render_transcript_lines_cached(width);
-        let mut lines = Vec::with_capacity(transcript_lines.len().saturating_add(8));
+        let (transcript_lines, mode, transcript_revision) =
+            self.render_transcript_lines_cached(width);
 
-        append_wrapped_text(&mut lines, width, &render_header(), "", "");
-        lines.extend(transcript_lines.iter().cloned());
+        if self
+            .last_rendered_transcript_revision
+            .is_some_and(|last| last != transcript_revision)
+        {
+            self.transcript_scroll_lines = apply_transcript_growth_to_scroll(
+                self.transcript_scroll_lines,
+                self.last_rendered_transcript_line_count,
+                transcript_lines.len(),
+            );
+        }
+        self.transcript_scroll_lines =
+            clamp_transcript_scroll_lines(self.transcript_scroll_lines, transcript_lines.len());
+        self.last_rendered_transcript_revision = Some(transcript_revision);
+        self.last_rendered_transcript_line_count = transcript_lines.len();
 
-        append_wrapped_text(&mut lines, width, &render_status_line(&mode), "", "");
-        let editor_start_row = lines.len();
+        let mut header_lines = Vec::new();
+        append_wrapped_text(&mut header_lines, width, &render_header(), "", "");
+
+        let mut status_lines = Vec::new();
+        append_wrapped_text(&mut status_lines, width, &render_status_line(&mode), "", "");
+
         let mut editor_lines = self.editor.render(width);
         if let Some(editor_border) = editor_lines.get_mut(0) {
             *editor_border = render_mode_line(width, self.view_mode);
         }
-        lines.extend(editor_lines);
+
+        let mut footer_lines = Vec::new();
         append_wrapped_text(
-            &mut lines,
+            &mut footer_lines,
             width,
             &render_status_footer(width, &self.provider_profile, &self.working_directory_label),
             "",
             "",
         );
+
+        let fixed_rows = header_lines
+            .len()
+            .saturating_add(status_lines.len())
+            .saturating_add(editor_lines.len())
+            .saturating_add(footer_lines.len());
+        let transcript_budget_rows = self.terminal_rows.saturating_sub(fixed_rows);
+        self.last_transcript_budget_rows = transcript_budget_rows;
+
+        let transcript_window = compute_transcript_window(
+            transcript_lines.len(),
+            transcript_budget_rows,
+            self.transcript_scroll_lines,
+        );
+
+        let mut lines = Vec::with_capacity(
+            header_lines
+                .len()
+                .saturating_add(transcript_window.rendered_rows())
+                .saturating_add(status_lines.len())
+                .saturating_add(editor_lines.len())
+                .saturating_add(footer_lines.len()),
+        );
+        lines.extend(header_lines);
+
+        if transcript_window.show_indicator {
+            lines.push(render_transcript_indicator_line(
+                width,
+                &format!(
+                    "… {} earlier lines above (PgUp/PgDn/Home/End)",
+                    transcript_window.start
+                ),
+            ));
+        }
+        lines.extend(
+            transcript_lines[transcript_window.start..transcript_window.end]
+                .iter()
+                .cloned(),
+        );
+
+        lines.extend(status_lines);
+        let editor_start_row = lines.len();
+        lines.extend(editor_lines);
+        lines.extend(footer_lines);
 
         self.cursor_pos = self.editor.cursor_pos().map(|position| CursorPos {
             row: position.row + editor_start_row,
@@ -326,6 +435,7 @@ impl Component for AppComponent {
     }
 
     fn set_terminal_rows(&mut self, rows: usize) {
+        self.terminal_rows = rows;
         self.editor.set_terminal_rows(rows);
     }
 
@@ -362,6 +472,26 @@ impl Component for AppComponent {
                 }
                 "shift+tab" => {
                     self.view_mode = self.view_mode.next();
+                    let mut host = Arc::clone(&self.host);
+                    host.request_render();
+                }
+                "pageUp" => {
+                    self.scroll_transcript_page_up();
+                    let mut host = Arc::clone(&self.host);
+                    host.request_render();
+                }
+                "pageDown" => {
+                    self.scroll_transcript_page_down();
+                    let mut host = Arc::clone(&self.host);
+                    host.request_render();
+                }
+                "home" => {
+                    self.scroll_transcript_home();
+                    let mut host = Arc::clone(&self.host);
+                    host.request_render();
+                }
+                "end" => {
+                    self.scroll_transcript_end();
                     let mut host = Arc::clone(&self.host);
                     host.request_render();
                 }
@@ -570,6 +700,111 @@ fn render_mode_line(width: usize, view_mode: ViewMode) -> String {
 fn separator_line(width: usize) -> String {
     let max = width.max(10);
     dim(&"─".repeat(max))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptWindow {
+    start: usize,
+    end: usize,
+    show_indicator: bool,
+}
+
+impl TranscriptWindow {
+    fn rendered_rows(self) -> usize {
+        self.end
+            .saturating_sub(self.start)
+            .saturating_add(usize::from(self.show_indicator))
+    }
+}
+
+fn max_transcript_scroll_lines(total_lines: usize) -> usize {
+    total_lines.saturating_sub(1)
+}
+
+fn clamp_transcript_scroll_lines(scroll_lines: usize, total_lines: usize) -> usize {
+    scroll_lines.min(max_transcript_scroll_lines(total_lines))
+}
+
+fn scroll_transcript_page_up(scroll_lines: usize, total_lines: usize, jump: usize) -> usize {
+    clamp_transcript_scroll_lines(scroll_lines.saturating_add(jump), total_lines)
+}
+
+fn scroll_transcript_page_down(scroll_lines: usize, total_lines: usize, jump: usize) -> usize {
+    clamp_transcript_scroll_lines(scroll_lines.saturating_sub(jump), total_lines)
+}
+
+fn apply_transcript_growth_to_scroll(
+    scroll_lines: usize,
+    previous_total_lines: usize,
+    current_total_lines: usize,
+) -> usize {
+    if scroll_lines == 0 {
+        return 0;
+    }
+
+    let growth = current_total_lines.saturating_sub(previous_total_lines);
+    let grown_scroll = scroll_lines.saturating_add(growth);
+    clamp_transcript_scroll_lines(grown_scroll, current_total_lines)
+}
+
+fn render_transcript_indicator_line(width: usize, text: &str) -> String {
+    if width == 0 {
+        return text.to_string();
+    }
+
+    let mut chars = text.chars();
+    let mut truncated = String::new();
+    for _ in 0..width {
+        let Some(ch) = chars.next() else {
+            break;
+        };
+        truncated.push(ch);
+    }
+
+    if chars.next().is_some() && width >= 1 {
+        truncated.pop();
+        truncated.push('…');
+    }
+
+    truncated
+}
+
+fn compute_transcript_window(
+    total_lines: usize,
+    transcript_budget_rows: usize,
+    transcript_scroll_lines: usize,
+) -> TranscriptWindow {
+    let scroll_lines = clamp_transcript_scroll_lines(transcript_scroll_lines, total_lines);
+    let end = total_lines.saturating_sub(scroll_lines);
+
+    if transcript_budget_rows == 0 {
+        return TranscriptWindow {
+            start: end,
+            end,
+            show_indicator: false,
+        };
+    }
+
+    let mut content_budget = transcript_budget_rows;
+    let mut start = end.saturating_sub(content_budget);
+    let mut show_indicator = start > 0;
+
+    if show_indicator {
+        content_budget = content_budget.saturating_sub(1);
+        start = end.saturating_sub(content_budget);
+        show_indicator = start > 0;
+
+        if !show_indicator {
+            content_budget = transcript_budget_rows;
+            start = end.saturating_sub(content_budget);
+        }
+    }
+
+    TranscriptWindow {
+        start,
+        end,
+        show_indicator,
+    }
 }
 
 fn spinner_glyph() -> String {
@@ -911,6 +1146,74 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_window_follow_tail_uses_visible_budget() {
+        let window = compute_transcript_window(100, 10, 0);
+        assert_eq!(window.start, 91);
+        assert_eq!(window.end, 100);
+        assert!(window.show_indicator);
+
+        let small_window = compute_transcript_window(5, 10, 0);
+        assert_eq!(small_window.start, 0);
+        assert_eq!(small_window.end, 5);
+        assert!(!small_window.show_indicator);
+    }
+
+    #[test]
+    fn transcript_window_scrolled_mode_pins_end_before_latest_lines() {
+        let window = compute_transcript_window(100, 10, 5);
+        assert_eq!(window.start, 86);
+        assert_eq!(window.end, 95);
+        assert!(window.show_indicator);
+    }
+
+    #[test]
+    fn transcript_indicator_requires_start_above_zero() {
+        let window = compute_transcript_window(3, 3, 0);
+        assert_eq!(window.start, 0);
+        assert!(!window.show_indicator);
+
+        let with_space = compute_transcript_window(20, 1, 0);
+        assert_eq!(with_space.start, 20);
+        assert!(with_space.show_indicator);
+        assert_eq!(with_space.end, 20);
+        assert_eq!(with_space.rendered_rows(), 1);
+    }
+
+    #[test]
+    fn transcript_scroll_clamps_and_home_end_stay_in_bounds() {
+        assert_eq!(max_transcript_scroll_lines(0), 0);
+        assert_eq!(max_transcript_scroll_lines(1), 0);
+        assert_eq!(max_transcript_scroll_lines(10), 9);
+
+        assert_eq!(clamp_transcript_scroll_lines(100, 0), 0);
+        assert_eq!(clamp_transcript_scroll_lines(100, 10), 9);
+
+        assert_eq!(scroll_transcript_page_up(0, 10, 5), 5);
+        assert_eq!(scroll_transcript_page_up(7, 10, 5), 9);
+        assert_eq!(scroll_transcript_page_down(7, 10, 5), 2);
+        assert_eq!(scroll_transcript_page_down(2, 10, 5), 0);
+    }
+
+    #[test]
+    fn transcript_scroll_follow_tail_semantics_hold_across_growth() {
+        assert_eq!(apply_transcript_growth_to_scroll(0, 10, 15), 0);
+        assert_eq!(apply_transcript_growth_to_scroll(3, 10, 15), 8);
+        assert_eq!(apply_transcript_growth_to_scroll(9, 10, 15), 14);
+    }
+
+    #[test]
+    fn transcript_indicator_line_is_single_row_and_truncates() {
+        let line =
+            render_transcript_indicator_line(12, "… 123 earlier lines above (PgUp/PgDn/Home/End)");
+        assert_eq!(line.chars().count(), 12);
+        assert!(line.ends_with('…'));
+
+        let full =
+            render_transcript_indicator_line(80, "… 3 earlier lines above (PgUp/PgDn/Home/End)");
+        assert_eq!(full, "… 3 earlier lines above (PgUp/PgDn/Home/End)");
+    }
 
     #[test]
     fn render_mode_line_is_left_anchored() {
