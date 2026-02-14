@@ -73,14 +73,6 @@
 //! Deferred scope note for v1: no persistence reset markers are defined yet.
 //! `/clear` and `memory_reset` persistence semantics are intentionally deferred;
 //! `/clear` only affects in-memory state for the running process.
-//!
-//! ## TUI transcript viewport behavior
-//!
-//! The inline TUI keeps full transcript history in memory/cache, while rendering
-//! only the visible transcript window per frame based on terminal row budget.
-//! Default behavior follows tail (`scroll=0`). Use `PageUp`/`PageDown` to scroll,
-//! `Home` to jump to earliest cached lines, and `End` to return to follow-tail.
-//! While scrolled up, new transcript chunks do not force-follow automatically.
 
 pub mod app;
 pub mod commands;
