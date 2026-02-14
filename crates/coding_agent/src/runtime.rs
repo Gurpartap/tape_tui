@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
 use serde_json::Value;
-use session_store::{SessionEntry, SessionEntryKind, SessionStore};
+use session_store::{SessionEntry, SessionEntryKind, SessionSeed, SessionStore};
 use tape_tui::runtime::tui::{
     Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle,
 };
@@ -26,6 +26,12 @@ struct SessionRecorder {
     store: SessionStore,
     next_entry_index: u64,
     entry_timestamp: String,
+}
+
+enum SessionPersistenceState {
+    Disabled,
+    Deferred(SessionSeed),
+    Active(SessionRecorder),
 }
 
 impl SessionRecorder {
@@ -167,7 +173,7 @@ pub struct RuntimeController {
     provider_id: String,
     tool_dispatch: HashMap<(String, String), BuiltinDispatchTool>,
     host_tool_executor: Mutex<HostToolExecutor>,
-    session_recorder: Option<Mutex<SessionRecorder>>,
+    session_persistence: Mutex<SessionPersistenceState>,
 }
 
 impl RuntimeController {
@@ -181,7 +187,12 @@ impl RuntimeController {
         runtime_handle: RuntimeHandle,
         provider: Arc<dyn RunProvider>,
     ) -> Arc<Self> {
-        Self::new_with_optional_session_store(app, runtime_handle, provider, None)
+        Self::new_with_session_persistence(
+            app,
+            runtime_handle,
+            provider,
+            SessionPersistenceState::Disabled,
+        )
     }
 
     /// Creates a controller with persistent session recording enabled.
@@ -191,14 +202,34 @@ impl RuntimeController {
         provider: Arc<dyn RunProvider>,
         session_store: SessionStore,
     ) -> Arc<Self> {
-        Self::new_with_optional_session_store(app, runtime_handle, provider, Some(session_store))
+        Self::new_with_session_persistence(
+            app,
+            runtime_handle,
+            provider,
+            SessionPersistenceState::Active(SessionRecorder::new(session_store)),
+        )
     }
 
-    fn new_with_optional_session_store(
+    /// Creates a controller with deferred persistent session materialization.
+    pub fn new_with_deferred_session_seed(
         app: Arc<Mutex<App>>,
         runtime_handle: RuntimeHandle,
         provider: Arc<dyn RunProvider>,
-        session_store: Option<SessionStore>,
+        seed: SessionSeed,
+    ) -> Arc<Self> {
+        Self::new_with_session_persistence(
+            app,
+            runtime_handle,
+            provider,
+            SessionPersistenceState::Deferred(seed),
+        )
+    }
+
+    fn new_with_session_persistence(
+        app: Arc<Mutex<App>>,
+        runtime_handle: RuntimeHandle,
+        provider: Arc<dyn RunProvider>,
+        session_persistence: SessionPersistenceState,
     ) -> Arc<Self> {
         let provider_id = provider.profile().provider_id;
 
@@ -210,7 +241,7 @@ impl RuntimeController {
             active_run: Mutex::new(None),
             tool_dispatch: build_tool_dispatch_table(&provider_id),
             host_tool_executor: Mutex::new(build_default_host_tool_executor()),
-            session_recorder: session_store.map(|store| Mutex::new(SessionRecorder::new(store))),
+            session_persistence: Mutex::new(session_persistence),
             provider,
             provider_id,
         })
@@ -542,21 +573,42 @@ impl RuntimeController {
     }
 
     fn persist_user_turn(&self, text: &str) -> Result<(), String> {
-        let Some(session_recorder) = self.session_recorder.as_ref() else {
+        let mut session_persistence = lock_unpoisoned(&self.session_persistence);
+        let Some(session_recorder) = Self::ensure_active_recorder(&mut session_persistence)? else {
             return Ok(());
         };
 
-        let mut session_recorder = lock_unpoisoned(session_recorder);
         session_recorder.persist_user_turn(text)
     }
 
     fn persist_committed_entries(&self, entries: &[RunMessage]) -> Result<(), String> {
-        let Some(session_recorder) = self.session_recorder.as_ref() else {
+        let mut session_persistence = lock_unpoisoned(&self.session_persistence);
+        let Some(session_recorder) = Self::ensure_active_recorder(&mut session_persistence)? else {
             return Ok(());
         };
 
-        let mut session_recorder = lock_unpoisoned(session_recorder);
         session_recorder.persist_committed_entries(entries)
+    }
+
+    fn ensure_active_recorder(
+        session_persistence: &mut SessionPersistenceState,
+    ) -> Result<Option<&mut SessionRecorder>, String> {
+        if matches!(session_persistence, SessionPersistenceState::Deferred(_)) {
+            let seed = match session_persistence {
+                SessionPersistenceState::Deferred(seed) => seed.clone(),
+                _ => unreachable!("checked deferred state before materialization"),
+            };
+
+            let store = SessionStore::create_new_with_seed(&seed)
+                .map_err(|error| format!("Failed creating deferred session store: {error}"))?;
+            *session_persistence = SessionPersistenceState::Active(SessionRecorder::new(store));
+        }
+
+        match session_persistence {
+            SessionPersistenceState::Disabled => Ok(None),
+            SessionPersistenceState::Active(recorder) => Ok(Some(recorder)),
+            SessionPersistenceState::Deferred(_) => unreachable!("deferred state must materialize"),
+        }
     }
 
     fn handle_persistence_failure(&self, error: String) {

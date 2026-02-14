@@ -1,3 +1,4 @@
+use std::fs;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use session_store::{SessionEntry, SessionEntryKind, SessionStore};
+use session_store::{session_root, SessionEntry, SessionEntryKind, SessionSeed, SessionStore};
 use tempfile::TempDir;
 
 use coding_agent::app::{App, HostOps, Mode, Role, RunId};
@@ -636,6 +637,12 @@ fn create_session_store_for_test() -> (TempDir, SessionStore, PathBuf) {
     (session_workspace, store, session_path)
 }
 
+fn create_session_seed_for_test() -> (TempDir, SessionSeed) {
+    let session_workspace = TempDir::new().expect("session workspace temp dir should be created");
+    let seed = SessionSeed::new(session_workspace.path()).expect("session seed should be created");
+    (session_workspace, seed)
+}
+
 fn append_seed_user_entry(
     store: &mut SessionStore,
     entry_id: &str,
@@ -659,6 +666,266 @@ fn replay_session_messages(session_path: &PathBuf) -> Vec<RunMessage> {
         .expect("session file should reopen")
         .replay_leaf(None)
         .expect("session replay should succeed")
+}
+
+fn replay_latest_session_messages(workspace_root: &std::path::Path) -> Vec<RunMessage> {
+    let latest_session_path = SessionStore::latest_session_path(workspace_root)
+        .expect("latest session path should resolve");
+    SessionStore::open(&latest_session_path)
+        .expect("latest session file should reopen")
+        .replay_leaf(None)
+        .expect("latest session replay should succeed")
+}
+
+#[test]
+fn deferred_session_does_not_create_session_root_before_first_submit() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (session_workspace, seed) = create_session_seed_for_test();
+        let sessions_root = session_root(session_workspace.path());
+
+        let _host = RuntimeController::new_with_deferred_session_seed(
+            app,
+            runtime_loop.runtime_handle(),
+            provider,
+            seed,
+        );
+
+        assert!(
+            !sessions_root.exists(),
+            "deferred startup must not eagerly materialize session root"
+        );
+    });
+}
+
+#[test]
+fn deferred_session_first_submit_materializes_store_and_persists_first_turn() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (session_workspace, seed) = create_session_seed_for_test();
+        let sessions_root = session_root(session_workspace.path());
+
+        let mut host = RuntimeController::new_with_deferred_session_seed(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            seed,
+        );
+        assert!(!sessions_root.exists());
+
+        let run_id = submit_prompt(&app, &mut host, "persist deferred first turn");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content == "hello world"
+                    })
+            },
+        );
+        assert!(settled, "deferred persistence run did not settle");
+        assert!(sessions_root.exists());
+
+        assert_eq!(
+            replay_latest_session_messages(session_workspace.path()),
+            vec![
+                RunMessage::UserText {
+                    text: "persist deferred first turn".to_string(),
+                },
+                RunMessage::AssistantText {
+                    text: "hello world".to_string(),
+                },
+            ]
+        );
+    });
+}
+
+#[test]
+fn deferred_session_materialization_failure_is_fatal_and_provider_is_not_invoked() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider_invoked = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn RunProvider> = Arc::new(InvocationTrackingProvider::new(Arc::clone(
+            &provider_invoked,
+        )));
+        let (session_workspace, seed) = create_session_seed_for_test();
+        let sessions_root_parent = session_workspace.path().join(".agent");
+        fs::write(&sessions_root_parent, "blocking file").expect("blocker file should be written");
+
+        let mut host = RuntimeController::new_with_deferred_session_seed(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            seed,
+        );
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_input_replace("trigger deferred materialization failure".to_string());
+            app.on_submit(&mut host);
+        }
+
+        runtime_loop.tick();
+        host.flush_pending_run_events();
+
+        let app = lock_unpoisoned(&app);
+        assert!(matches!(
+            &app.mode,
+            Mode::Error(error) if error.starts_with("Session persistence failed:")
+        ));
+        assert!(app.should_exit);
+        assert!(!provider_invoked.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn deferred_session_materialization_uses_seed_header_and_entry_ids_start_at_one() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (session_workspace, seed) = create_session_seed_for_test();
+        let expected_created_at = seed.created_at.clone();
+
+        let mut host = RuntimeController::new_with_deferred_session_seed(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            seed,
+        );
+
+        let run_id = submit_prompt(&app, &mut host, "verify deferred seed materialization");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content == "hello world"
+                    })
+            },
+        );
+        assert!(settled, "deferred run did not settle");
+
+        let latest_session_path = SessionStore::latest_session_path(session_workspace.path())
+            .expect("latest session path should resolve");
+        let file =
+            fs::read_to_string(&latest_session_path).expect("session file should be readable");
+        let lines: Vec<&str> = file.lines().collect();
+        assert!(
+            lines.len() >= 3,
+            "expected header + user + assistant entries"
+        );
+
+        let header: serde_json::Value =
+            serde_json::from_str(lines[0]).expect("header line should be valid json");
+        assert_eq!(
+            header["created_at"],
+            serde_json::Value::String(expected_created_at)
+        );
+
+        let first_entry: serde_json::Value =
+            serde_json::from_str(lines[1]).expect("first entry line should be valid json");
+        assert_eq!(
+            first_entry["id"],
+            serde_json::Value::String("entry-00000000000000000001".to_string())
+        );
+    });
+}
+
+#[test]
+fn deferred_session_quit_without_submit_does_not_materialize_store() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (session_workspace, seed) = create_session_seed_for_test();
+        let sessions_root = session_root(session_workspace.path());
+
+        let mut host = RuntimeController::new_with_deferred_session_seed(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            seed,
+        );
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_quit(&mut host);
+        }
+
+        runtime_loop.tick();
+        host.flush_pending_run_events();
+
+        assert!(
+            !sessions_root.exists(),
+            "quit without submit must not materialize deferred session store"
+        );
+    });
+}
+
+#[test]
+fn exit_after_persistence_does_not_append_additional_session_entries() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (session_workspace, seed) = create_session_seed_for_test();
+
+        let mut host = RuntimeController::new_with_deferred_session_seed(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            seed,
+        );
+
+        let run_id = submit_prompt(&app, &mut host, "persist then quit");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content == "hello world"
+                    })
+            },
+        );
+        assert!(settled, "run did not settle before quit");
+
+        let before_quit = replay_latest_session_messages(session_workspace.path());
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_quit(&mut host);
+        }
+
+        runtime_loop.tick();
+        host.flush_pending_run_events();
+
+        let after_quit = replay_latest_session_messages(session_workspace.path());
+        assert_eq!(
+            after_quit, before_quit,
+            "quit must not append additional persistence entries"
+        );
+    });
 }
 
 #[test]

@@ -7,7 +7,7 @@ use coding_agent::provider::RunMessage;
 use coding_agent::providers;
 use coding_agent::runtime::RuntimeController;
 use coding_agent::tui::AppComponent;
-use session_store::SessionStore;
+use session_store::{SessionSeed, SessionStore};
 use tape_tui::{prewarm_markdown_highlighting, ProcessTerminal, TUI};
 
 const USAGE: &str =
@@ -21,12 +21,29 @@ enum StartupMode {
 }
 
 struct StartupSession {
-    session_store: SessionStore,
+    persistence: StartupSessionPersistence,
     startup_session_id: String,
     replayed_messages: Vec<RunMessage>,
 }
 
-fn main() -> io::Result<()> {
+enum StartupSessionPersistence {
+    Deferred(SessionSeed),
+    Active(SessionStore),
+}
+
+fn main() {
+    if let Err(error) = run() {
+        if error.kind() == io::ErrorKind::InvalidInput {
+            eprintln!("{}", format_cli_parse_error(&error.to_string()));
+            std::process::exit(2);
+        }
+
+        eprintln!("✖ {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> io::Result<()> {
     let _ = std::thread::Builder::new()
         .name("markdown-highlight-prewarm".to_string())
         .spawn(prewarm_markdown_highlighting);
@@ -50,12 +67,24 @@ fn main() -> io::Result<()> {
         .map_err(io::Error::other)?;
     let provider_profile = provider.profile();
 
-    let host = RuntimeController::new_with_session_store(
-        Arc::clone(&app),
-        runtime_handle,
-        provider,
-        startup.session_store,
-    );
+    let host = match startup.persistence {
+        StartupSessionPersistence::Deferred(seed) => {
+            RuntimeController::new_with_deferred_session_seed(
+                Arc::clone(&app),
+                runtime_handle,
+                provider,
+                seed,
+            )
+        }
+        StartupSessionPersistence::Active(session_store) => {
+            RuntimeController::new_with_session_store(
+                Arc::clone(&app),
+                runtime_handle,
+                provider,
+                session_store,
+            )
+        }
+    };
     let root_component = tui.register_component(AppComponent::new(
         Arc::clone(&app),
         Arc::clone(&host),
@@ -71,6 +100,19 @@ fn main() -> io::Result<()> {
     }
 
     tui.stop()
+}
+
+fn format_cli_parse_error(error: &str) -> String {
+    let (summary, usage) = match error.split_once("\nUsage:\n") {
+        Some((summary, usage_tail)) => (summary.trim(), format!("Usage:\n{usage_tail}")),
+        None => (error.trim(), USAGE.to_string()),
+    };
+
+    format!(
+        "✖ Invalid command line arguments\n\n  {summary}\n\n{usage}",
+        summary = summary,
+        usage = usage
+    )
 }
 
 fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> io::Result<StartupMode> {
@@ -121,10 +163,10 @@ fn parse_startup_mode(args: impl IntoIterator<Item = String>) -> io::Result<Star
 fn load_startup_session(cwd: &Path, startup_mode: StartupMode) -> Result<StartupSession, String> {
     match startup_mode {
         StartupMode::NewSession => {
-            let session_store = SessionStore::create_new(cwd).map_err(|error| error.to_string())?;
-            let startup_session_id = session_store.session_id().to_string();
+            let seed = SessionSeed::new(cwd).map_err(|error| error.to_string())?;
+            let startup_session_id = seed.session_id.clone();
             Ok(StartupSession {
-                session_store,
+                persistence: StartupSessionPersistence::Deferred(seed),
                 startup_session_id,
                 replayed_messages: Vec::new(),
             })
@@ -140,7 +182,7 @@ fn load_startup_session(cwd: &Path, startup_mode: StartupMode) -> Result<Startup
             let startup_session_id = session_store.session_id().to_string();
 
             Ok(StartupSession {
-                session_store,
+                persistence: StartupSessionPersistence::Active(session_store),
                 startup_session_id,
                 replayed_messages,
             })
@@ -158,7 +200,7 @@ fn load_startup_session(cwd: &Path, startup_mode: StartupMode) -> Result<Startup
             let startup_session_id = session_store.session_id().to_string();
 
             Ok(StartupSession {
-                session_store,
+                persistence: StartupSessionPersistence::Active(session_store),
                 startup_session_id,
                 replayed_messages,
             })
@@ -267,6 +309,35 @@ mod tests {
     }
 
     #[test]
+    fn default_mode_returns_deferred_seed_without_creating_session_root() {
+        let cwd = tempfile::tempdir().expect("tempdir should be created");
+        let startup = load_startup_session(cwd.path(), StartupMode::NewSession)
+            .expect("new-session startup should succeed");
+        let StartupSession {
+            persistence,
+            startup_session_id,
+            replayed_messages,
+        } = startup;
+
+        let sessions_root = session_root(cwd.path());
+        assert!(
+            !sessions_root.exists(),
+            "default startup must not eagerly materialize session root"
+        );
+        assert!(replayed_messages.is_empty());
+
+        match persistence {
+            StartupSessionPersistence::Deferred(seed) => {
+                assert_eq!(startup_session_id, seed.session_id);
+                assert_eq!(seed.cwd, cwd.path().to_path_buf());
+            }
+            StartupSessionPersistence::Active(_) => {
+                panic!("default startup should produce deferred persistence")
+            }
+        }
+    }
+
+    #[test]
     fn continue_mode_fails_closed_on_malformed_latest_session() {
         let cwd = tempfile::tempdir().expect("tempdir should be created");
         let sessions_root = session_root(cwd.path());
@@ -343,5 +414,26 @@ mod tests {
                 text: "relative".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn format_cli_parse_error_wraps_summary_and_usage_consistently() {
+        let formatted = format_cli_parse_error(
+            "Missing required value for --session\nUsage:\n  coding_agent\n  coding_agent --continue\n  coding_agent --session <session-filepath>",
+        );
+
+        assert!(formatted.starts_with("✖ Invalid command line arguments"));
+        assert!(formatted.contains("Missing required value for --session"));
+        assert!(formatted.contains("Usage:"));
+        assert!(formatted.contains("coding_agent --session <session-filepath>"));
+    }
+
+    #[test]
+    fn format_cli_parse_error_falls_back_to_default_usage_when_missing() {
+        let formatted = format_cli_parse_error("Unknown argument: asd");
+
+        assert!(formatted.starts_with("✖ Invalid command line arguments"));
+        assert!(formatted.contains("Unknown argument: asd"));
+        assert!(formatted.contains(USAGE));
     }
 }

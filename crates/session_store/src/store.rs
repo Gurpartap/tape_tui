@@ -11,6 +11,23 @@ use crate::error::SessionStoreError;
 use crate::paths::{session_file_name, session_root};
 use crate::schema::{JsonLine, SessionEntry, SessionHeader};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSeed {
+    pub cwd: PathBuf,
+    pub session_id: String,
+    pub created_at: String,
+}
+
+impl SessionSeed {
+    pub fn new(cwd: &Path) -> Result<Self, SessionStoreError> {
+        Ok(Self {
+            cwd: resolve_absolute_cwd(cwd)?,
+            session_id: Uuid::new_v4().to_string(),
+            created_at: format_now_rfc3339()?,
+        })
+    }
+}
+
 pub struct SessionStore {
     pub(crate) path: PathBuf,
     pub(crate) file: File,
@@ -22,18 +39,24 @@ pub struct SessionStore {
 
 impl SessionStore {
     pub fn create_new(cwd: &Path) -> Result<Self, SessionStoreError> {
-        let cwd = resolve_absolute_cwd(cwd)?;
-        let root = session_root(&cwd);
+        let seed = SessionSeed::new(cwd)?;
+        Self::create_new_with_seed(&seed)
+    }
+
+    pub fn create_new_with_seed(seed: &SessionSeed) -> Result<Self, SessionStoreError> {
+        let root = session_root(&seed.cwd);
         fs::create_dir_all(&root).map_err(|source| {
             SessionStoreError::io("creating session root directory", &root, source)
         })?;
 
-        let created_at = format_now_rfc3339()?;
-        let session_id = Uuid::new_v4().to_string();
-        let file_name = session_file_name(&created_at, &session_id);
+        let file_name = session_file_name(&seed.created_at, &seed.session_id);
         let path = root.join(file_name);
 
-        let header = SessionHeader::v1(session_id, created_at, cwd.display().to_string());
+        let header = SessionHeader::v1(
+            seed.session_id.clone(),
+            seed.created_at.clone(),
+            seed.cwd.display().to_string(),
+        );
         validate_header_line(&path, 1, &header)?;
 
         let mut file = OpenOptions::new()

@@ -40,8 +40,15 @@
 //!
 //! ## Persistent sessions (v1 fail-closed contract)
 //!
-//! `coding_agent` startup creates a new append-only JSONL session under
-//! `<cwd>/.agent/sessions/` and wires that session id into provider bootstrap.
+//! In default mode (`coding_agent` with no resume flags), startup preallocates
+//! a session identity (`session_id`, `created_at`, absolute `cwd`) and wires
+//! that `session_id` into provider bootstrap immediately. Session file creation
+//! is lazy: `<cwd>/.agent/sessions/` and the JSONL file are materialized on the
+//! first persisted user turn.
+//!
+//! The materialized header uses the preallocated startup metadata, so
+//! `created_at` reflects session start time, not first file-write time.
+//!
 //! Passing `--continue` switches startup to strict resume mode: it opens the
 //! latest session file under `<cwd>/.agent/sessions/`, replays the current leaf
 //! into model-facing memory, and appends subsequent entries to that same file.
@@ -51,10 +58,13 @@
 //! persisted with `sync_data` before reporting success.
 //!
 //! Failure policy is fail-closed:
-//! - startup session creation/open/parse/validation failures are hard errors;
+//! - default startup seed creation/open/parse/validation failures are hard errors;
 //! - `--continue` resume failures never fall back to creating a new session;
 //! - runtime append/sync failures are fatal (error mode + stop request + exit);
 //! - no degraded persistence fallback mode is used by the binary startup path.
+//!
+//! Persistence is event-driven (user submit / committed run events) only.
+//! There is no additional save-on-exit flush step.
 //!
 //! Replay is strict and deterministic over graph-valid entries only. Malformed
 //! JSON, unknown fields/kinds, unsupported versions, duplicate ids, dangling

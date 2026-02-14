@@ -20,4 +20,4 @@ pub use paths::{session_file_name, session_root};
 pub use schema::{
     EntryRecordType, SessionEntry, SessionEntryKind, SessionHeader, SessionRecordType,
 };
-pub use store::SessionStore;
+pub use store::{SessionSeed, SessionStore};

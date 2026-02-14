@@ -5,9 +5,12 @@ use std::path::{Path, PathBuf};
 use agent_provider::RunMessage;
 use serde_json::json;
 use session_store::{
-    session_root, SessionEntry, SessionEntryKind, SessionHeader, SessionStore, SessionStoreError,
+    session_root, SessionEntry, SessionEntryKind, SessionHeader, SessionSeed, SessionStore,
+    SessionStoreError,
 };
 use tempfile::TempDir;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 fn write_session_file(lines: &[String]) -> (TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir should be created");
@@ -286,6 +289,52 @@ fn create_new_uses_cwd_agent_sessions_root_and_writes_header() {
     assert_eq!(parsed_header.created_at, store.header().created_at);
     assert_eq!(parsed_header.cwd, cwd_dir.path().display().to_string());
     assert!(lines.next().is_none());
+}
+
+#[test]
+fn session_seed_new_generates_absolute_cwd_uuid_and_rfc3339_created_at() {
+    let cwd_dir = tempfile::tempdir().expect("tempdir should be created");
+    let seed = SessionSeed::new(cwd_dir.path()).expect("seed should be created");
+
+    assert!(seed.cwd.is_absolute());
+    assert_eq!(seed.cwd, cwd_dir.path().to_path_buf());
+    assert!(!seed.session_id.trim().is_empty());
+    assert!(uuid::Uuid::parse_str(&seed.session_id).is_ok());
+    assert!(OffsetDateTime::parse(&seed.created_at, &Rfc3339).is_ok());
+}
+
+#[test]
+fn create_new_with_seed_writes_header_exactly_matching_seed_fields() {
+    let cwd_dir = tempfile::tempdir().expect("tempdir should be created");
+    let seed = SessionSeed {
+        cwd: cwd_dir.path().to_path_buf(),
+        session_id: "seeded-session-id".to_string(),
+        created_at: "2026-02-14T12:34:56Z".to_string(),
+    };
+
+    let store =
+        SessionStore::create_new_with_seed(&seed).expect("create_new_with_seed should succeed");
+    let file = std::fs::read_to_string(store.path()).expect("session file should be readable");
+    let mut lines = file.lines();
+    let header_line = lines.next().expect("header line should exist");
+    let parsed_header: SessionHeader =
+        serde_json::from_str(header_line).expect("header should deserialize");
+
+    assert_eq!(parsed_header.version, 1);
+    assert_eq!(parsed_header.session_id, seed.session_id);
+    assert_eq!(parsed_header.created_at, seed.created_at);
+    assert_eq!(parsed_header.cwd, seed.cwd.display().to_string());
+    assert!(lines.next().is_none());
+}
+
+#[test]
+fn create_new_wrapper_remains_backwards_compatible() {
+    let cwd_dir = tempfile::tempdir().expect("tempdir should be created");
+    let store = SessionStore::create_new(cwd_dir.path()).expect("create_new should succeed");
+
+    assert_eq!(store.header().version, 1);
+    assert_eq!(store.header().cwd, cwd_dir.path().display().to_string());
+    assert!(!store.header().session_id.trim().is_empty());
 }
 
 #[test]
