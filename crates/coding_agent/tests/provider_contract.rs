@@ -1,12 +1,15 @@
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use session_store::SessionStore;
+use tempfile::TempDir;
 
-use coding_agent::app::{App, Mode, Role, RunId};
+use coding_agent::app::{App, HostOps, Mode, Role, RunId};
 use coding_agent::provider::{
     CancelSignal, ProviderProfile, RunEvent, RunMessage, RunProvider, RunRequest, ToolCallRequest,
     ToolResult,
@@ -595,6 +598,22 @@ fn submit_prompt(app: &Arc<Mutex<App>>, host: &mut Arc<RuntimeController>, promp
     }
 }
 
+fn create_session_store_for_test() -> (TempDir, SessionStore, PathBuf) {
+    let session_workspace = TempDir::new().expect("session workspace temp dir should be created");
+    let store = SessionStore::create_new(session_workspace.path())
+        .expect("session store should be created");
+    let session_path = store.path().to_path_buf();
+
+    (session_workspace, store, session_path)
+}
+
+fn replay_session_messages(session_path: &PathBuf) -> Vec<RunMessage> {
+    SessionStore::open(session_path)
+        .expect("session file should reopen")
+        .replay_leaf(None)
+        .expect("session replay should succeed")
+}
+
 #[test]
 fn provider_lifecycle_transitions_to_single_completed_assistant_message() {
     with_runtime_loop(|runtime_loop| {
@@ -764,6 +783,309 @@ fn cancellation_signal_reaches_provider_and_preserves_cancelled_state() {
             app.conversation_messages(),
             &[RunMessage::UserText {
                 text: "cancel this run".to_string(),
+            }]
+        );
+    });
+}
+
+#[test]
+fn start_success_persists_user_turn_in_session_replay() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (_session_workspace, session_store, session_path) = create_session_store_for_test();
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let run_id = submit_prompt(&app, &mut host, "persist this user");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content == "hello world"
+                    })
+            },
+        );
+        assert!(settled, "run did not settle");
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![
+                RunMessage::UserText {
+                    text: "persist this user".to_string(),
+                },
+                RunMessage::AssistantText {
+                    text: "hello world".to_string(),
+                }
+            ]
+        );
+    });
+}
+
+#[test]
+fn start_failure_non_run_active_persists_user_turn_in_session_replay() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (_session_workspace, session_store, session_path) = create_session_store_for_test();
+        let mut host = RuntimeController::new_with_session_store(
+            app,
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let error = host
+            .start_run(
+                vec![RunMessage::UserText {
+                    text: "persist on failure".to_string(),
+                }],
+                "   ".to_string(),
+            )
+            .expect_err("empty system instructions should fail start");
+        assert!(error.contains("System instructions cannot be empty"));
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![RunMessage::UserText {
+                text: "persist on failure".to_string(),
+            }]
+        );
+    });
+}
+
+#[test]
+fn start_failure_run_already_active_does_not_persist_user_turn() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let cancel_observed = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn RunProvider> =
+            Arc::new(CancelAwareProvider::new(Arc::clone(&cancel_observed)));
+        let (_session_workspace, session_store, session_path) = create_session_store_for_test();
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let run_id = submit_prompt(&app, &mut host, "first prompt");
+
+        let error = host
+            .start_run(
+                vec![RunMessage::UserText {
+                    text: "second prompt".to_string(),
+                }],
+                "base instructions".to_string(),
+            )
+            .expect_err("second start should be rejected while active");
+        assert_eq!(error, "Run already active");
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_cancel(&mut host);
+        }
+
+        let settled = wait_until(
+            Duration::from_secs(3),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                cancel_observed.load(Ordering::SeqCst) && {
+                    let app = lock_unpoisoned(&app);
+                    matches!(app.mode, Mode::Idle)
+                        && app.transcript.iter().any(|message| {
+                            message.role == Role::System && message.content == "Run cancelled"
+                        })
+                        && app.transcript.iter().any(|message| {
+                            message.role == Role::Assistant
+                                && message.run_id == Some(run_id)
+                                && message.content == "streaming"
+                        })
+                }
+            },
+        );
+        assert!(settled, "cancelled run did not settle");
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![RunMessage::UserText {
+                text: "first prompt".to_string(),
+            }]
+        );
+    });
+}
+
+#[test]
+fn finished_run_persists_committed_assistant_and_tool_entries() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let captured_second_turn_messages = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn RunProvider> = Arc::new(ToolHistoryCaptureProvider::new(Arc::clone(
+            &captured_second_turn_messages,
+        )));
+        let (_session_workspace, session_store, session_path) = create_session_store_for_test();
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let run_id = submit_prompt(&app, &mut host, "read file");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                let assistant_segments: Vec<&str> = app
+                    .transcript
+                    .iter()
+                    .filter(|message| {
+                        message.role == Role::Assistant && message.run_id == Some(run_id)
+                    })
+                    .map(|message| message.content.as_str())
+                    .collect();
+
+                matches!(app.mode, Mode::Idle) && assistant_segments == vec!["prefix ", "suffix"]
+            },
+        );
+        assert!(settled, "run did not settle");
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![
+                RunMessage::UserText {
+                    text: "read file".to_string(),
+                },
+                RunMessage::AssistantText {
+                    text: "prefix ".to_string(),
+                },
+                RunMessage::ToolCall {
+                    call_id: "call-memory".to_string(),
+                    tool_name: "not-a-tool".to_string(),
+                    arguments: json!({}),
+                },
+                RunMessage::ToolResult {
+                    call_id: "call-memory".to_string(),
+                    tool_name: "not-a-tool".to_string(),
+                    content: json!("Unknown host tool 'not-a-tool' for provider 'contract-test'"),
+                    is_error: true,
+                },
+                RunMessage::AssistantText {
+                    text: "suffix".to_string(),
+                },
+            ]
+        );
+    });
+}
+
+#[test]
+fn failed_run_discards_pending_assistant_and_tool_entries_from_persistence() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let captured_second_turn_messages = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn RunProvider> = Arc::new(FailThenCaptureProvider::new(Arc::clone(
+            &captured_second_turn_messages,
+        )));
+        let (_session_workspace, session_store, session_path) = create_session_store_for_test();
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let _run_id = submit_prompt(&app, &mut host, "first prompt");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Error(_))
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::System && message.content == "Run failed: boom"
+                    })
+            },
+        );
+        assert!(settled, "failed run did not settle");
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![RunMessage::UserText {
+                text: "first prompt".to_string(),
+            }]
+        );
+    });
+}
+
+#[test]
+fn cancelled_run_discards_pending_assistant_and_tool_entries_from_persistence() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let cancel_observed = Arc::new(AtomicBool::new(false));
+        let captured_second_turn_messages = Arc::new(Mutex::new(None));
+        let provider: Arc<dyn RunProvider> = Arc::new(CancelThenCaptureProvider::new(
+            Arc::clone(&cancel_observed),
+            Arc::clone(&captured_second_turn_messages),
+        ));
+        let (_session_workspace, session_store, session_path) = create_session_store_for_test();
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let _run_id = submit_prompt(&app, &mut host, "first prompt");
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_cancel(&mut host);
+        }
+
+        let settled = wait_until(
+            Duration::from_secs(3),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                cancel_observed.load(Ordering::SeqCst) && {
+                    let app = lock_unpoisoned(&app);
+                    matches!(app.mode, Mode::Idle)
+                        && app.transcript.iter().any(|message| {
+                            message.role == Role::System && message.content == "Run cancelled"
+                        })
+                }
+            },
+        );
+        assert!(settled, "cancelled run did not settle");
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![RunMessage::UserText {
+                text: "first prompt".to_string(),
             }]
         );
     });
@@ -1579,6 +1901,19 @@ fn post_terminal_tool_calls_are_rejected_with_stable_error_and_not_replayed() {
             },
         );
         assert!(first_settled, "first run did not settle");
+
+        let late_result_captured = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || lock_unpoisoned(&captured_post_terminal_tool_result).is_some(),
+        );
+        assert!(
+            late_result_captured,
+            "post-terminal tool result should be captured"
+        );
 
         let late_result = lock_unpoisoned(&captured_post_terminal_tool_result)
             .clone()

@@ -21,6 +21,14 @@ pub use agent_provider_mock::MockProvider;
 
 /// Resolves the configured run provider from explicit environment selection.
 pub fn provider_from_env() -> Result<Arc<dyn RunProvider>, ProviderInitError> {
+    provider_from_env_with_session_id(None)
+}
+
+/// Resolves the configured run provider from explicit environment selection,
+/// optionally wiring a startup session id into provider config.
+pub fn provider_from_env_with_session_id(
+    startup_session_id: Option<&str>,
+) -> Result<Arc<dyn RunProvider>, ProviderInitError> {
     let provider_id = std::env::var(PROVIDER_ENV_VAR).map_err(|_| {
         ProviderInitError::new(format!(
             "Missing provider selection. Set {PROVIDER_ENV_VAR} to one of: {}",
@@ -28,11 +36,20 @@ pub fn provider_from_env() -> Result<Arc<dyn RunProvider>, ProviderInitError> {
         ))
     })?;
 
-    provider_for_id(provider_id.trim())
+    provider_for_id_with_session_id(provider_id.trim(), startup_session_id)
 }
 
 /// Resolves a run provider by provider ID.
 pub fn provider_for_id(provider_id: &str) -> Result<Arc<dyn RunProvider>, ProviderInitError> {
+    provider_for_id_with_session_id(provider_id, None)
+}
+
+/// Resolves a run provider by provider ID, optionally wiring a startup
+/// session id into provider config.
+pub fn provider_for_id_with_session_id(
+    provider_id: &str,
+    startup_session_id: Option<&str>,
+) -> Result<Arc<dyn RunProvider>, ProviderInitError> {
     let provider_id = provider_id.trim();
     if provider_id.is_empty() {
         return Err(ProviderInitError::new(format!(
@@ -43,7 +60,7 @@ pub fn provider_for_id(provider_id: &str) -> Result<Arc<dyn RunProvider>, Provid
 
     match provider_id {
         MOCK_PROVIDER_ID => Ok(Arc::new(MockProvider::default())),
-        CODEX_API_PROVIDER_ID => codex_api_provider_from_config_path_env(),
+        CODEX_API_PROVIDER_ID => codex_api_provider_from_config_path_env(startup_session_id),
         unknown => Err(ProviderInitError::new(format!(
             "Unsupported provider '{unknown}'. Available providers: {}",
             supported_provider_list()
@@ -60,7 +77,9 @@ struct CodexBootstrapConfig {
     timeout_sec: Option<u64>,
 }
 
-fn codex_api_provider_from_config_path_env() -> Result<Arc<dyn RunProvider>, ProviderInitError> {
+fn codex_api_provider_from_config_path_env(
+    startup_session_id: Option<&str>,
+) -> Result<Arc<dyn RunProvider>, ProviderInitError> {
     let config_path = std::env::var(CODEX_CONFIG_PATH_ENV_VAR).map_err(|_| {
         ProviderInitError::new(format!(
             "Missing codex-api bootstrap config path. Set {CODEX_CONFIG_PATH_ENV_VAR} to a readable JSON file"
@@ -86,18 +105,7 @@ fn codex_api_provider_from_config_path_env() -> Result<Arc<dyn RunProvider>, Pro
         ))
     })?;
 
-    let access_token = sanitize_nonempty(config.access_token, "access_token")?;
-    let models = sanitize_models(config.models)?;
-
-    let mut provider_config = CodexApiProviderConfig::new(access_token, models);
-    if let Some(timeout_sec) = config.timeout_sec {
-        if timeout_sec == 0 {
-            return Err(ProviderInitError::new(
-                "codex-api bootstrap field 'timeout_sec' must be greater than zero when provided",
-            ));
-        }
-        provider_config = provider_config.with_timeout(Duration::from_secs(timeout_sec));
-    }
+    let provider_config = codex_provider_config_from_bootstrap(config, startup_session_id)?;
 
     CodexApiProvider::new(provider_config)
         .map(|provider| Arc::new(provider) as Arc<dyn RunProvider>)
@@ -113,6 +121,30 @@ fn codex_api_provider_from_config_path_env() -> Result<Arc<dyn RunProvider>, Pro
                 ))
             }
         })
+}
+
+fn codex_provider_config_from_bootstrap(
+    config: CodexBootstrapConfig,
+    startup_session_id: Option<&str>,
+) -> Result<CodexApiProviderConfig, ProviderInitError> {
+    let access_token = sanitize_nonempty(config.access_token, "access_token")?;
+    let models = sanitize_models(config.models)?;
+
+    let mut provider_config = CodexApiProviderConfig::new(access_token, models);
+    if let Some(timeout_sec) = config.timeout_sec {
+        if timeout_sec == 0 {
+            return Err(ProviderInitError::new(
+                "codex-api bootstrap field 'timeout_sec' must be greater than zero when provided",
+            ));
+        }
+        provider_config = provider_config.with_timeout(Duration::from_secs(timeout_sec));
+    }
+
+    if let Some(startup_session_id) = startup_session_id {
+        provider_config = provider_config.with_session_id(startup_session_id);
+    }
+
+    Ok(provider_config)
 }
 
 fn sanitize_nonempty(value: String, field_name: &str) -> Result<String, ProviderInitError> {
@@ -447,5 +479,19 @@ mod tests {
             provider_from_env().expect("valid bootstrap should initialize codex provider");
         assert_eq!(provider.profile().provider_id, CODEX_API_PROVIDER_ID);
         assert_eq!(provider.profile().model_id, "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn codex_bootstrap_applies_startup_session_id_to_provider_config() {
+        let config = CodexBootstrapConfig {
+            access_token: VALID_ACCOUNT_TOKEN.to_string(),
+            models: vec!["gpt-5.3-codex".to_string()],
+            timeout_sec: Some(120),
+        };
+
+        let provider_config = codex_provider_config_from_bootstrap(config, Some("session-123"))
+            .expect("provider config should build");
+
+        assert_eq!(provider_config.session_id.as_deref(), Some("session-123"));
     }
 }

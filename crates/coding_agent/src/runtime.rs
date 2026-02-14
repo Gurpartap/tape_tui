@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
 use serde_json::Value;
+use session_store::{SessionEntry, SessionEntryKind, SessionStore};
 use tape_tui::runtime::tui::{
     Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle,
 };
@@ -19,6 +20,88 @@ struct ActiveRun {
     run_id: RunId,
     cancel: Arc<AtomicBool>,
     join_handle: Option<JoinHandle<()>>,
+}
+
+struct SessionRecorder {
+    store: SessionStore,
+    next_entry_index: u64,
+    entry_timestamp: String,
+}
+
+impl SessionRecorder {
+    fn new(store: SessionStore) -> Self {
+        let entry_timestamp = store.header().created_at.clone();
+
+        Self {
+            store,
+            next_entry_index: 1,
+            entry_timestamp,
+        }
+    }
+
+    fn persist_user_turn(&mut self, text: &str) -> Result<(), String> {
+        self.append_kind(
+            SessionEntryKind::UserText {
+                text: text.to_string(),
+            },
+            "user turn",
+        )
+    }
+
+    fn persist_committed_entries(&mut self, entries: &[RunMessage]) -> Result<(), String> {
+        for entry in entries {
+            match entry {
+                RunMessage::AssistantText { text } => self.append_kind(
+                    SessionEntryKind::AssistantText { text: text.clone() },
+                    "assistant turn",
+                )?,
+                RunMessage::ToolCall {
+                    call_id,
+                    tool_name,
+                    arguments,
+                } => self.append_kind(
+                    SessionEntryKind::ToolCall {
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        arguments: arguments.clone(),
+                    },
+                    "tool call",
+                )?,
+                RunMessage::ToolResult {
+                    call_id,
+                    tool_name,
+                    content,
+                    is_error,
+                } => self.append_kind(
+                    SessionEntryKind::ToolResult {
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        content: content.clone(),
+                        is_error: *is_error,
+                    },
+                    "tool result",
+                )?,
+                RunMessage::UserText { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn append_kind(&mut self, kind: SessionEntryKind, description: &str) -> Result<(), String> {
+        let entry_id = format!("entry-{:020}", self.next_entry_index);
+        self.next_entry_index = self.next_entry_index.saturating_add(1);
+
+        let parent_id = self.store.current_leaf_id().map(ToOwned::to_owned);
+        let entry = SessionEntry::new(entry_id, parent_id, self.entry_timestamp.clone(), kind);
+
+        self.store.append(entry).map_err(|error| {
+            format!(
+                "Failed persisting {description} to session '{}': {error}",
+                self.store.path().display()
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +165,7 @@ pub struct RuntimeController {
     provider_id: String,
     tool_dispatch: HashMap<(String, String), BuiltinDispatchTool>,
     host_tool_executor: Mutex<HostToolExecutor>,
+    session_recorder: Option<Mutex<SessionRecorder>>,
 }
 
 impl RuntimeController {
@@ -95,6 +179,25 @@ impl RuntimeController {
         runtime_handle: RuntimeHandle,
         provider: Arc<dyn RunProvider>,
     ) -> Arc<Self> {
+        Self::new_with_optional_session_store(app, runtime_handle, provider, None)
+    }
+
+    /// Creates a controller with persistent session recording enabled.
+    pub fn new_with_session_store(
+        app: Arc<Mutex<App>>,
+        runtime_handle: RuntimeHandle,
+        provider: Arc<dyn RunProvider>,
+        session_store: SessionStore,
+    ) -> Arc<Self> {
+        Self::new_with_optional_session_store(app, runtime_handle, provider, Some(session_store))
+    }
+
+    fn new_with_optional_session_store(
+        app: Arc<Mutex<App>>,
+        runtime_handle: RuntimeHandle,
+        provider: Arc<dyn RunProvider>,
+        session_store: Option<SessionStore>,
+    ) -> Arc<Self> {
         let provider_id = provider.profile().provider_id;
 
         Arc::new(Self {
@@ -105,6 +208,7 @@ impl RuntimeController {
             active_run: Mutex::new(None),
             tool_dispatch: build_tool_dispatch_table(&provider_id),
             host_tool_executor: Mutex::new(build_default_host_tool_executor()),
+            session_recorder: session_store.map(|store| Mutex::new(SessionRecorder::new(store))),
             provider,
             provider_id,
         })
@@ -119,6 +223,8 @@ impl RuntimeController {
         if active_run.is_some() {
             return Err("Run already active".to_string());
         }
+
+        self.persist_submitted_user_turn(&messages)?;
 
         let run_id = self.next_run_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -384,9 +490,17 @@ impl RuntimeController {
     fn apply_provider_run_event(&self, event: RunEvent) {
         let run_id = event.run_id();
         let terminal = event.is_terminal();
+        let persist_finished_entries = matches!(event, RunEvent::Finished { .. });
+        let mut committed_entries = Vec::new();
 
         {
             let mut app = lock_unpoisoned(&self.app);
+            let conversation_len_before = if persist_finished_entries {
+                app.conversation_messages().len()
+            } else {
+                0
+            };
+
             match event {
                 RunEvent::Started { run_id } => app.on_run_started(run_id),
                 RunEvent::Chunk { run_id, text } => app.on_run_chunk(run_id, &text),
@@ -394,11 +508,62 @@ impl RuntimeController {
                 RunEvent::Failed { run_id, error } => app.on_run_failed(run_id, &error),
                 RunEvent::Cancelled { run_id } => app.on_run_cancelled(run_id),
             }
+
+            if persist_finished_entries {
+                committed_entries = committed_assistant_and_tool_entries(
+                    app.conversation_messages(),
+                    conversation_len_before,
+                );
+            }
+        }
+
+        if persist_finished_entries && !committed_entries.is_empty() {
+            if let Err(error) = self.persist_committed_entries(&committed_entries) {
+                self.handle_persistence_failure(error);
+            }
         }
 
         if terminal {
             self.clear_active_run_if_matching(run_id);
         }
+    }
+
+    fn persist_submitted_user_turn(&self, messages: &[RunMessage]) -> Result<(), String> {
+        let Some(RunMessage::UserText { text }) = messages.last() else {
+            return Ok(());
+        };
+
+        self.persist_user_turn(text)
+    }
+
+    fn persist_user_turn(&self, text: &str) -> Result<(), String> {
+        let Some(session_recorder) = self.session_recorder.as_ref() else {
+            return Ok(());
+        };
+
+        let mut session_recorder = lock_unpoisoned(session_recorder);
+        session_recorder.persist_user_turn(text)
+    }
+
+    fn persist_committed_entries(&self, entries: &[RunMessage]) -> Result<(), String> {
+        let Some(session_recorder) = self.session_recorder.as_ref() else {
+            return Ok(());
+        };
+
+        let mut session_recorder = lock_unpoisoned(session_recorder);
+        session_recorder.persist_committed_entries(entries)
+    }
+
+    fn handle_persistence_failure(&self, error: String) {
+        {
+            let mut app = lock_unpoisoned(&self.app);
+            app.mode = Mode::Error(error.clone());
+            app.push_system_message(format!("Session persistence failed: {error}"));
+            app.should_exit = true;
+        }
+
+        self.runtime_handle.dispatch(Command::RequestStop);
+        self.runtime_handle.dispatch(Command::RequestRender);
     }
 
     fn clear_active_run_if_matching(&self, run_id: RunId) {
@@ -655,6 +820,26 @@ fn tool_result_content_as_text(value: &Value) -> String {
         Value::String(content) => content.clone(),
         other => other.to_string(),
     }
+}
+
+fn committed_assistant_and_tool_entries(
+    conversation: &[RunMessage],
+    start_index: usize,
+) -> Vec<RunMessage> {
+    let start_index = start_index.min(conversation.len());
+
+    conversation[start_index..]
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                RunMessage::AssistantText { .. }
+                    | RunMessage::ToolCall { .. }
+                    | RunMessage::ToolResult { .. }
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

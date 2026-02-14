@@ -5,6 +5,7 @@ use coding_agent::app::{system_instructions_from_env, App};
 use coding_agent::providers;
 use coding_agent::runtime::RuntimeController;
 use coding_agent::tui::AppComponent;
+use session_store::SessionStore;
 use tape_tui::{ProcessTerminal, TUI};
 
 fn main() -> io::Result<()> {
@@ -13,14 +14,24 @@ fn main() -> io::Result<()> {
         system_instructions,
     ))));
 
+    let cwd = std::env::current_dir().map_err(io::Error::other)?;
+    let session_store = SessionStore::create_new(&cwd).map_err(io::Error::other)?;
+    let startup_session_id = session_store.header().session_id.clone();
+
     let terminal = ProcessTerminal::new();
     let mut tui = TUI::new(terminal);
     let runtime_handle = tui.runtime_handle();
 
-    let provider = providers::provider_from_env().map_err(io::Error::other)?;
+    let provider = providers::provider_from_env_with_session_id(Some(&startup_session_id))
+        .map_err(io::Error::other)?;
     let provider_profile = provider.profile();
 
-    let host = RuntimeController::new(Arc::clone(&app), runtime_handle, provider);
+    let host = RuntimeController::new_with_session_store(
+        Arc::clone(&app),
+        runtime_handle,
+        provider,
+        session_store,
+    );
     let root_component = tui.register_component(AppComponent::new(
         Arc::clone(&app),
         Arc::clone(&host),
