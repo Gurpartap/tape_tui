@@ -291,7 +291,7 @@ pub(crate) fn validate_rfc3339(
 }
 
 fn resolve_absolute_cwd(cwd: &Path) -> Result<PathBuf, SessionStoreError> {
-    let cwd = if cwd.is_absolute() {
+    let absolute_cwd = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
         std::env::current_dir()
@@ -299,17 +299,14 @@ fn resolve_absolute_cwd(cwd: &Path) -> Result<PathBuf, SessionStoreError> {
             .join(cwd)
     };
 
-    let canonical_cwd = cwd
-        .canonicalize()
-        .map_err(|source| SessionStoreError::io("canonicalizing cwd", &cwd, source))?;
-
-    if !canonical_cwd.is_absolute() {
-        return Err(SessionStoreError::NonAbsoluteCreateCwd {
-            path: canonical_cwd,
-        });
+    if !absolute_cwd.is_absolute() {
+        return Err(SessionStoreError::NonAbsoluteCreateCwd { path: absolute_cwd });
     }
 
-    Ok(canonical_cwd)
+    std::fs::metadata(&absolute_cwd)
+        .map_err(|source| SessionStoreError::io("resolving cwd metadata", &absolute_cwd, source))?;
+
+    Ok(absolute_cwd)
 }
 
 fn format_now_rfc3339() -> Result<String, SessionStoreError> {
