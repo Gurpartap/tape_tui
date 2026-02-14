@@ -12,10 +12,15 @@ Transport-focused crate for ChatGPT Codex API HTTP + SSE parity work.
 - Token payload must include `https://api.openai.com/auth.chatgpt_account_id` for request authorization context.
 - Configure and send requests through `CodexApiClient::build_request`.
 - Execute request/retry behavior with `CodexApiClient::send_with_retry`.
-- Consume SSE streams with `CodexApiClient::stream`, which emits:
-  - transport events as `CodexStreamEvent`
-  - optional terminal status in `StreamResult::terminal` (absent when stream ends
-    without a known terminal state).
+- Consume SSE streams incrementally with `CodexApiClient::stream_with_handler`,
+  which invokes the callback in parser order for non-failure
+  `CodexStreamEvent` values and returns an optional terminal status at EOF.
+  Stream-failure events (`response.failed`/`error`) are surfaced as
+  `CodexApiError::StreamFailed` and short-circuit the stream call.
+- `CodexApiClient::stream` remains available as a compatibility collector around
+  `stream_with_handler`, returning buffered events plus
+  `StreamResult::terminal` (absent when stream ends without a known terminal
+  state).
 - Function-call output items are normalized into ordered event pairs:
   - `CodexStreamEvent::OutputItemDone` for raw item completion metadata
   - `CodexStreamEvent::ToolCallRequested` for host-mediated tool execution payloads
@@ -28,7 +33,8 @@ Transport-focused crate for ChatGPT Codex API HTTP + SSE parity work.
 - Unknown typed SSE frames are retained as `CodexStreamEvent::Unknown`.
 - Retry policy is bounded by `MAX_RETRIES` with exponential backoff and PI-parity
   retry behavior for retryable HTTP/transient failures.
-- Cancellation is explicit: pass `Some(&CancellationSignal)` to `stream` and
-  `send_with_retry`; if set, the call returns `CodexApiError::Cancelled`.
+- Cancellation is explicit: pass `Some(&CancellationSignal)` to
+  `stream_with_handler`/`stream` and `send_with_retry`; if set, the call
+  returns `CodexApiError::Cancelled`.
 - Error taxonomy is represented by `CodexApiError` and includes parsed error
   payloads, retry exhaustion, SSE parse failures, and cancellation.

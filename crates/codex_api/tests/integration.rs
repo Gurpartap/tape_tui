@@ -173,6 +173,91 @@ async fn stream_integration_successful_completion() {
 }
 
 #[tokio::test]
+async fn stream_with_handler_integration_emits_events_incrementally_in_parser_order() {
+    let server = ScriptedServer::new(vec![ScriptedResponse::Respond {
+        status: 200,
+        content_type: "text/event-stream",
+        header_delay_ms: 0,
+        chunks: vec![
+            ResponseChunk {
+                delay_ms: 0,
+                bytes: sse_frames(&[r##"{"type":"response.output_text.delta","delta":"A"}"##]),
+            },
+            ResponseChunk {
+                delay_ms: 50,
+                bytes: sse_frames(&[
+                    r##"{"type":"response.output_text.delta","delta":"B"}"##,
+                    r##"{"type":"response.completed","response":{"status":"completed"}}"##,
+                ]),
+            },
+        ],
+    }])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let mut observed = Vec::new();
+    let terminal = client
+        .stream_with_handler(&request, None, |event| observed.push(event))
+        .await
+        .expect("incremental stream should succeed");
+
+    assert_eq!(terminal, Some(CodexResponseStatus::Completed));
+    assert_eq!(
+        observed,
+        vec![
+            CodexStreamEvent::OutputTextDelta {
+                delta: "A".to_string(),
+            },
+            CodexStreamEvent::OutputTextDelta {
+                delta: "B".to_string(),
+            },
+            CodexStreamEvent::ResponseCompleted {
+                status: Some(CodexResponseStatus::Completed),
+            },
+        ]
+    );
+
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_with_handler_integration_matches_stream_collector_terminal_and_events() {
+    let scripted = [
+        r##"{"type":"response.output_text.delta","delta":"alpha"}"##,
+        r##"{"type":"response.output_text.delta","delta":"beta"}"##,
+        r##"{"type":"response.completed","response":{"status":"completed"}}"##,
+    ];
+    let server = ScriptedServer::new(vec![
+        response_sse(200, &scripted),
+        response_sse(200, &scripted),
+    ])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = CodexApiClient::new(config).expect("client");
+
+    let mut observed = Vec::new();
+    let terminal = client
+        .stream_with_handler(&request, None, |event| observed.push(event))
+        .await
+        .expect("incremental stream should succeed");
+    let collected = client
+        .stream(&request, None)
+        .await
+        .expect("collector stream should succeed");
+
+    assert_eq!(terminal, collected.terminal);
+    assert_eq!(observed, collected.events);
+    assert_eq!(server.request_count(), 2);
+
+    server.shutdown();
+}
+
+#[tokio::test]
 async fn stream_integration_rejects_non_list_input_before_http_call() {
     let server = ScriptedServer::new(vec![response_sse(
         200,
@@ -585,6 +670,62 @@ async fn stream_integration_cancellation_during_stream() {
         let request = request.clone();
         let cancellation = Arc::clone(&cancellation);
         async move { client.stream(&request, Some(&cancellation)).await }
+    });
+
+    sleep(Duration::from_millis(120)).await;
+    let cancelled_at = Instant::now();
+    cancellation.store(true, Ordering::Release);
+
+    let result = timeout(Duration::from_secs(5), stream_task)
+        .await
+        .expect("stream task should resolve")
+        .expect("join handle should resolve")
+        .expect_err("cancellation should abort stream");
+
+    assert!(matches!(result, CodexApiError::Cancelled));
+    assert!(
+        cancelled_at.elapsed() < Duration::from_millis(500),
+        "stream cancellation should stop quickly"
+    );
+    assert_eq!(server.request_count(), 1);
+    server.shutdown();
+}
+
+#[tokio::test]
+async fn stream_with_handler_integration_cancellation_during_stream() {
+    let server = ScriptedServer::new(vec![ScriptedResponse::Respond {
+        status: 200,
+        content_type: "text/event-stream",
+        header_delay_ms: 0,
+        chunks: vec![
+            ResponseChunk {
+                delay_ms: 0,
+                bytes: sse_frames(&[r##"{"type":"response.output_text.delta","delta":"stream"}"##]),
+            },
+            ResponseChunk {
+                delay_ms: 1_000,
+                bytes: sse_frames(&[
+                    r##"{"type":"response.completed","response":{"status":"completed"}}"##,
+                ]),
+            },
+        ],
+    }])
+    .await;
+
+    let request = CodexRequest::new("gpt-codex", user_input("hi"), None);
+    let config = CodexApiConfig::new(token_with_account_id("acct")).with_base_url(&server.base_url);
+    let client = Arc::new(CodexApiClient::new(config).expect("client"));
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let stream_task = tokio::spawn({
+        let client = Arc::clone(&client);
+        let request = request.clone();
+        let cancellation = Arc::clone(&cancellation);
+        async move {
+            client
+                .stream_with_handler(&request, Some(&cancellation), |_event| {})
+                .await
+        }
     });
 
     sleep(Duration::from_millis(120)).await;

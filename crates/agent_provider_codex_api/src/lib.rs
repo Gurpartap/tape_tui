@@ -182,6 +182,20 @@ trait StreamClient: Send + Sync {
         request: &CodexRequest,
         cancel: &CancelSignal,
     ) -> Result<StreamResult, CodexApiError>;
+
+    fn stream_with_handler(
+        &self,
+        request: &CodexRequest,
+        cancel: &CancelSignal,
+        on_event: &mut dyn FnMut(CodexStreamEvent),
+    ) -> Result<Option<CodexResponseStatus>, CodexApiError> {
+        let stream_result = self.stream(request, cancel)?;
+        for stream_event in stream_result.events {
+            on_event(stream_event);
+        }
+
+        Ok(stream_result.terminal)
+    }
 }
 
 #[derive(Debug)]
@@ -203,6 +217,27 @@ impl StreamClient for DefaultStreamClient {
             })?;
 
         runtime.block_on(self.client.stream(request, Some(cancel)))
+    }
+
+    fn stream_with_handler(
+        &self,
+        request: &CodexRequest,
+        cancel: &CancelSignal,
+        on_event: &mut dyn FnMut(CodexStreamEvent),
+    ) -> Result<Option<CodexResponseStatus>, CodexApiError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                CodexApiError::Unknown(format!("failed to initialize tokio runtime: {error}"))
+            })?;
+
+        runtime.block_on(
+            self.client
+                .stream_with_handler(request, Some(cancel), |event| {
+                    on_event(event);
+                }),
+        )
     }
 }
 
@@ -260,6 +295,49 @@ impl CodexApiProvider {
         }
     }
 
+    fn process_stream_event(
+        &self,
+        run_id: u64,
+        stream_event: CodexStreamEvent,
+        replay_items: &mut Vec<ReplayStepItem>,
+        text_buffer: &mut String,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        match stream_event {
+            CodexStreamEvent::OutputTextDelta { delta } => {
+                if !delta.is_empty() {
+                    text_buffer.push_str(&delta);
+                    emit(RunEvent::Chunk {
+                        run_id,
+                        text: delta,
+                    });
+                }
+            }
+            CodexStreamEvent::ReasoningSummaryTextDelta { .. } => {}
+            CodexStreamEvent::ToolCallRequested {
+                id,
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                self.flush_text_buffer(text_buffer, replay_items);
+                replay_items.push(ReplayStepItem::ToolCall(parse_pending_tool_call(
+                    id, call_id, tool_name, arguments,
+                )?));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn flush_text_buffer(&self, text_buffer: &mut String, replay_items: &mut Vec<ReplayStepItem>) {
+        if !text_buffer.is_empty() {
+            replay_items.push(ReplayStepItem::AssistantText(std::mem::take(text_buffer)));
+        }
+    }
+
+    #[cfg(test)]
     fn process_stream_events(
         &self,
         run_id: u64,
@@ -270,40 +348,16 @@ impl CodexApiProvider {
         let mut text_buffer = String::new();
 
         for stream_event in stream_events {
-            match stream_event {
-                CodexStreamEvent::OutputTextDelta { delta } => {
-                    if !delta.is_empty() {
-                        text_buffer.push_str(&delta);
-                        emit(RunEvent::Chunk {
-                            run_id,
-                            text: delta,
-                        });
-                    }
-                }
-                CodexStreamEvent::ReasoningSummaryTextDelta { .. } => {}
-                CodexStreamEvent::ToolCallRequested {
-                    id,
-                    call_id,
-                    tool_name,
-                    arguments,
-                } => {
-                    if !text_buffer.is_empty() {
-                        replay_items.push(ReplayStepItem::AssistantText(std::mem::take(
-                            &mut text_buffer,
-                        )));
-                    }
-
-                    replay_items.push(ReplayStepItem::ToolCall(parse_pending_tool_call(
-                        id, call_id, tool_name, arguments,
-                    )?));
-                }
-                _ => {}
-            }
+            self.process_stream_event(
+                run_id,
+                stream_event,
+                &mut replay_items,
+                &mut text_buffer,
+                emit,
+            )?;
         }
 
-        if !text_buffer.is_empty() {
-            replay_items.push(ReplayStepItem::AssistantText(text_buffer));
-        }
+        self.flush_text_buffer(&mut text_buffer, &mut replay_items);
 
         Ok(StreamStepOutcome { replay_items })
     }
@@ -440,8 +494,29 @@ impl RunProvider for CodexApiProvider {
                 return Ok(());
             }
 
-            let stream_result = match self.stream_client.stream(&request, &cancel) {
-                Ok(result) => result,
+            let mut replay_items = Vec::new();
+            let mut text_buffer = String::new();
+            let mut stream_parse_error = None;
+            let terminal = match self.stream_client.stream_with_handler(
+                &request,
+                &cancel,
+                &mut |stream_event| {
+                    if stream_parse_error.is_some() {
+                        return;
+                    }
+
+                    if let Err(error) = self.process_stream_event(
+                        run_id,
+                        stream_event,
+                        &mut replay_items,
+                        &mut text_buffer,
+                        emit,
+                    ) {
+                        stream_parse_error = Some(error);
+                    }
+                },
+            ) {
+                Ok(terminal) => terminal,
                 Err(CodexApiError::Cancelled) => {
                     emit(RunEvent::Cancelled { run_id });
                     return Ok(());
@@ -455,14 +530,13 @@ impl RunProvider for CodexApiProvider {
                 }
             };
 
-            let stream_outcome =
-                match self.process_stream_events(run_id, stream_result.events, emit) {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        emit(RunEvent::Failed { run_id, error });
-                        return Ok(());
-                    }
-                };
+            if let Some(error) = stream_parse_error {
+                emit(RunEvent::Failed { run_id, error });
+                return Ok(());
+            }
+
+            self.flush_text_buffer(&mut text_buffer, &mut replay_items);
+            let stream_outcome = StreamStepOutcome { replay_items };
 
             let has_pending_tool_calls = stream_outcome
                 .replay_items
@@ -470,11 +544,11 @@ impl RunProvider for CodexApiProvider {
                 .any(|item| matches!(item, ReplayStepItem::ToolCall(_)));
 
             if !has_pending_tool_calls {
-                self.emit_terminal_event(run_id, stream_result.terminal, emit);
+                self.emit_terminal_event(run_id, terminal, emit);
                 return Ok(());
             }
 
-            match stream_result.terminal {
+            match terminal {
                 Some(CodexResponseStatus::Completed) => {}
                 Some(CodexResponseStatus::Cancelled) => {
                     emit(RunEvent::Cancelled { run_id });
@@ -1414,7 +1488,7 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use super::*;
 
@@ -1463,6 +1537,67 @@ mod tests {
                 Some(FakeStreamOutcome::Error(error)) => Err(error),
                 None => panic!("fake stream outcomes should cover every adapter request"),
             }
+        }
+    }
+
+    struct FakeIncrementalStreamClient {
+        observed_requests: Mutex<Vec<CodexRequest>>,
+        chunk_processed: Arc<AtomicBool>,
+        callback_invocations: AtomicUsize,
+    }
+
+    impl FakeIncrementalStreamClient {
+        fn with_chunk_processed_flag(chunk_processed: Arc<AtomicBool>) -> Arc<Self> {
+            Arc::new(Self {
+                observed_requests: Mutex::new(Vec::new()),
+                chunk_processed,
+                callback_invocations: AtomicUsize::new(0),
+            })
+        }
+
+        fn observed_requests(&self) -> Vec<CodexRequest> {
+            lock_unpoisoned(&self.observed_requests).clone()
+        }
+
+        fn callback_invocations(&self) -> usize {
+            self.callback_invocations.load(Ordering::Acquire)
+        }
+    }
+
+    impl StreamClient for FakeIncrementalStreamClient {
+        fn stream(
+            &self,
+            _request: &CodexRequest,
+            _cancel: &CancelSignal,
+        ) -> Result<StreamResult, CodexApiError> {
+            panic!("incremental stream client should use stream_with_handler")
+        }
+
+        fn stream_with_handler(
+            &self,
+            request: &CodexRequest,
+            _cancel: &CancelSignal,
+            on_event: &mut dyn FnMut(CodexStreamEvent),
+        ) -> Result<Option<CodexResponseStatus>, CodexApiError> {
+            lock_unpoisoned(&self.observed_requests).push(request.clone());
+
+            on_event(CodexStreamEvent::OutputTextDelta {
+                delta: "Hello".to_string(),
+            });
+            self.callback_invocations.fetch_add(1, Ordering::AcqRel);
+
+            if !self.chunk_processed.load(Ordering::Acquire) {
+                return Err(CodexApiError::Unknown(
+                    "chunk callback was not processed incrementally".to_string(),
+                ));
+            }
+
+            on_event(CodexStreamEvent::ResponseCompleted {
+                status: Some(CodexResponseStatus::Completed),
+            });
+            self.callback_invocations.fetch_add(1, Ordering::AcqRel);
+
+            Ok(Some(CodexResponseStatus::Completed))
         }
     }
 
@@ -2666,6 +2801,56 @@ mod tests {
             events.last(),
             Some(RunEvent::Finished { run_id: 9 })
         ));
+    }
+
+    #[test]
+    fn run_uses_incremental_stream_handler_and_emits_chunk_before_terminal() {
+        let chunk_processed = Arc::new(AtomicBool::new(false));
+        let stream =
+            FakeIncrementalStreamClient::with_chunk_processed_flag(Arc::clone(&chunk_processed));
+        let provider = CodexApiProvider::with_stream_client_for_tests(
+            vec!["gpt-5.1-codex".to_string()],
+            Arc::clone(&stream) as Arc<dyn StreamClient>,
+        );
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut events = Vec::new();
+        provider
+            .run(
+                RunRequest {
+                    run_id: 21,
+                    messages: vec![RunMessage::UserText {
+                        text: "hello".to_string(),
+                    }],
+                    instructions: "system instructions".to_string(),
+                },
+                cancel,
+                &mut |_call| {
+                    panic!("tool executor should not be invoked when no tool calls are streamed")
+                },
+                &mut |event| {
+                    if matches!(event, RunEvent::Chunk { .. }) {
+                        chunk_processed.store(true, Ordering::Release);
+                    }
+                    events.push(event);
+                },
+            )
+            .expect("run should succeed");
+
+        assert!(chunk_processed.load(Ordering::Acquire));
+        assert_eq!(stream.callback_invocations(), 2);
+        assert_eq!(stream.observed_requests().len(), 1);
+        assert_eq!(
+            events,
+            vec![
+                RunEvent::Started { run_id: 21 },
+                RunEvent::Chunk {
+                    run_id: 21,
+                    text: "Hello".to_string(),
+                },
+                RunEvent::Finished { run_id: 21 },
+            ]
+        );
     }
 
     #[test]

@@ -183,15 +183,19 @@ impl CodexApiClient {
         })
     }
 
-    pub async fn stream(
+    pub async fn stream_with_handler<F>(
         &self,
         request: &CodexRequest,
         cancellation: Option<&CancellationSignal>,
-    ) -> Result<StreamResult, CodexApiError> {
+        mut on_event: F,
+    ) -> Result<Option<CodexResponseStatus>, CodexApiError>
+    where
+        F: FnMut(CodexStreamEvent),
+    {
         let response = self.send_with_retry(request, cancellation).await?;
         let mut bytes = response.bytes_stream();
         let mut parser = SseStreamParser::default();
-        let mut events = Vec::new();
+        let mut terminal = None;
 
         loop {
             let Some(chunk) = await_or_cancel(bytes.next(), cancellation).await? else {
@@ -202,10 +206,7 @@ impl CodexApiClient {
             }
             let chunk = chunk.map_err(CodexApiError::from)?;
             for event in parser.feed(&chunk) {
-                if let Some(error) = stream_failure_from_event(&event) {
-                    return Err(error);
-                }
-                events.push(event);
+                process_stream_event(event, &mut terminal, &mut on_event)?;
             }
         }
 
@@ -213,7 +214,21 @@ impl CodexApiClient {
             return Err(CodexApiError::Cancelled);
         }
 
-        let terminal = terminal_status(&events);
+        Ok(terminal.flatten())
+    }
+
+    pub async fn stream(
+        &self,
+        request: &CodexRequest,
+        cancellation: Option<&CancellationSignal>,
+    ) -> Result<StreamResult, CodexApiError> {
+        let mut events = Vec::new();
+        let terminal = self
+            .stream_with_handler(request, cancellation, |event| {
+                events.push(event);
+            })
+            .await?;
+
         Ok(StreamResult { events, terminal })
     }
 }
@@ -240,16 +255,45 @@ fn value_type_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
+fn process_stream_event<F>(
+    event: CodexStreamEvent,
+    terminal: &mut Option<Option<CodexResponseStatus>>,
+    on_event: &mut F,
+) -> Result<(), CodexApiError>
+where
+    F: FnMut(CodexStreamEvent),
+{
+    if let Some(error) = stream_failure_from_event(&event) {
+        return Err(error);
+    }
+
+    if let Some(next_terminal) = terminal_status_from_event(&event) {
+        *terminal = Some(next_terminal);
+    }
+
+    on_event(event);
+    Ok(())
+}
+
+#[cfg(test)]
 fn terminal_status(events: &[CodexStreamEvent]) -> Option<CodexResponseStatus> {
-    for event in events.iter().rev() {
-        match event {
-            CodexStreamEvent::ResponseCompleted { status } => return *status,
-            CodexStreamEvent::ResponseFailed { .. } => return Some(CodexResponseStatus::Failed),
-            CodexStreamEvent::Error { .. } => return Some(CodexResponseStatus::Failed),
-            _ => {}
+    let mut terminal = None;
+    for event in events {
+        if let Some(next_terminal) = terminal_status_from_event(event) {
+            terminal = Some(next_terminal);
         }
     }
-    None
+
+    terminal.flatten()
+}
+
+fn terminal_status_from_event(event: &CodexStreamEvent) -> Option<Option<CodexResponseStatus>> {
+    match event {
+        CodexStreamEvent::ResponseCompleted { status } => Some(*status),
+        CodexStreamEvent::ResponseFailed { .. } => Some(Some(CodexResponseStatus::Failed)),
+        CodexStreamEvent::Error { .. } => Some(Some(CodexResponseStatus::Failed)),
+        _ => None,
+    }
 }
 
 fn stream_failure_from_event(event: &CodexStreamEvent) -> Option<CodexApiError> {
@@ -329,8 +373,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_status;
+    use super::{process_stream_event, terminal_status};
     use crate::events::{CodexResponseStatus, CodexStreamEvent};
+    use crate::sse::SseStreamParser;
 
     #[test]
     fn terminal_status_reports_completed_status() {
@@ -395,5 +440,58 @@ mod tests {
     fn terminal_status_treats_unknown_completed_status_as_none() {
         let events = vec![CodexStreamEvent::ResponseCompleted { status: None }];
         assert_eq!(terminal_status(&events), None);
+    }
+
+    #[test]
+    fn process_stream_event_emits_output_deltas_in_parser_order() {
+        let frames = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"A\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"B\"}\n\n",
+        );
+        let mut parser = SseStreamParser::default();
+        let parsed = parser.feed(frames.as_bytes());
+
+        let mut terminal = None;
+        let mut observed = Vec::new();
+        for event in parsed {
+            process_stream_event(event, &mut terminal, &mut |event| observed.push(event))
+                .expect("output deltas should process successfully");
+        }
+
+        assert!(terminal.is_none());
+        assert_eq!(
+            observed,
+            vec![
+                CodexStreamEvent::OutputTextDelta {
+                    delta: "A".to_string(),
+                },
+                CodexStreamEvent::OutputTextDelta {
+                    delta: "B".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn process_stream_event_terminal_tracking_matches_terminal_status_scan() {
+        let events = vec![
+            CodexStreamEvent::OutputTextDelta {
+                delta: "hello".to_owned(),
+            },
+            CodexStreamEvent::ResponseCompleted {
+                status: Some(CodexResponseStatus::Completed),
+            },
+            CodexStreamEvent::ResponseCompleted { status: None },
+        ];
+
+        let mut terminal = None;
+        let mut observed = Vec::new();
+        for event in events.iter().cloned() {
+            process_stream_event(event, &mut terminal, &mut |event| observed.push(event))
+                .expect("events should process successfully");
+        }
+
+        assert_eq!(terminal.flatten(), terminal_status(&events));
+        assert_eq!(observed, events);
     }
 }
