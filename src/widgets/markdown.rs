@@ -960,6 +960,17 @@ const ANSI_RESET: &str = "\x1b[0m";
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
+/// Best-effort cache prewarm for markdown code highlighting.
+///
+/// Intended for background startup use so the first highlighted code block
+/// is less likely to pay one-time syntax/theme initialization cost.
+pub fn prewarm_markdown_highlighting() {
+    Lazy::force(&SYNTAX_SET);
+    Lazy::force(&THEME_SET);
+
+    let _ = highlight_markdown_code_ansi("fn main() {}", Some("rust"));
+}
+
 /// Highlights markdown fenced code blocks with ANSI colors.
 ///
 /// Falls back to plain text if language/theme lookup or highlighting fails.
@@ -1042,7 +1053,10 @@ fn normalize_code_fence_language(language: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{highlight_markdown_code_ansi, DefaultTextStyle, Markdown, MarkdownTheme};
+    use super::{
+        highlight_markdown_code_ansi, prewarm_markdown_highlighting, DefaultTextStyle, Markdown,
+        MarkdownTheme,
+    };
     use crate::core::component::Component;
 
     fn theme() -> MarkdownTheme {
@@ -1166,5 +1180,10 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(strip_ansi_for_test(&lines[0]), "fn main() {}");
         assert!(lines[0].ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn prewarm_does_not_panic() {
+        prewarm_markdown_highlighting();
     }
 }

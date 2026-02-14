@@ -6,9 +6,13 @@ use coding_agent::providers;
 use coding_agent::runtime::RuntimeController;
 use coding_agent::tui::AppComponent;
 use session_store::SessionStore;
-use tape_tui::{ProcessTerminal, TUI};
+use tape_tui::{prewarm_markdown_highlighting, ProcessTerminal, TUI};
 
 fn main() -> io::Result<()> {
+    let _ = std::thread::Builder::new()
+        .name("markdown-highlight-prewarm".to_string())
+        .spawn(prewarm_markdown_highlighting);
+
     let system_instructions = system_instructions_from_env();
     let app = Arc::new(Mutex::new(App::with_system_instructions(Some(
         system_instructions,

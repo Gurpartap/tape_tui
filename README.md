@@ -253,3 +253,22 @@ cargo run --example interactive-shell
 cargo run --example markdown-playground
 cargo run --example ansi-forensics
 ```
+
+### Benchmark markdown syntax highlighting
+
+Use the dedicated benchmark harness to compare markdown render cost with
+highlighting enabled (default syntect path) versus disabled (plain no-op
+highlighter override):
+
+```bash
+cargo run --release --example markdown_highlight_bench
+```
+
+The benchmark corpus contains fenced code blocks for 10 different languages:
+zig, c++, haskell, ocaml, lisp, c, go, rust, mermaid, and dot.
+
+The benchmark reports:
+- cold render cost,
+- steady-state cost with a fresh Markdown instance per render,
+- stream-like cost with a reused Markdown instance using `set_text` incremental
+  updates.
