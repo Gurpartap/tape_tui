@@ -31,10 +31,11 @@ struct SessionRecorder {
 impl SessionRecorder {
     fn new(store: SessionStore) -> Self {
         let entry_timestamp = store.header().created_at.clone();
+        let next_entry_index = store.entry_count() as u64 + 1;
 
         Self {
             store,
-            next_entry_index: 1,
+            next_entry_index,
             entry_timestamp,
         }
     }

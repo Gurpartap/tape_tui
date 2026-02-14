@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use agent_provider::RunMessage;
 use serde_json::json;
 use session_store::{
-    SessionEntry, SessionEntryKind, SessionHeader, SessionStore, SessionStoreError,
+    session_root, SessionEntry, SessionEntryKind, SessionHeader, SessionStore, SessionStoreError,
 };
 use tempfile::TempDir;
 
@@ -538,4 +538,30 @@ fn replay_leaf_rejects_unknown_leaf_id() {
         .replay_leaf(Some("missing-leaf"))
         .expect_err("unknown leaf id must fail replay");
     assert!(matches!(error, SessionStoreError::UnknownLeafId { .. }));
+}
+
+#[test]
+fn latest_session_path_returns_newest_jsonl_file() {
+    let cwd = tempfile::tempdir().expect("tempdir should be created");
+    let root = session_root(cwd.path());
+    std::fs::create_dir_all(&root).expect("session root should be created");
+
+    let older_path = root.join("2026-02-14T00-00-00Z_older.jsonl");
+    std::fs::write(&older_path, "{}").expect("older session file should be written");
+
+    let newer_path = root.join("2026-02-14T00-00-00Z_newer.jsonl");
+    std::fs::write(&newer_path, "{}").expect("newer session file should be written");
+
+    let latest =
+        SessionStore::latest_session_path(cwd.path()).expect("latest session path should resolve");
+    assert_eq!(latest, newer_path);
+}
+
+#[test]
+fn latest_session_path_errors_when_no_session_files_exist() {
+    let cwd = tempfile::tempdir().expect("tempdir should be created");
+
+    let error = SessionStore::latest_session_path(cwd.path())
+        .expect_err("missing session root should return explicit no-sessions error");
+    assert!(matches!(error, SessionStoreError::NoSessionsFound { .. }));
 }

@@ -482,6 +482,27 @@ mod tests {
     }
 
     #[test]
+    fn provider_from_env_propagates_startup_session_id_into_codex_provider_config() {
+        let _env_serialization = lock_unpoisoned(env_lock());
+        let file = write_bootstrap_config(&codex_bootstrap_json(
+            VALID_ACCOUNT_TOKEN,
+            "[\"gpt-5.3-codex\"]",
+            Some(120),
+        ));
+        let _provider = EnvVarGuard::set(PROVIDER_ENV_VAR, Some(CODEX_API_PROVIDER_ID));
+        let _config = EnvVarGuard::set(
+            CODEX_CONFIG_PATH_ENV_VAR,
+            Some(file.path().to_str().expect("temp path must be utf-8")),
+        );
+
+        let error = provider_init_error(
+            provider_from_env_with_session_id(Some("   ")),
+            "blank startup session id should be validated by codex provider config",
+        );
+        assert!(error.message().contains("session id"));
+    }
+
+    #[test]
     fn codex_bootstrap_applies_startup_session_id_to_provider_config() {
         let config = CodexBootstrapConfig {
             access_token: VALID_ACCOUNT_TOKEN.to_string(),
@@ -493,5 +514,24 @@ mod tests {
             .expect("provider config should build");
 
         assert_eq!(provider_config.session_id.as_deref(), Some("session-123"));
+    }
+
+    #[test]
+    fn codex_bootstrap_rejects_unexpected_session_id_field_in_file() {
+        let _env_serialization = lock_unpoisoned(env_lock());
+        let file = write_bootstrap_config(&format!(
+            "{{\n  \"access_token\": \"{VALID_ACCOUNT_TOKEN}\",\n  \"models\": [\"gpt-5.3-codex\"],\n  \"session_id\": \"from-file\"\n}}"
+        ));
+        let _provider = EnvVarGuard::set(PROVIDER_ENV_VAR, Some(CODEX_API_PROVIDER_ID));
+        let _config = EnvVarGuard::set(
+            CODEX_CONFIG_PATH_ENV_VAR,
+            Some(file.path().to_str().expect("temp path must be utf-8")),
+        );
+
+        let error = provider_init_error(
+            provider_from_env_with_session_id(Some("from-startup")),
+            "unknown bootstrap field should fail closed",
+        );
+        assert!(error.message().contains("unknown field `session_id`"));
     }
 }

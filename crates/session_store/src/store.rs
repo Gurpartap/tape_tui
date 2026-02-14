@@ -147,6 +147,62 @@ impl SessionStore {
         })
     }
 
+    pub fn latest_session_path(cwd: &Path) -> Result<PathBuf, SessionStoreError> {
+        let cwd = resolve_absolute_cwd(cwd)?;
+        let root = session_root(&cwd);
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SessionStoreError::NoSessionsFound { root });
+            }
+            Err(source) => {
+                return Err(SessionStoreError::io(
+                    "listing session root directory",
+                    &root,
+                    source,
+                ));
+            }
+        };
+
+        let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+
+        for entry in entries {
+            let entry = entry.map_err(|source| {
+                SessionStoreError::io("reading session root entry", &root, source)
+            })?;
+            let path = entry.path();
+
+            let file_type = entry.file_type().map_err(|source| {
+                SessionStoreError::io("reading session file type", &path, source)
+            })?;
+            if !file_type.is_file() {
+                continue;
+            }
+
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let metadata = entry.metadata().map_err(|source| {
+                SessionStoreError::io("reading session file metadata", &path, source)
+            })?;
+            let modified = metadata.modified().map_err(|source| {
+                SessionStoreError::io("reading session file modified timestamp", &path, source)
+            })?;
+
+            match &latest {
+                Some((latest_modified, latest_path))
+                    if modified < *latest_modified
+                        || (modified == *latest_modified && path <= *latest_path) => {}
+                _ => latest = Some((modified, path)),
+            }
+        }
+
+        latest
+            .map(|(_, path)| path)
+            .ok_or(SessionStoreError::NoSessionsFound { root })
+    }
+
     pub fn append(&mut self, entry: SessionEntry) -> Result<(), SessionStoreError> {
         let line_number = self.entries.len() + 2;
         validate_entry_line(&self.path, line_number, &entry)?;
@@ -200,6 +256,16 @@ impl SessionStore {
     #[must_use]
     pub fn header(&self) -> &SessionHeader {
         &self.header
+    }
+
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.header.session_id
+    }
+
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 
     #[must_use]

@@ -988,7 +988,7 @@ fn start_user_turn_persistence_failure_is_fatal_and_provider_run_is_not_invoked(
         let (_session_workspace, mut session_store, session_path) = create_session_store_for_test();
         append_seed_user_entry(
             &mut session_store,
-            "entry-00000000000000000001",
+            "entry-00000000000000000002",
             None,
             "seed",
         );
@@ -1041,7 +1041,7 @@ fn finished_run_persistence_failure_is_fatal_and_stops_runtime_progression() {
         let (_session_workspace, mut session_store, session_path) = create_session_store_for_test();
         append_seed_user_entry(
             &mut session_store,
-            "entry-00000000000000000002",
+            "entry-00000000000000000003",
             None,
             "seed",
         );
@@ -1254,6 +1254,62 @@ fn cancelled_run_discards_pending_assistant_and_tool_entries_from_persistence() 
             vec![RunMessage::UserText {
                 text: "first prompt".to_string(),
             }]
+        );
+    });
+}
+
+#[test]
+fn resumed_session_first_append_uses_next_entry_index_without_id_collision() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (_session_workspace, mut session_store, session_path) = create_session_store_for_test();
+        append_seed_user_entry(
+            &mut session_store,
+            "entry-00000000000000000001",
+            None,
+            "seed",
+        );
+
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let run_id = submit_prompt(&app, &mut host, "after resume");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content == "hello world"
+                    })
+            },
+        );
+        assert!(settled, "resumed run did not settle");
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![
+                RunMessage::UserText {
+                    text: "seed".to_string(),
+                },
+                RunMessage::UserText {
+                    text: "after resume".to_string(),
+                },
+                RunMessage::AssistantText {
+                    text: "hello world".to_string(),
+                },
+            ]
         );
     });
 }
@@ -1802,6 +1858,64 @@ fn runtime_replays_model_facing_message_history_across_turns() {
                 RunMessage::UserText {
                     text: "second prompt".to_string(),
                 }
+            ]
+        );
+    });
+}
+
+#[test]
+fn restored_conversation_is_replayed_on_next_turn() {
+    with_runtime_loop(|runtime_loop| {
+        let mut app_state = App::new();
+        app_state.restore_conversation(vec![
+            RunMessage::UserText {
+                text: "prior user".to_string(),
+            },
+            RunMessage::AssistantText {
+                text: "prior assistant".to_string(),
+            },
+        ]);
+
+        let app = Arc::new(Mutex::new(app_state));
+        let captured_messages = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(MessageHistoryCaptureProvider::new(
+            Arc::clone(&captured_messages),
+        ));
+        let mut host = RuntimeController::new(app.clone(), runtime_loop.runtime_handle(), provider);
+
+        let run_id = submit_prompt(&app, &mut host, "new prompt");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                matches!(app.mode, Mode::Idle)
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content == format!("ack:{run_id}")
+                    })
+            },
+        );
+        assert!(settled, "restored conversation run did not settle");
+
+        let captured_messages = lock_unpoisoned(&captured_messages);
+        assert_eq!(captured_messages.len(), 1);
+        assert_eq!(
+            captured_messages[0],
+            vec![
+                RunMessage::UserText {
+                    text: "prior user".to_string(),
+                },
+                RunMessage::AssistantText {
+                    text: "prior assistant".to_string(),
+                },
+                RunMessage::UserText {
+                    text: "new prompt".to_string(),
+                },
             ]
         );
     });

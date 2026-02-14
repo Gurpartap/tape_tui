@@ -79,6 +79,9 @@ pub enum SessionStoreError {
     #[error("path provided to create_new must resolve to an absolute cwd: {path}")]
     NonAbsoluteCreateCwd { path: PathBuf },
 
+    #[error("no session files found under {root}")]
+    NoSessionsFound { root: PathBuf },
+
     #[error("cannot replay unknown leaf id '{leaf_id}' in {path}")]
     UnknownLeafId { path: PathBuf, leaf_id: String },
 

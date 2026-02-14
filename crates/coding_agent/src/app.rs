@@ -175,6 +175,72 @@ impl App {
         &self.system_instructions
     }
 
+    /// Restores model-facing conversation memory from persisted session replay,
+    /// and hydrates transcript with a stable non-streaming view of prior turns.
+    pub fn restore_conversation(&mut self, messages: Vec<RunMessage>) {
+        self.mode = Mode::Idle;
+        self.input.clear();
+        self.history = InputHistory::default();
+        self.should_exit = false;
+        self.conversation = messages.clone();
+        self.pending_run_memory = None;
+        self.cancelling_run = None;
+
+        self.transcript = messages
+            .into_iter()
+            .map(|message| match message {
+                RunMessage::UserText { text } => Message {
+                    role: Role::User,
+                    content: text,
+                    streaming: false,
+                    run_id: None,
+                },
+                RunMessage::AssistantText { text } => Message {
+                    role: Role::Assistant,
+                    content: text,
+                    streaming: false,
+                    run_id: None,
+                },
+                RunMessage::ToolCall {
+                    call_id, tool_name, ..
+                } => Message {
+                    role: Role::Tool,
+                    content: format!("Tool {tool_name} ({call_id}) started"),
+                    streaming: false,
+                    run_id: None,
+                },
+                RunMessage::ToolResult {
+                    call_id,
+                    tool_name,
+                    content,
+                    is_error,
+                } => {
+                    let content_text = match &content {
+                        serde_json::Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    };
+
+                    let mut text = format!(
+                        "Tool {tool_name} ({call_id}) {}",
+                        if is_error { "failed" } else { "completed" }
+                    );
+
+                    if is_error && !content_text.is_empty() {
+                        text.push_str(": ");
+                        text.push_str(content_text.as_str());
+                    }
+
+                    Message {
+                        role: Role::Tool,
+                        content: text,
+                        streaming: false,
+                        run_id: None,
+                    }
+                }
+            })
+            .collect();
+    }
+
     /// Returns model-facing conversation messages retained across turns.
     pub fn conversation_messages(&self) -> &[RunMessage] {
         &self.conversation
@@ -1339,5 +1405,55 @@ mod tests {
                     | RunMessage::ToolResult { .. }
             )
         }));
+    }
+
+    #[test]
+    fn restore_conversation_restores_model_memory_and_hydrates_transcript() {
+        let mut app = App::new();
+        app.mode = Mode::Error("stale error".to_string());
+        app.input = "stale input".to_string();
+        app.should_exit = true;
+        app.history.entries.push("stale history".to_string());
+        app.history.cursor = Some(0);
+        app.history.draft = Some("draft".to_string());
+
+        let restored = vec![
+            RunMessage::UserText {
+                text: "prompt".to_string(),
+            },
+            RunMessage::AssistantText {
+                text: "reply".to_string(),
+            },
+            RunMessage::ToolCall {
+                call_id: "call-1".to_string(),
+                tool_name: "read".to_string(),
+                arguments: serde_json::json!({ "path": "README.md" }),
+            },
+            RunMessage::ToolResult {
+                call_id: "call-1".to_string(),
+                tool_name: "read".to_string(),
+                content: serde_json::json!("ok"),
+                is_error: false,
+            },
+        ];
+
+        app.restore_conversation(restored.clone());
+
+        assert_eq!(app.mode, Mode::Idle);
+        assert_eq!(app.input, "");
+        assert!(!app.should_exit);
+        assert!(app.history.entries.is_empty());
+        assert_eq!(app.history.cursor, None);
+        assert_eq!(app.history.draft, None);
+        assert_eq!(app.conversation_messages(), restored.as_slice());
+        assert_eq!(app.transcript.len(), 4);
+        assert_eq!(app.transcript[0].role, Role::User);
+        assert_eq!(app.transcript[0].content, "prompt");
+        assert_eq!(app.transcript[1].role, Role::Assistant);
+        assert_eq!(app.transcript[1].content, "reply");
+        assert_eq!(app.transcript[2].role, Role::Tool);
+        assert_eq!(app.transcript[2].content, "Tool read (call-1) started");
+        assert_eq!(app.transcript[3].role, Role::Tool);
+        assert_eq!(app.transcript[3].content, "Tool read (call-1) completed");
     }
 }

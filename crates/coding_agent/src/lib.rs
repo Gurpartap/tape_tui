@@ -42,11 +42,17 @@
 //!
 //! `coding_agent` startup creates a new append-only JSONL session under
 //! `<cwd>/.agent/sessions/` and wires that session id into provider bootstrap.
+//! Passing `--continue` switches startup to strict resume mode: it opens the
+//! latest session file under `<cwd>/.agent/sessions/`, replays the current leaf
+//! into model-facing memory, and appends subsequent entries to that same file.
+//! Passing `--session <session-filepath>` resumes from an explicit session file
+//! path (absolute or `<cwd>`-relative) with the same strict replay semantics.
 //! Session durability is strict: the header write and every appended entry are
 //! persisted with `sync_data` before reporting success.
 //!
 //! Failure policy is fail-closed:
 //! - startup session creation/open/parse/validation failures are hard errors;
+//! - `--continue` resume failures never fall back to creating a new session;
 //! - runtime append/sync failures are fatal (error mode + stop request + exit);
 //! - no degraded persistence fallback mode is used by the binary startup path.
 //!
