@@ -162,6 +162,7 @@ impl HostToolExecutor {
 pub const POST_TERMINAL_TOOL_REJECTION_ERROR: &str =
     "Provider requested tool call after terminal run event";
 pub const SESSION_PERSISTENCE_FATAL_ERROR_PREFIX: &str = "Session persistence failed:";
+const RUN_EVENT_DRAIN_BATCH_SIZE: usize = 4;
 
 pub struct RuntimeController {
     app: Arc<Mutex<App>>,
@@ -439,17 +440,30 @@ impl RuntimeController {
         };
 
         if should_drain {
-            self.runtime_handle
-                .dispatch(Command::Custom(Box::new(DrainRunEventsCommand {
-                    controller: Arc::clone(self),
-                })));
+            self.dispatch_drain_run_events_command();
         }
     }
 
-    fn drain_pending_run_events(&self) -> usize {
+    fn dispatch_drain_run_events_command(self: &Arc<Self>) {
+        self.runtime_handle
+            .dispatch(Command::Custom(Box::new(DrainRunEventsCommand {
+                controller: Arc::clone(self),
+            })));
+    }
+
+    fn has_pending_run_events(&self) -> bool {
+        let pending_events = lock_unpoisoned(&self.pending_events);
+        !pending_events.is_empty()
+    }
+
+    fn drain_pending_run_events(&self, max_events: usize) -> usize {
+        if max_events == 0 {
+            return 0;
+        }
+
         let mut drained = 0usize;
 
-        loop {
+        while drained < max_events {
             let event = {
                 let mut pending_events = lock_unpoisoned(&self.pending_events);
                 pending_events.pop_front()
@@ -473,12 +487,22 @@ impl RuntimeController {
     /// harnesses or external callers that never call `RuntimeHandle::run_once`) to
     /// guarantee queued run and tool state is applied.
     pub fn flush_pending_run_events(&self) -> usize {
-        let drained = self.drain_pending_run_events();
-        if drained > 0 {
+        let mut total_drained = 0usize;
+
+        loop {
+            let drained = self.drain_pending_run_events(RUN_EVENT_DRAIN_BATCH_SIZE);
+            total_drained += drained;
+
+            if drained == 0 || !self.has_pending_run_events() {
+                break;
+            }
+        }
+
+        if total_drained > 0 {
             self.runtime_handle.dispatch(Command::RequestRender);
         }
 
-        drained
+        total_drained
     }
 
     fn wait_for_app_run_visibility(&self, run_id: RunId) {
@@ -695,10 +719,17 @@ impl CustomCommand for DrainRunEventsCommand {
     }
 
     fn apply(self: Box<Self>, ctx: &mut CustomCommandCtx) -> Result<(), CustomCommandError> {
-        let drained = self.controller.drain_pending_run_events();
+        let drained = self
+            .controller
+            .drain_pending_run_events(RUN_EVENT_DRAIN_BATCH_SIZE);
         if drained > 0 {
             ctx.request_render();
         }
+
+        if self.controller.has_pending_run_events() {
+            self.controller.dispatch_drain_run_events_command();
+        }
+
         Ok(())
     }
 }
@@ -908,7 +939,67 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compose_system_instructions, tool_prompting_instruction_appendix};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+
+    use tape_tui::{Terminal, TUI};
+
+    use super::{
+        compose_system_instructions, lock_unpoisoned, tool_prompting_instruction_appendix, App,
+        Mode, ProviderProfile, RunEvent, RunMessage, RunProvider, RunRequest, RuntimeController,
+        RuntimeEvent, ToolCallRequest, ToolResult,
+    };
+
+    #[derive(Default)]
+    struct NullTerminal;
+
+    impl Terminal for NullTerminal {
+        fn start(
+            &mut self,
+            _on_input: Box<dyn FnMut(String) + Send>,
+            _on_resize: Box<dyn FnMut() + Send>,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn stop(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
+
+        fn write(&mut self, _data: &str) {}
+
+        fn columns(&self) -> u16 {
+            120
+        }
+
+        fn rows(&self) -> u16 {
+            40
+        }
+    }
+
+    struct NoopProvider;
+
+    impl RunProvider for NoopProvider {
+        fn profile(&self) -> ProviderProfile {
+            ProviderProfile {
+                provider_id: "test".to_string(),
+                model_id: "test-model".to_string(),
+                thinking_level: Some("test-thinking".to_string()),
+            }
+        }
+
+        fn run(
+            &self,
+            _req: RunRequest,
+            _cancel: Arc<AtomicBool>,
+            _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+            _emit: &mut dyn FnMut(RunEvent),
+        ) -> Result<(), String> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn composed_system_instructions_include_tool_policy_and_inventory() {
@@ -934,5 +1025,71 @@ mod tests {
             .expect_err("empty base instructions should fail");
 
         assert!(error.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn drain_run_events_is_bounded_and_rescheduled_until_queue_is_empty() {
+        let app = Arc::new(Mutex::new(App::new()));
+        {
+            let mut app_state = lock_unpoisoned(&app);
+            app_state.mode = Mode::Running { run_id: 1 };
+        }
+
+        let mut runtime = TUI::new(NullTerminal);
+        runtime.start().expect("runtime start");
+
+        let controller = RuntimeController::new(
+            Arc::clone(&app),
+            runtime.runtime_handle(),
+            Arc::new(NoopProvider),
+        );
+
+        for chunk in ["a", "b", "c", "d", "e", "f"] {
+            controller.enqueue_runtime_event(RuntimeEvent::Provider(RunEvent::Chunk {
+                run_id: 1,
+                text: chunk.to_string(),
+            }));
+        }
+        controller.enqueue_runtime_event(RuntimeEvent::Provider(RunEvent::Finished { run_id: 1 }));
+
+        runtime.run_once();
+
+        assert!(controller.has_pending_run_events());
+        {
+            let app_state = lock_unpoisoned(&app);
+            let assistant = app_state
+                .transcript
+                .iter()
+                .find(|message| message.role == crate::app::Role::Assistant)
+                .expect("assistant message should exist after first drain batch");
+
+            assert_eq!(assistant.content, "abcd");
+            assert!(assistant.streaming);
+            assert!(matches!(app_state.mode, Mode::Running { run_id: 1 }));
+        }
+
+        runtime.run_once();
+
+        assert!(!controller.has_pending_run_events());
+        {
+            let app_state = lock_unpoisoned(&app);
+            let assistant = app_state
+                .transcript
+                .iter()
+                .find(|message| message.role == crate::app::Role::Assistant)
+                .expect("assistant message should exist after second drain batch");
+
+            assert_eq!(assistant.content, "abcdef");
+            assert!(!assistant.streaming);
+            assert_eq!(app_state.mode, Mode::Idle);
+            assert_eq!(
+                app_state.conversation_messages(),
+                &[RunMessage::AssistantText {
+                    text: "abcdef".to_string()
+                }]
+            );
+        }
+
+        runtime.stop().expect("runtime stop");
     }
 }

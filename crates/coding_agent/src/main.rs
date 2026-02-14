@@ -92,6 +92,7 @@ fn run() -> io::Result<()> {
     ));
     tui.set_root(vec![root_component]);
     tui.set_focus(root_component);
+    tui.set_low_latency_coalescing(true);
 
     tui.start()?;
 

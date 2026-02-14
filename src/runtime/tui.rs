@@ -34,6 +34,8 @@ const STOP_DRAIN_MAX_MS: u64 = 1000;
 const STOP_DRAIN_IDLE_MS: u64 = 50;
 const COALESCE_MAX_DURATION_MS: u64 = 2;
 const COALESCE_MAX_ITERATIONS: usize = 8;
+const LOW_LATENCY_COALESCE_MAX_DURATION_MS: u64 = 0;
+const LOW_LATENCY_COALESCE_MAX_ITERATIONS: usize = 0;
 
 #[derive(Clone, Copy, Debug)]
 struct CoalesceBudget {
@@ -51,6 +53,13 @@ impl Default for CoalesceBudget {
 }
 
 impl CoalesceBudget {
+    fn low_latency() -> Self {
+        Self {
+            max_duration: Duration::from_millis(LOW_LATENCY_COALESCE_MAX_DURATION_MS),
+            max_iterations: LOW_LATENCY_COALESCE_MAX_ITERATIONS,
+        }
+    }
+
     fn allows(&self, start: Instant, iterations: usize) -> bool {
         start.elapsed() < self.max_duration && iterations < self.max_iterations
     }
@@ -997,6 +1006,18 @@ impl<T: Terminal> TuiRuntime<T> {
     #[cfg(test)]
     fn set_coalesce_budget_for_tests(&mut self, budget: CoalesceBudget) {
         self.coalesce_budget = budget;
+    }
+
+    /// Enable or disable low-latency command/input coalescing.
+    ///
+    /// When enabled, `run_blocking_once` prefers one coalescing iteration per wake,
+    /// which increases render frequency for bursty incremental producers.
+    pub fn set_low_latency_coalescing(&mut self, enabled: bool) {
+        self.coalesce_budget = if enabled {
+            CoalesceBudget::low_latency()
+        } else {
+            CoalesceBudget::default()
+        };
     }
 
     pub fn runtime_handle(&self) -> RuntimeHandle {
@@ -6647,6 +6668,83 @@ mod tests {
 
         runtime.run_blocking_once();
         assert_eq!(state.borrow().renders, baseline + 1);
+    }
+
+    #[test]
+    fn low_latency_coalescing_reduces_same_tick_batching() {
+        struct ChainRenderCommand {
+            handle: RuntimeHandle,
+            steps: Arc<Mutex<Vec<u8>>>,
+            step: u8,
+        }
+
+        impl CustomCommand for ChainRenderCommand {
+            fn name(&self) -> &'static str {
+                "chain_render"
+            }
+
+            fn apply(
+                self: Box<Self>,
+                ctx: &mut CustomCommandCtx,
+            ) -> Result<(), CustomCommandError> {
+                let mut steps = self
+                    .steps
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                steps.push(self.step);
+                ctx.request_render();
+
+                if self.step == 1 {
+                    self.handle
+                        .dispatch(Command::Custom(Box::new(ChainRenderCommand {
+                            handle: self.handle.clone(),
+                            steps: Arc::clone(&self.steps),
+                            step: 2,
+                        })));
+                }
+
+                Ok(())
+            }
+        }
+
+        let terminal = TestTerminal::default();
+        let state = Rc::new(RefCell::new(RenderState::default()));
+        let component = CountingComponent {
+            state: Rc::clone(&state),
+        };
+        let (mut runtime, root_id) = runtime_with_root(terminal, component);
+
+        runtime.start().expect("runtime start");
+        runtime.set_focus(root_id);
+        runtime.render_if_needed();
+        let baseline = state.borrow().renders;
+
+        let steps: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let handle = runtime.runtime_handle();
+        runtime.set_low_latency_coalescing(true);
+        handle.dispatch(Command::Custom(Box::new(ChainRenderCommand {
+            handle: handle.clone(),
+            steps: Arc::clone(&steps),
+            step: 1,
+        })));
+
+        runtime.run_blocking_once();
+        assert_eq!(state.borrow().renders, baseline + 1);
+        {
+            let steps = steps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(steps.as_slice(), &[1]);
+        }
+
+        runtime.run_blocking_once();
+        assert_eq!(state.borrow().renders, baseline + 2);
+        {
+            let steps = steps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(steps.as_slice(), &[1, 2]);
+        }
     }
 
     #[test]

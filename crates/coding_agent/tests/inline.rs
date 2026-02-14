@@ -86,6 +86,36 @@ impl RunProvider for OrderedChunkProvider {
     }
 }
 
+#[derive(Default)]
+struct FastChunkBurstProvider;
+
+impl RunProvider for FastChunkBurstProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        let run_id = req.run_id;
+
+        emit(RunEvent::Started { run_id });
+        for chunk in ["1", "2", "3", "4", "5", "6"] {
+            emit(RunEvent::Chunk {
+                run_id,
+                text: chunk.to_string(),
+            });
+        }
+        emit(RunEvent::Finished { run_id });
+
+        Ok(())
+    }
+}
+
 fn setup_runtime_with_provider(
     provider: Arc<dyn RunProvider>,
 ) -> (
@@ -315,6 +345,52 @@ fn run_event_queue_applies_in_order() {
     assert_eq!(assistant_messages.len(), 1);
     assert_eq!(assistant_messages[0].content, "hello world");
     assert!(!assistant_messages[0].streaming);
+
+    tui.stop().expect("runtime stop");
+}
+
+#[test]
+fn fast_chunk_burst_is_not_fully_applied_in_one_blocking_render_cycle() {
+    let (mut tui, app, terminal_trace) =
+        setup_runtime_with_provider(Arc::new(FastChunkBurstProvider));
+
+    tui.set_low_latency_coalescing(true);
+    tui.start().expect("runtime start");
+    tui.run_once();
+
+    support::inject_input(&terminal_trace, "progressive burst");
+    support::inject_input(&terminal_trace, "\r");
+
+    tui.run_blocking_once();
+    tui.run_blocking_once();
+
+    {
+        let app = support::lock_unpoisoned(&app);
+        let assistant = app
+            .transcript
+            .iter()
+            .find(|message| message.role == Role::Assistant)
+            .expect("assistant message should exist after first drain batch");
+
+        assert_eq!(assistant.content, "123");
+        assert!(assistant.streaming);
+        assert!(matches!(app.mode, Mode::Running { .. }));
+    }
+
+    tui.run_blocking_once();
+
+    {
+        let app = support::lock_unpoisoned(&app);
+        let assistant = app
+            .transcript
+            .iter()
+            .find(|message| message.role == Role::Assistant)
+            .expect("assistant message should exist after second drain batch");
+
+        assert_eq!(assistant.content, "123456");
+        assert!(!assistant.streaming);
+        assert!(matches!(app.mode, Mode::Idle));
+    }
 
     tui.stop().expect("runtime stop");
 }
