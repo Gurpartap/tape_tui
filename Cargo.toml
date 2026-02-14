@@ -12,6 +12,7 @@ members = [
   "crates/apply_patch_engine",
   "crates/coding_agent",
   "crates/codex_api",
+  "crates/session_store",
 ]
 resolver = "2"
 
