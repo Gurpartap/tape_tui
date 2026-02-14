@@ -128,7 +128,7 @@ pub struct AppComponent {
 struct TranscriptRenderCache {
     width: usize,
     transcript_revision: u64,
-    lines: Vec<String>,
+    lines: Arc<Vec<String>>,
 }
 
 impl AppComponent {
@@ -201,7 +201,7 @@ impl AppComponent {
         f(&mut app, &mut host);
     }
 
-    fn render_transcript_lines_cached(&mut self, width: usize) -> (Vec<String>, Mode) {
+    fn render_transcript_lines_cached(&mut self, width: usize) -> (Arc<Vec<String>>, Mode) {
         let (mode, transcript_revision) = {
             let app = lock_unpoisoned(&self.app);
             (app.mode.clone(), app.transcript_revision())
@@ -209,7 +209,7 @@ impl AppComponent {
 
         if let Some(cache) = self.transcript_render_cache.as_ref() {
             if cache.width == width && cache.transcript_revision == transcript_revision {
-                return (cache.lines.clone(), mode);
+                return (Arc::clone(&cache.lines), mode);
             }
         }
 
@@ -222,13 +222,13 @@ impl AppComponent {
                 lines.push(separator_line(width));
             }
 
-            lines
+            Arc::new(lines)
         };
 
         self.transcript_render_cache = Some(TranscriptRenderCache {
             width,
             transcript_revision,
-            lines: rendered_lines.clone(),
+            lines: Arc::clone(&rendered_lines),
         });
 
         (rendered_lines, mode)
@@ -293,10 +293,10 @@ impl AppComponent {
 impl Component for AppComponent {
     fn render(&mut self, width: usize) -> Vec<String> {
         let (transcript_lines, mode) = self.render_transcript_lines_cached(width);
-        let mut lines = Vec::new();
+        let mut lines = Vec::with_capacity(transcript_lines.len().saturating_add(8));
 
         append_wrapped_text(&mut lines, width, &render_header(), "", "");
-        lines.extend(transcript_lines);
+        lines.extend(transcript_lines.iter().cloned());
 
         append_wrapped_text(&mut lines, width, &render_status_line(&mode), "", "");
         let editor_start_row = lines.len();
