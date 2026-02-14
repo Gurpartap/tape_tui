@@ -22,7 +22,7 @@ pub use editor::{
 pub use image::{Image, ImageOptions, ImageTheme};
 pub use input::Input;
 pub use loader::Loader;
-pub use markdown::{DefaultTextStyle, Markdown, MarkdownTheme};
+pub use markdown::{highlight_markdown_code_ansi, DefaultTextStyle, Markdown, MarkdownTheme};
 pub use r#box::Box;
 pub use select_list::{SelectItem, SelectList, SelectListTheme};
 pub use settings_list::{SettingItem, SettingsList, SettingsListOptions, SettingsListTheme};

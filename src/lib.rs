@@ -39,10 +39,10 @@ pub use crate::core::autocomplete::{
 
 /// Built-in UI components.
 pub use crate::widgets::{
-    Box, CancellableLoader, Container, DefaultTextStyle, Editor, EditorHeightMode, EditorOptions,
-    EditorPasteMode, EditorTheme, Image, ImageOptions, ImageTheme, Input, Loader, Markdown,
-    MarkdownTheme, SelectItem, SelectList, SelectListTheme, SettingItem, SettingsList,
-    SettingsListTheme, Spacer, Text, TruncatedText,
+    highlight_markdown_code_ansi, Box, CancellableLoader, Container, DefaultTextStyle, Editor,
+    EditorHeightMode, EditorOptions, EditorPasteMode, EditorTheme, Image, ImageOptions, ImageTheme,
+    Input, Loader, Markdown, MarkdownTheme, SelectItem, SelectList, SelectListTheme, SettingItem,
+    SettingsList, SettingsListTheme, Spacer, Text, TruncatedText,
 };
 
 /// Editor component behavior contract.

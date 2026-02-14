@@ -19,7 +19,9 @@ fn plain_theme() -> MarkdownTheme {
         italic: Box::new(|text| text.to_string()),
         strikethrough: Box::new(|text| text.to_string()),
         underline: Box::new(|text| text.to_string()),
-        highlight_code: None,
+        highlight_code: Some(Box::new(|code, _lang| {
+            code.split('\n').map(|line| line.to_string()).collect()
+        })),
         code_block_indent: None,
     }
 }

@@ -7,6 +7,11 @@ use crate::core::text::utils::apply_background_to_line;
 use crate::core::text::width::visible_width;
 
 use markdown::{mdast, to_mdast, ParseOptions};
+use once_cell::sync::Lazy;
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme, ThemeSet};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::util::as_24_bit_terminal_escaped;
 
 pub type MarkdownStyleFn = Box<dyn Fn(&str) -> String>;
 
@@ -334,15 +339,14 @@ impl Markdown {
                         "```{}",
                         code.lang.clone().unwrap_or_default()
                     )));
-                    if let Some(highlighter) = self.theme.highlight_code.as_ref() {
-                        let highlighted = highlighter(&code.value, code.lang.as_deref());
-                        for line in highlighted {
-                            lines.push(format!("{indent}{line}"));
-                        }
+                    let highlighted = if let Some(highlighter) = self.theme.highlight_code.as_ref()
+                    {
+                        highlighter(&code.value, code.lang.as_deref())
                     } else {
-                        for line in code.value.split('\n') {
-                            lines.push(format!("{indent}{}", (self.theme.code_block)(line)));
-                        }
+                        highlight_markdown_code_ansi(&code.value, code.lang.as_deref())
+                    };
+                    for line in highlighted {
+                        lines.push(format!("{indent}{line}"));
                     }
                     lines.push((self.theme.code_block_border)("```"));
                 }
@@ -676,15 +680,13 @@ impl Markdown {
                     "```{}",
                     code.lang.clone().unwrap_or_default()
                 )));
-                if let Some(highlighter) = self.theme.highlight_code.as_ref() {
-                    let highlighted = highlighter(&code.value, code.lang.as_deref());
-                    for line in highlighted {
-                        lines.push(format!("{indent}{line}"));
-                    }
+                let highlighted = if let Some(highlighter) = self.theme.highlight_code.as_ref() {
+                    highlighter(&code.value, code.lang.as_deref())
                 } else {
-                    for line in code.value.split('\n') {
-                        lines.push(format!("{indent}{}", (self.theme.code_block)(line)));
-                    }
+                    highlight_markdown_code_ansi(&code.value, code.lang.as_deref())
+                };
+                for line in highlighted {
+                    lines.push(format!("{indent}{line}"));
                 }
                 lines.push((self.theme.code_block_border)("```"));
                 if !space_after {
@@ -953,9 +955,94 @@ fn is_nested_list_line(line: &str) -> bool {
     false
 }
 
+const ANSI_RESET: &str = "\x1b[0m";
+
+static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
+static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
+
+/// Highlights markdown fenced code blocks with ANSI colors.
+///
+/// Falls back to plain text if language/theme lookup or highlighting fails.
+pub fn highlight_markdown_code_ansi(code: &str, language: Option<&str>) -> Vec<String> {
+    let Some(theme) = highlight_theme() else {
+        return plain_code_lines(code);
+    };
+    let Some(syntax) = highlight_syntax(language) else {
+        return plain_code_lines(code);
+    };
+
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut lines = Vec::new();
+
+    for line in code.split('\n') {
+        let ranges = match highlighter.highlight_line(line, &SYNTAX_SET) {
+            Ok(ranges) => ranges,
+            Err(_) => return plain_code_lines(code),
+        };
+        let mut rendered = as_24_bit_terminal_escaped(&ranges, false);
+        rendered.push_str(ANSI_RESET);
+        lines.push(rendered);
+    }
+
+    lines
+}
+
+fn plain_code_lines(code: &str) -> Vec<String> {
+    code.split('\n').map(|line| line.to_string()).collect()
+}
+
+fn highlight_theme() -> Option<&'static Theme> {
+    const THEME_NAMES: [&str; 3] = [
+        "base16-ocean.dark",
+        "base16-eighties.dark",
+        "InspiredGitHub",
+    ];
+
+    THEME_NAMES
+        .iter()
+        .find_map(|name| THEME_SET.themes.get(*name))
+}
+
+fn highlight_syntax(language: Option<&str>) -> Option<&'static SyntaxReference> {
+    let token = normalize_code_fence_language(language)?;
+    if token == "plain" {
+        return None;
+    }
+
+    SYNTAX_SET
+        .find_syntax_by_token(&token)
+        .or_else(|| SYNTAX_SET.find_syntax_by_extension(&token))
+}
+
+fn normalize_code_fence_language(language: Option<&str>) -> Option<String> {
+    let token = language?
+        .trim()
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == ',' || ch == ';')
+        .next()?
+        .trim();
+
+    if token.is_empty() {
+        return None;
+    }
+
+    let lower = token.to_ascii_lowercase();
+    let normalized = match lower.as_str() {
+        "rs" => "rust",
+        "py" => "python",
+        "sh" | "shell" | "zsh" | "console" | "terminal" => "bash",
+        "js" => "javascript",
+        "ts" => "typescript",
+        "yml" => "yaml",
+        "txt" | "text" | "plaintext" => "plain",
+        _ => lower.as_str(),
+    };
+
+    Some(normalized.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DefaultTextStyle, Markdown, MarkdownTheme};
+    use super::{highlight_markdown_code_ansi, DefaultTextStyle, Markdown, MarkdownTheme};
     use crate::core::component::Component;
 
     fn theme() -> MarkdownTheme {
@@ -1040,5 +1127,44 @@ mod tests {
         let mut markdown = Markdown::new("hello **world**", 0, 0, theme(), Some(style));
         let lines = markdown.render(80);
         assert!(lines[0].starts_with("<c>hello </c><b><c>world</c></b>"));
+    }
+
+    fn strip_ansi_for_test(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut output = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+
+        while index < bytes.len() {
+            if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'[' {
+                index += 2;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (b'@'..=b'~').contains(&byte) {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            output.push(bytes[index]);
+            index += 1;
+        }
+
+        String::from_utf8(output).unwrap_or_default()
+    }
+
+    #[test]
+    fn highlighter_falls_back_for_unknown_language() {
+        let lines = highlight_markdown_code_ansi("echo hi", Some("unknownlang"));
+        assert_eq!(lines, vec!["echo hi".to_string()]);
+    }
+
+    #[test]
+    fn highlighter_normalizes_alias_and_resets_ansi_state() {
+        let lines = highlight_markdown_code_ansi("fn main() {}", Some("rs"));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(strip_ansi_for_test(&lines[0]), "fn main() {}");
+        assert!(lines[0].ends_with("\x1b[0m"));
     }
 }
