@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use session_store::SessionStore;
+use session_store::{SessionEntry, SessionEntryKind, SessionStore};
 use tempfile::TempDir;
 
 use coding_agent::app::{App, HostOps, Mode, Role, RunId};
@@ -85,6 +85,35 @@ impl RunProvider for LifecycleProvider {
             run_id: req.run_id,
             text: "world".to_string(),
         });
+        emit(RunEvent::Finished { run_id: req.run_id });
+        Ok(())
+    }
+}
+
+struct InvocationTrackingProvider {
+    invoked: Arc<AtomicBool>,
+}
+
+impl InvocationTrackingProvider {
+    fn new(invoked: Arc<AtomicBool>) -> Self {
+        Self { invoked }
+    }
+}
+
+impl RunProvider for InvocationTrackingProvider {
+    fn profile(&self) -> ProviderProfile {
+        test_provider_profile()
+    }
+
+    fn run(
+        &self,
+        req: RunRequest,
+        _cancel: CancelSignal,
+        _execute_tool: &mut dyn FnMut(ToolCallRequest) -> ToolResult,
+        emit: &mut dyn FnMut(RunEvent),
+    ) -> Result<(), String> {
+        self.invoked.store(true, Ordering::SeqCst);
+        emit(RunEvent::Started { run_id: req.run_id });
         emit(RunEvent::Finished { run_id: req.run_id });
         Ok(())
     }
@@ -607,6 +636,24 @@ fn create_session_store_for_test() -> (TempDir, SessionStore, PathBuf) {
     (session_workspace, store, session_path)
 }
 
+fn append_seed_user_entry(
+    store: &mut SessionStore,
+    entry_id: &str,
+    parent_id: Option<&str>,
+    text: &str,
+) {
+    store
+        .append(SessionEntry::new(
+            entry_id,
+            parent_id,
+            "2026-02-14T00:00:00Z",
+            SessionEntryKind::UserText {
+                text: text.to_string(),
+            },
+        ))
+        .expect("seed entry append should succeed");
+}
+
 fn replay_session_messages(session_path: &PathBuf) -> Vec<RunMessage> {
     SessionStore::open(session_path)
         .expect("session file should reopen")
@@ -926,6 +973,126 @@ fn start_failure_run_already_active_does_not_persist_user_turn() {
             vec![RunMessage::UserText {
                 text: "first prompt".to_string(),
             }]
+        );
+    });
+}
+
+#[test]
+fn start_user_turn_persistence_failure_is_fatal_and_provider_run_is_not_invoked() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider_invoked = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn RunProvider> = Arc::new(InvocationTrackingProvider::new(Arc::clone(
+            &provider_invoked,
+        )));
+        let (_session_workspace, mut session_store, session_path) = create_session_store_for_test();
+        append_seed_user_entry(
+            &mut session_store,
+            "entry-00000000000000000001",
+            None,
+            "seed",
+        );
+
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        {
+            let mut app = lock_unpoisoned(&app);
+            app.on_input_replace("trigger fatal persistence".to_string());
+            app.on_submit(&mut host);
+        }
+
+        runtime_loop.tick();
+        host.flush_pending_run_events();
+
+        let app = lock_unpoisoned(&app);
+        assert!(matches!(
+            &app.mode,
+            Mode::Error(error) if error.starts_with("Session persistence failed:")
+        ));
+        assert!(app.should_exit);
+        assert!(app.transcript.iter().any(|message| {
+            message.role == Role::System
+                && message
+                    .content
+                    .starts_with("Failed to start run: Session persistence failed:")
+        }));
+
+        drop(app);
+        assert!(!provider_invoked.load(Ordering::SeqCst));
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![RunMessage::UserText {
+                text: "seed".to_string(),
+            }]
+        );
+    });
+}
+
+#[test]
+fn finished_run_persistence_failure_is_fatal_and_stops_runtime_progression() {
+    with_runtime_loop(|runtime_loop| {
+        let app = Arc::new(Mutex::new(App::new()));
+        let provider: Arc<dyn RunProvider> = Arc::new(LifecycleProvider);
+        let (_session_workspace, mut session_store, session_path) = create_session_store_for_test();
+        append_seed_user_entry(
+            &mut session_store,
+            "entry-00000000000000000002",
+            None,
+            "seed",
+        );
+
+        let mut host = RuntimeController::new_with_session_store(
+            app.clone(),
+            runtime_loop.runtime_handle(),
+            provider,
+            session_store,
+        );
+
+        let run_id = submit_prompt(&app, &mut host, "trigger assistant persistence failure");
+        let settled = wait_until(
+            Duration::from_secs(2),
+            || {
+                runtime_loop.tick();
+                host.flush_pending_run_events();
+            },
+            || {
+                let app = lock_unpoisoned(&app);
+                app.should_exit
+                    && matches!(app.mode, Mode::Error(_))
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::Assistant
+                            && message.run_id == Some(run_id)
+                            && message.content == "hello world"
+                            && !message.streaming
+                    })
+                    && app.transcript.iter().any(|message| {
+                        message.role == Role::System
+                            && message.content.starts_with(
+                                "Session persistence failed: Failed persisting assistant turn",
+                            )
+                    })
+            },
+        );
+        assert!(
+            settled,
+            "finished run persistence failure did not transition to fatal stop"
+        );
+
+        assert_eq!(
+            replay_session_messages(&session_path),
+            vec![
+                RunMessage::UserText {
+                    text: "seed".to_string(),
+                },
+                RunMessage::UserText {
+                    text: "trigger assistant persistence failure".to_string(),
+                },
+            ]
         );
     });
 }

@@ -123,6 +123,7 @@ pub trait HostOps {
 
 const HELP_TEXT: &str = "Commands: /help, /clear, /cancel, /quit";
 const ERROR_RUN_ALREADY_ACTIVE: &str = "Run already active";
+const FATAL_SESSION_PERSISTENCE_ERROR_PREFIX: &str = "Session persistence failed:";
 pub const SYSTEM_INSTRUCTIONS_ENV_VAR: &str = "CODING_AGENT_SYSTEM_INSTRUCTIONS";
 pub const DEFAULT_SYSTEM_INSTRUCTIONS: &str =
     "You are a careful coding agent. Follow user requests exactly, keep output deterministic, and fail explicitly when constraints cannot be satisfied.";
@@ -350,6 +351,8 @@ impl App {
                     host.request_render();
                 }
                 SlashCommand::Clear => {
+                    // Persistent-session reset markers are deferred in v1.
+                    // `/clear` only mutates in-memory transcript/conversation state.
                     self.transcript.clear();
                     self.conversation.clear();
                     self.pending_run_memory = None;
@@ -409,6 +412,10 @@ impl App {
                 } else {
                     self.mode = Mode::Error(error.clone());
                     self.push_system(format!("Failed to start run: {error}"));
+                    if error.starts_with(FATAL_SESSION_PERSISTENCE_ERROR_PREFIX) {
+                        self.should_exit = true;
+                        host.request_stop();
+                    }
                 }
             }
         }

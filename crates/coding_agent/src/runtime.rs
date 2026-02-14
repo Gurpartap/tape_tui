@@ -154,6 +154,7 @@ impl HostToolExecutor {
 
 pub const POST_TERMINAL_TOOL_REJECTION_ERROR: &str =
     "Provider requested tool call after terminal run event";
+pub const SESSION_PERSISTENCE_FATAL_ERROR_PREFIX: &str = "Session persistence failed:";
 
 pub struct RuntimeController {
     app: Arc<Mutex<App>>,
@@ -224,7 +225,10 @@ impl RuntimeController {
             return Err("Run already active".to_string());
         }
 
-        self.persist_submitted_user_turn(&messages)?;
+        if let Err(error) = self.persist_submitted_user_turn(&messages) {
+            self.runtime_handle.dispatch(Command::RequestStop);
+            return Err(format!("{SESSION_PERSISTENCE_FATAL_ERROR_PREFIX} {error}"));
+        }
 
         let run_id = self.next_run_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));

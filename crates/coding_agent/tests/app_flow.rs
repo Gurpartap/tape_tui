@@ -126,6 +126,28 @@ fn submit_failure_keeps_user_turn_in_model_history() {
 }
 
 #[test]
+fn submit_fatal_persistence_failure_requests_stop_and_sets_exit() {
+    let mut app = App::new();
+    let mut host = HostSpy::with_start_run_error("Session persistence failed: disk full");
+
+    app.on_input_replace("retry this".to_string());
+    app.on_submit(&mut host);
+
+    assert_eq!(
+        app.mode,
+        Mode::Error("Session persistence failed: disk full".to_string())
+    );
+    assert!(app.should_exit);
+    assert_eq!(host.stop_requests, 1);
+    assert_eq!(
+        app.conversation_messages(),
+        &[RunMessage::UserText {
+            text: "retry this".to_string(),
+        }]
+    );
+}
+
+#[test]
 fn run_already_active_start_error_rolls_back_just_added_user_turn() {
     let mut app = App::new();
     let mut host = HostSpy::with_start_run_error("Run already active");
