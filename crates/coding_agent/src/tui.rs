@@ -116,10 +116,19 @@ pub struct AppComponent {
     app: Arc<Mutex<App>>,
     host: Arc<RuntimeController>,
     provider_profile: ProviderProfile,
+    working_directory_label: String,
+    transcript_render_cache: Option<TranscriptRenderCache>,
     editor: Editor,
     is_applying_history: Arc<AtomicBool>,
     cursor_pos: Option<CursorPos>,
     view_mode: ViewMode,
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptRenderCache {
+    width: usize,
+    transcript_revision: u64,
+    lines: Vec<String>,
 }
 
 impl AppComponent {
@@ -177,6 +186,8 @@ impl AppComponent {
             app,
             host,
             provider_profile,
+            working_directory_label: render_working_directory(),
+            transcript_render_cache: None,
             editor,
             is_applying_history,
             cursor_pos: None,
@@ -190,8 +201,37 @@ impl AppComponent {
         f(&mut app, &mut host);
     }
 
-    fn snapshot(&self) -> App {
-        lock_unpoisoned(&self.app).clone()
+    fn render_transcript_lines_cached(&mut self, width: usize) -> (Vec<String>, Mode) {
+        let (mode, transcript_revision) = {
+            let app = lock_unpoisoned(&self.app);
+            (app.mode.clone(), app.transcript_revision())
+        };
+
+        if let Some(cache) = self.transcript_render_cache.as_ref() {
+            if cache.width == width && cache.transcript_revision == transcript_revision {
+                return (cache.lines.clone(), mode);
+            }
+        }
+
+        let rendered_lines = {
+            let app = lock_unpoisoned(&self.app);
+            let mut lines = Vec::new();
+
+            for message in &app.transcript {
+                render_message_lines(&app, message, width, &mut lines);
+                lines.push(separator_line(width));
+            }
+
+            lines
+        };
+
+        self.transcript_render_cache = Some(TranscriptRenderCache {
+            width,
+            transcript_revision,
+            lines: rendered_lines.clone(),
+        });
+
+        (rendered_lines, mode)
     }
 
     fn set_editor_text_with_history_bypass(&mut self, text: &str) {
@@ -252,22 +292,13 @@ impl AppComponent {
 
 impl Component for AppComponent {
     fn render(&mut self, width: usize) -> Vec<String> {
-        let snapshot = self.snapshot();
+        let (transcript_lines, mode) = self.render_transcript_lines_cached(width);
         let mut lines = Vec::new();
 
         append_wrapped_text(&mut lines, width, &render_header(), "", "");
-        for message in &snapshot.transcript {
-            render_message_lines(&snapshot, message, width, &mut lines);
-            lines.push(separator_line(width));
-        }
+        lines.extend(transcript_lines);
 
-        append_wrapped_text(
-            &mut lines,
-            width,
-            &render_status_line(&snapshot.mode),
-            "",
-            "",
-        );
+        append_wrapped_text(&mut lines, width, &render_status_line(&mode), "", "");
         let editor_start_row = lines.len();
         let mut editor_lines = self.editor.render(width);
         if let Some(editor_border) = editor_lines.get_mut(0) {
@@ -277,7 +308,7 @@ impl Component for AppComponent {
         append_wrapped_text(
             &mut lines,
             width,
-            &render_status_footer(width, &self.provider_profile),
+            &render_status_footer(width, &self.provider_profile, &self.working_directory_label),
             "",
             "",
         );
@@ -465,10 +496,14 @@ fn format_working_directory_with_home(cwd: &str, branch: &str, home: Option<&str
     format!("{} {}", dim(&display_path), dim(&format!("({branch})")))
 }
 
-fn render_status_footer(width: usize, provider_profile: &ProviderProfile) -> String {
-    let left = render_working_directory();
+fn render_status_footer(
+    width: usize,
+    provider_profile: &ProviderProfile,
+    working_directory_label: &str,
+) -> String {
+    let left = working_directory_label;
     let right = render_provider_metadata(provider_profile);
-    let left_width = visible_text_width(&left);
+    let left_width = visible_text_width(left);
     let right_width = visible_text_width(&right);
 
     if width == 0 {

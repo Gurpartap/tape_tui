@@ -102,6 +102,7 @@ pub struct App {
     pub mode: Mode,
     pub input: String,
     pub transcript: Vec<Message>,
+    transcript_revision: u64,
     conversation: Vec<RunMessage>,
     pending_run_memory: Option<PendingRunMemory>,
     history: InputHistory,
@@ -162,6 +163,7 @@ impl App {
             mode: Mode::Idle,
             input: String::new(),
             transcript: Vec::new(),
+            transcript_revision: 0,
             conversation: Vec::new(),
             pending_run_memory: None,
             history: InputHistory::default(),
@@ -173,6 +175,15 @@ impl App {
 
     pub fn system_instructions(&self) -> &str {
         &self.system_instructions
+    }
+
+    /// Monotonic revision counter for transcript rendering cache invalidation.
+    pub fn transcript_revision(&self) -> u64 {
+        self.transcript_revision
+    }
+
+    fn bump_transcript_revision(&mut self) {
+        self.transcript_revision = self.transcript_revision.saturating_add(1);
     }
 
     /// Restores model-facing conversation memory from persisted session replay,
@@ -239,6 +250,7 @@ impl App {
                 }
             })
             .collect();
+        self.bump_transcript_revision();
     }
 
     /// Returns model-facing conversation messages retained across turns.
@@ -351,6 +363,7 @@ impl App {
                 && message.run_id.is_none()
         }) {
             self.transcript.pop();
+            self.bump_transcript_revision();
         }
     }
 
@@ -420,6 +433,7 @@ impl App {
                     // Persistent-session reset markers are deferred in v1.
                     // `/clear` only mutates in-memory transcript/conversation state.
                     self.transcript.clear();
+                    self.bump_transcript_revision();
                     self.conversation.clear();
                     self.pending_run_memory = None;
                     self.push_system("Transcript cleared".to_string());
@@ -461,6 +475,7 @@ impl App {
             streaming: false,
             run_id: None,
         });
+        self.bump_transcript_revision();
         self.conversation.push(RunMessage::UserText {
             text: prompt.clone(),
         });
@@ -545,6 +560,7 @@ impl App {
             streaming: true,
             run_id: Some(run_id),
         });
+        self.bump_transcript_revision();
     }
 
     pub fn on_run_chunk(&mut self, run_id: RunId, chunk: &str) {
@@ -576,6 +592,8 @@ impl App {
                 run_id: Some(run_id),
             });
         }
+
+        self.bump_transcript_revision();
 
         self.append_pending_assistant_chunk(run_id, chunk);
     }
@@ -780,9 +798,14 @@ impl App {
     }
 
     fn finalize_stream(&mut self, run_id: RunId) {
+        let mut mutated = false;
+
         for message in &mut self.transcript {
             if message.role == Role::Assistant && message.run_id == Some(run_id) {
-                message.streaming = false;
+                if message.streaming {
+                    message.streaming = false;
+                    mutated = true;
+                }
             }
         }
 
@@ -793,11 +816,15 @@ impl App {
         });
 
         if has_non_empty_assistant {
+            let before_len = self.transcript.len();
             self.transcript.retain(|message| {
                 !(message.role == Role::Assistant
                     && message.run_id == Some(run_id)
                     && message.content.is_empty())
             });
+            if self.transcript.len() != before_len {
+                mutated = true;
+            }
         }
 
         let mut index = 1usize;
@@ -813,10 +840,15 @@ impl App {
                     .content
                     .push_str(next_content.as_str());
                 self.transcript.remove(index);
+                mutated = true;
                 continue;
             }
 
             index += 1;
+        }
+
+        if mutated {
+            self.bump_transcript_revision();
         }
     }
 
@@ -847,6 +879,7 @@ impl App {
             streaming: false,
             run_id: Some(run_id),
         });
+        self.bump_transcript_revision();
     }
 
     fn push_system(&mut self, content: String) {
@@ -856,6 +889,7 @@ impl App {
             streaming: false,
             run_id: None,
         });
+        self.bump_transcript_revision();
     }
 }
 
