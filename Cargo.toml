@@ -2,6 +2,13 @@
 name = "tape_tui"
 version = "0.1.0"
 edition = "2021"
+description = "Build coding agents, chats, REPLs with deterministic, crash-safe terminal UI kernel with differential rendering."
+license = "MIT"
+repository = "https://github.com/Gurpartap/tape_tui"
+homepage = "https://github.com/Gurpartap/tape_tui"
+readme = "README.md"
+categories = ["command-line-interface"]
+keywords = ["tui", "terminal", "ui", "agents", "deterministic"]
 
 [workspace]
 members = [

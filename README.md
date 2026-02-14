@@ -1,16 +1,43 @@
-# tape_tui
+# tape_tui - build feature-rich and extensible coding agents in the terminal
 
-Deterministic, **inline-first** terminal UI kernel for Rust.
+[![coverage](https://img.shields.io/badge/coverage-95%25-orange)](Coverage) [![github repo](https://img.shields.io/badge/github-repo-blue?logo=github)](Repo) [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+Deterministic, crash-safe terminal UI kernel with differential rendering.
+
+<img src=assets/screenshot.png />
 
 `tape_tui` is a retained-mode TUI framework designed for transcript-style interfaces (coding agents, chats, REPLs) where you **do not** want fullscreen/alternate-screen ownership semantics. It renders inline (preserving scrollback) and keeps runtime behavior predictable under input, resize, layering, and teardown pressure.
 
-This crate started as a Rust port of the TypeScript `pi-tui` library and has since evolved with a stronger focus on determinism and crash-safe teardown.
+## Run examples
+
+```bash
+git clone https://github.com/Gurpartap/tape_tui
+cd tape_tui
+
+cargo run --example chat-simple
+cargo run --example interactive-shell
+cargo run --example markdown-playground
+cargo run --example ansi-forensics
+```
+
+## Development
+
+Special thanks to [Mario Zechner](https://mariozechner.at) for his work on the excellent [Pi coding agent](https://pi.dev/)!
+
+This crate started as a Rust port with [~100% feature parity](docs/COMPARISON.md) of the [`tui` package](https://github.com/badlogic/pi-mono/tree/main/packages/tui) used by Pi.
+
+`tape_tui` has since evolved with a stronger focus on determinism, surface compositing, typed commands through a single gate, crash-safe teardown (RAII + lock-free signal/panic cleanup), and structured input event modelling.
+
+Point your choice of coding agent at this [README.md](https://github.com/Gurpartap/tape_tui/tree/main/README.md) file to build your own chatty apps with tape_tui. See  [docs/ARCHITECTURE.md](https://github.com/Gurpartap/tape_tui/tree/main/docs/ARCHITECTURE.md) for the internal file structure and implementation details explainer.
+
+The port and further development of Tape TUI was passionately orchestrated by a human (me), and implemented largely by gpt-5.3-codex at xhigh thinking. It comes with extensive test coverage to guarantee all critical invariants during development.
 
 ## Highlights
 
 - **Inline-first** transcript rendering (scrollback preserved)
 - **Deterministic output** via a single terminal output gate (`OutputGate::flush(..)`)
 - ANSI **diff renderer** (fast repaints without clearing the whole screen)
+- Inline **images** (renders images in terminals using Kitty or iTerm2 graphics protocols)
 - Deterministic inline insert-before fast path (safe eligibility + strict fallback)
 - **Surface stack** (drawers/modals/toasts/etc.) with explicit input routing policies
 - Deterministic two-pass surface size negotiation (measure → allocate → render)
@@ -245,15 +272,6 @@ When touching runtime, render, or surface behavior, run the dedicated matrix in
 cargo test --test runtime_deterministic_soak
 ```
 
-## Run examples
-
-```bash
-cargo run --example chat-simple
-cargo run --example interactive-shell
-cargo run --example markdown-playground
-cargo run --example ansi-forensics
-```
-
 ### Benchmark markdown syntax highlighting
 
 Use the dedicated benchmark harness to compare markdown render cost with
@@ -272,3 +290,11 @@ The benchmark reports:
 - steady-state cost with a fresh Markdown instance per render,
 - stream-like cost with a reused Markdown instance using `set_text` incremental
   updates.
+
+## Credits
+
+This project is made possible by [Pi](https://pi.dev/) (MIT licensed). Thank you to its maintainers and contributors.
+
+## License
+
+MIT © 2026 Gurpartap Singh (https://x.com/Gurpartap)
