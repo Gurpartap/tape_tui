@@ -1,12 +1,14 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::error::SessionStoreError;
+use crate::paths::{session_file_name, session_root};
 use crate::schema::{JsonLine, SessionEntry, SessionHeader};
 
 pub struct SessionStore {
@@ -22,8 +24,46 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn create_new(_cwd: &Path) -> Result<Self, SessionStoreError> {
-        todo!("not implemented yet")
+    pub fn create_new(cwd: &Path) -> Result<Self, SessionStoreError> {
+        let cwd = resolve_absolute_cwd(cwd)?;
+        let root = session_root(&cwd);
+        fs::create_dir_all(&root).map_err(|source| {
+            SessionStoreError::io("creating session root directory", &root, source)
+        })?;
+
+        let created_at = format_now_rfc3339()?;
+        let session_id = Uuid::new_v4().to_string();
+        let file_name = session_file_name(&created_at, &session_id);
+        let path = root.join(file_name);
+
+        let header = SessionHeader::v1(session_id, created_at, cwd.display().to_string());
+        validate_header_line(&path, 1, &header)?;
+
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| SessionStoreError::io("creating session file", &path, source))?;
+
+        let header_json = serde_json::to_string(&header)
+            .map_err(|source| SessionStoreError::json_serialize(&path, source))?;
+
+        file.write_all(header_json.as_bytes())
+            .map_err(|source| SessionStoreError::io("writing session header", &path, source))?;
+        file.write_all(b"\n").map_err(|source| {
+            SessionStoreError::io("writing session header newline", &path, source)
+        })?;
+        file.sync_data()
+            .map_err(|source| SessionStoreError::io("syncing session header", &path, source))?;
+
+        Ok(Self {
+            path,
+            file,
+            header,
+            entries: Vec::new(),
+            index_by_id: HashMap::new(),
+            current_leaf_id: None,
+        })
     }
 
     pub fn open(path: &Path) -> Result<Self, SessionStoreError> {
@@ -210,4 +250,32 @@ pub(crate) fn validate_rfc3339(
     }
 
     Ok(())
+}
+
+fn resolve_absolute_cwd(cwd: &Path) -> Result<PathBuf, SessionStoreError> {
+    let cwd = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| SessionStoreError::io("resolving current directory", cwd, source))?
+            .join(cwd)
+    };
+
+    let canonical_cwd = cwd
+        .canonicalize()
+        .map_err(|source| SessionStoreError::io("canonicalizing cwd", &cwd, source))?;
+
+    if !canonical_cwd.is_absolute() {
+        return Err(SessionStoreError::NonAbsoluteCreateCwd {
+            path: canonical_cwd,
+        });
+    }
+
+    Ok(canonical_cwd)
+}
+
+fn format_now_rfc3339() -> Result<String, SessionStoreError> {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(SessionStoreError::ClockFormat)
 }

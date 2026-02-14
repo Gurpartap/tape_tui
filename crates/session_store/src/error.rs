@@ -91,6 +91,9 @@ pub enum SessionStoreError {
         #[source]
         source: serde_json::Error,
     },
+
+    #[error("failed to format current UTC timestamp as RFC3339: {0}")]
+    ClockFormat(#[source] time::error::Format),
 }
 
 impl SessionStoreError {
