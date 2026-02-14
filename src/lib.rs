@@ -1,4 +1,5 @@
-//! Rust port of tape-tui.
+//! A deterministic, inline-first terminal UI runtime (retain-mode) for coding agents, chats,
+//! and REPL-style terminal apps.
 //!
 //! Invariant: single output gate — only `core::output::OutputGate::flush(..)` writes to the
 //! terminal.

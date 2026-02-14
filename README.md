@@ -1,6 +1,6 @@
 # tape_tui - build feature-rich and extensible coding agents in the terminal
 
-[![coverage](https://img.shields.io/badge/coverage-95%25-orange)](Coverage) [![github repo](https://img.shields.io/badge/github-repo-blue?logo=github)](Repo) [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![coverage](https://img.shields.io/badge/coverage-95%25-orange)](tests) [![github repo](https://img.shields.io/badge/github-repo-blue?logo=github)](https://github.com/Gurpartap/tape_tui) [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Deterministic, crash-safe terminal UI kernel with differential rendering.
 
@@ -24,11 +24,11 @@ cargo run --example ansi-forensics
 
 Special thanks to [Mario Zechner](https://mariozechner.at) for his work on the excellent [Pi coding agent](https://pi.dev/)!
 
-This crate started as a Rust port with [~100% feature parity](docs/COMPARISON.md) of the [`tui` package](https://github.com/badlogic/pi-mono/tree/main/packages/tui) used by Pi.
+This crate started as a Rust port with [~100% feature parity](docs/COMPARISON.md) of the [`tui` package](https://github.com/badlogic/pi-mono/blob/main/packages/tui) used by Pi.
 
 `tape_tui` has since evolved with a stronger focus on determinism, surface compositing, typed commands through a single gate, crash-safe teardown (RAII + lock-free signal/panic cleanup), and structured input event modelling.
 
-Point your choice of coding agent at this [README.md](https://github.com/Gurpartap/tape_tui/tree/main/README.md) file to build your own chatty apps with tape_tui. See  [docs/ARCHITECTURE.md](https://github.com/Gurpartap/tape_tui/tree/main/docs/ARCHITECTURE.md) for the internal file structure and implementation details explainer.
+Point your choice of coding agent at this [README.md](https://github.com/Gurpartap/tape_tui/blob/main/README.md) file to build your own chatty apps with tape_tui. See  [docs/ARCHITECTURE.md](https://github.com/Gurpartap/tape_tui/blob/main/docs/ARCHITECTURE.md) for the internal file structure and implementation details explainer.
 
 The port and further development of Tape TUI was passionately orchestrated by a human (me), and implemented largely by gpt-5.3-codex at xhigh thinking. It comes with extensive test coverage to guarantee all critical invariants during development.
 

@@ -1,8 +1,8 @@
 # Extension Capability Matrix (TS vs Rust)
 
 This matrix maps extension-relevant capabilities to the **actual exports** from:
-- TypeScript: `https://github.com/badlogic/pi-mono/tree/main/packages/tui/src/index.ts`
-- Rust: `https://github.com/Gurpartap/tape_tui/tree/main/src/lib.rs` (plus public modules declared there)
+- TypeScript: `https://github.com/badlogic/pi-mono/blob/main/packages/tui/src/index.ts`
+- Rust: `https://github.com/Gurpartap/tape_tui/blob/main/src/lib.rs` (plus public modules declared there)
 
 The goal is a crisp, auditable map of what extensions can do or access today.
 
