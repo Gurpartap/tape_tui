@@ -12,6 +12,6 @@ pub use surface::{
     SurfaceOptions, SurfaceSizeValue, SurfaceVisibility,
 };
 pub use tui::{
-    Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle, SurfaceHandle,
-    SurfaceTransactionMutation, TerminalOp,
+    Command, CustomCommand, CustomCommandCtx, CustomCommandError, RuntimeHandle,
+    RuntimeRenderTelemetrySnapshot, SurfaceHandle, SurfaceTransactionMutation, TerminalOp,
 };

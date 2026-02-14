@@ -1,8 +1,9 @@
+use std::collections::VecDeque;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tape_tui::core::component::Focusable;
@@ -122,6 +123,7 @@ pub struct AppComponent {
     is_applying_history: Arc<AtomicBool>,
     cursor_pos: Option<CursorPos>,
     view_mode: ViewMode,
+    debug_stats: DebugStats,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +131,41 @@ struct TranscriptRenderCache {
     width: usize,
     transcript_revision: u64,
     lines: Arc<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct DebugStats {
+    render_timestamps_ms: VecDeque<u64>,
+    render_durations_ms: VecDeque<u64>,
+    render_count_total: u64,
+    cache_hits: u64,
+    cache_misses: u64,
+    last_frame_lines: usize,
+    last_transcript_lines: usize,
+    last_revision: u64,
+    last_mode: Mode,
+    last_out_bytes: usize,
+    last_diff_commands: usize,
+    last_input_queue_depth: usize,
+}
+
+impl DebugStats {
+    fn new() -> Self {
+        Self {
+            render_timestamps_ms: VecDeque::new(),
+            render_durations_ms: VecDeque::new(),
+            render_count_total: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            last_frame_lines: 0,
+            last_transcript_lines: 0,
+            last_revision: 0,
+            last_mode: Mode::Idle,
+            last_out_bytes: 0,
+            last_diff_commands: 0,
+            last_input_queue_depth: 0,
+        }
+    }
 }
 
 impl AppComponent {
@@ -192,6 +229,7 @@ impl AppComponent {
             is_applying_history,
             cursor_pos: None,
             view_mode: ViewMode::Plan,
+            debug_stats: DebugStats::new(),
         }
     }
 
@@ -209,9 +247,14 @@ impl AppComponent {
 
         if let Some(cache) = self.transcript_render_cache.as_ref() {
             if cache.width == width && cache.transcript_revision == transcript_revision {
+                self.debug_stats.cache_hits = self.debug_stats.cache_hits.saturating_add(1);
+                self.debug_stats.last_transcript_lines = cache.lines.len();
+                self.debug_stats.last_revision = transcript_revision;
                 return (Arc::clone(&cache.lines), mode);
             }
         }
+
+        self.debug_stats.cache_misses = self.debug_stats.cache_misses.saturating_add(1);
 
         let rendered_lines = {
             let app = lock_unpoisoned(&self.app);
@@ -230,6 +273,9 @@ impl AppComponent {
             transcript_revision,
             lines: Arc::clone(&rendered_lines),
         });
+
+        self.debug_stats.last_transcript_lines = rendered_lines.len();
+        self.debug_stats.last_revision = transcript_revision;
 
         (rendered_lines, mode)
     }
@@ -292,8 +338,13 @@ impl AppComponent {
 
 impl Component for AppComponent {
     fn render(&mut self, width: usize) -> Vec<String> {
+        let render_started_at = Instant::now();
+        let now_ms = now_millis();
+        record_render_timestamp_ms(&mut self.debug_stats, now_ms);
+        self.debug_stats.render_count_total = self.debug_stats.render_count_total.saturating_add(1);
+
         let (transcript_lines, mode) = self.render_transcript_lines_cached(width);
-        let mut lines = Vec::with_capacity(transcript_lines.len().saturating_add(8));
+        let mut lines = Vec::with_capacity(transcript_lines.len().saturating_add(10));
 
         append_wrapped_text(&mut lines, width, &render_header(), "", "");
         lines.extend(transcript_lines.iter().cloned());
@@ -312,6 +363,18 @@ impl Component for AppComponent {
             "",
             "",
         );
+
+        let telemetry = self.host.render_telemetry_snapshot();
+        self.debug_stats.last_out_bytes = telemetry.out_bytes;
+        self.debug_stats.last_diff_commands = telemetry.diff_commands;
+        self.debug_stats.last_input_queue_depth = telemetry.pending_input_depth;
+
+        let render_elapsed_ms = u64::try_from(render_started_at.elapsed().as_millis()).unwrap_or(0);
+        record_render_duration_ms(&mut self.debug_stats, render_elapsed_ms);
+
+        self.debug_stats.last_mode = mode.clone();
+        self.debug_stats.last_frame_lines = lines.len().saturating_add(1);
+        lines.push(render_debug_line(width, &self.debug_stats));
 
         self.cursor_pos = self.editor.cursor_pos().map(|position| CursorPos {
             row: position.row + editor_start_row,
@@ -418,6 +481,285 @@ fn render_status_line(mode: &Mode) -> String {
             format!("{} {}", yellow_dim("Shutting down"), yellow("..."))
         }
     }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|since_epoch| u64::try_from(since_epoch.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn record_render_timestamp_ms(stats: &mut DebugStats, now_ms: u64) {
+    stats.render_timestamps_ms.push_back(now_ms);
+    while stats
+        .render_timestamps_ms
+        .front()
+        .is_some_and(|timestamp| now_ms.saturating_sub(*timestamp) > 1000)
+    {
+        let _ = stats.render_timestamps_ms.pop_front();
+    }
+}
+
+const RENDER_DURATION_WINDOW_SIZE: usize = 64;
+
+fn record_render_duration_ms(stats: &mut DebugStats, duration_ms: u64) {
+    stats.render_durations_ms.push_back(duration_ms);
+    while stats.render_durations_ms.len() > RENDER_DURATION_WINDOW_SIZE {
+        let _ = stats.render_durations_ms.pop_front();
+    }
+}
+
+fn render_duration_avg_and_p95_ms(stats: &DebugStats) -> (u64, u64) {
+    if stats.render_durations_ms.is_empty() {
+        return (0, 0);
+    }
+
+    let sum = stats
+        .render_durations_ms
+        .iter()
+        .fold(0u64, |acc, value| acc.saturating_add(*value));
+    let count = u64::try_from(stats.render_durations_ms.len()).unwrap_or(1);
+    let avg = sum / count;
+
+    let mut sorted = stats
+        .render_durations_ms
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    sorted.sort_unstable();
+    let len = sorted.len();
+    let index = if len == 1 { 0 } else { ((len - 1) * 95) / 100 };
+    let p95 = sorted[index];
+
+    (avg, p95)
+}
+
+fn mode_label(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Idle => "idle",
+        Mode::Running { .. } => "running",
+        Mode::Error(_) => "error",
+        Mode::Exiting => "exiting",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DebugBand {
+    VeryGood,
+    Good,
+    SoSo,
+    Bad,
+    VeryBad,
+}
+
+fn bright_red_bold(text: &str) -> String {
+    ansi_wrap(text, "\x1b[1m\x1b[91m", "\x1b[39m\x1b[22m")
+}
+
+fn colorize_band(text: &str, band: DebugBand) -> String {
+    match band {
+        DebugBand::VeryGood => green(text),
+        DebugBand::Good => cyan(text),
+        DebugBand::SoSo => yellow(text),
+        DebugBand::Bad => red(text),
+        DebugBand::VeryBad => bright_red_bold(text),
+    }
+}
+
+fn debug_band_label(band: DebugBand) -> &'static str {
+    match band {
+        DebugBand::VeryGood => "VG",
+        DebugBand::Good => "G",
+        DebugBand::SoSo => "SS",
+        DebugBand::Bad => "B",
+        DebugBand::VeryBad => "VB",
+    }
+}
+
+fn band_for_rps(rps: usize) -> DebugBand {
+    if rps <= 8 {
+        DebugBand::VeryGood
+    } else if rps <= 14 {
+        DebugBand::Good
+    } else if rps <= 22 {
+        DebugBand::SoSo
+    } else if rps <= 35 {
+        DebugBand::Bad
+    } else {
+        DebugBand::VeryBad
+    }
+}
+
+fn band_for_frame(frame_lines: usize) -> DebugBand {
+    if frame_lines <= 120 {
+        DebugBand::VeryGood
+    } else if frame_lines <= 260 {
+        DebugBand::Good
+    } else if frame_lines <= 500 {
+        DebugBand::SoSo
+    } else if frame_lines <= 900 {
+        DebugBand::Bad
+    } else {
+        DebugBand::VeryBad
+    }
+}
+
+fn band_for_tr(transcript_lines: usize) -> DebugBand {
+    if transcript_lines <= 100 {
+        DebugBand::VeryGood
+    } else if transcript_lines <= 250 {
+        DebugBand::Good
+    } else if transcript_lines <= 600 {
+        DebugBand::SoSo
+    } else if transcript_lines <= 1200 {
+        DebugBand::Bad
+    } else {
+        DebugBand::VeryBad
+    }
+}
+
+fn band_for_hit(hit_pct: u64) -> DebugBand {
+    if hit_pct >= 98 {
+        DebugBand::VeryGood
+    } else if hit_pct >= 92 {
+        DebugBand::Good
+    } else if hit_pct >= 80 {
+        DebugBand::SoSo
+    } else if hit_pct >= 60 {
+        DebugBand::Bad
+    } else {
+        DebugBand::VeryBad
+    }
+}
+
+fn overall_band(bands: &[DebugBand]) -> DebugBand {
+    bands.iter().copied().max().unwrap_or(DebugBand::VeryGood)
+}
+
+fn culprit_metric_label<'a>(
+    global_band: DebugBand,
+    metric_bands: &'a [(&'a str, DebugBand)],
+) -> &'a str {
+    metric_bands
+        .iter()
+        .find(|(_, band)| *band == global_band)
+        .map(|(metric, _)| *metric)
+        .unwrap_or("na")
+}
+
+fn truncate_ansi_to_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let bytes = text.as_bytes();
+    let mut output = String::new();
+    let mut index = 0usize;
+    let mut visible = 0usize;
+    let mut truncated = false;
+
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'[' {
+            let start = index;
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (b'@'..=b'~').contains(&byte) {
+                    break;
+                }
+            }
+            output.push_str(std::str::from_utf8(&bytes[start..index]).unwrap_or_default());
+            continue;
+        }
+
+        let ch = match std::str::from_utf8(&bytes[index..])
+            .ok()
+            .and_then(|rest| rest.chars().next())
+        {
+            Some(ch) => ch,
+            None => break,
+        };
+
+        if visible >= width {
+            truncated = true;
+            break;
+        }
+
+        output.push(ch);
+        visible = visible.saturating_add(1);
+        index += ch.len_utf8();
+    }
+
+    if truncated && output.contains("\x1b[") {
+        output.push_str("\x1b[0m");
+    }
+
+    output
+}
+
+fn render_debug_line(width: usize, stats: &DebugStats) -> String {
+    let _ = stats.render_count_total;
+    let rps = stats.render_timestamps_ms.len();
+    let cache_total = stats.cache_hits.saturating_add(stats.cache_misses);
+    let hit_warm = cache_total >= 30;
+    let hit_pct = if cache_total == 0 {
+        0
+    } else {
+        stats.cache_hits.saturating_mul(100) / cache_total
+    };
+
+    let rps_band = band_for_rps(rps);
+    let frame_band = band_for_frame(stats.last_frame_lines);
+    let tr_band = band_for_tr(stats.last_transcript_lines);
+    let hit_band = hit_warm.then_some(band_for_hit(hit_pct));
+
+    let mut metric_bands = vec![("rps", rps_band), ("frame", frame_band), ("tr", tr_band)];
+    if let Some(hit_band) = hit_band {
+        metric_bands.push(("hit", hit_band));
+    }
+    let aggregate_bands = metric_bands
+        .iter()
+        .map(|(_, band)| *band)
+        .collect::<Vec<_>>();
+    let global_band = overall_band(&aggregate_bands);
+    let culprit = culprit_metric_label(global_band, &metric_bands);
+
+    let prefix = colorize_band(
+        &format!("DBG[{}|{}]", debug_band_label(global_band), culprit),
+        global_band,
+    );
+    let rps_token = format!("rps:{}", colorize_band(&rps.to_string(), rps_band));
+    let frame_token = format!(
+        "frame:{}",
+        colorize_band(&stats.last_frame_lines.to_string(), frame_band)
+    );
+    let tr_token = format!(
+        "tr:{}",
+        colorize_band(&stats.last_transcript_lines.to_string(), tr_band)
+    );
+    let hit_token = if let Some(hit_band) = hit_band {
+        format!("hit:{}", colorize_band(&format!("{hit_pct}%"), hit_band))
+    } else {
+        format!("hit:{}", dim("n/a"))
+    };
+    let (render_avg_ms, render_p95_ms) = render_duration_avg_and_p95_ms(stats);
+    let ms_token = format!("ms:{render_avg_ms}/{render_p95_ms}");
+    let out_token = format!("out:{}", stats.last_out_bytes);
+    let cmd_token = format!("cmd:{}", stats.last_diff_commands);
+    let inq_token = format!("inq:{}", stats.last_input_queue_depth);
+
+    let sep = dim(" • ");
+    let line = format!(
+        "{prefix}{sep}{rps_token}{sep}{frame_token}{sep}{tr_token}{sep}{hit_token}{sep}rev:{}{sep}mode:{}{sep}{ms_token}{sep}{out_token}{sep}{cmd_token}{sep}{inq_token}",
+        stats.last_revision,
+        mode_label(&stats.last_mode),
+        sep = sep
+    );
+
+    truncate_ansi_to_width(&line, width)
 }
 
 fn render_header() -> String {
@@ -910,7 +1252,275 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tape_tui::{Terminal, TUI};
+
     use super::*;
+    use crate::app::Role;
+    use crate::provider::{CancelSignal, RunEvent, RunProvider, RunRequest};
+
+    #[derive(Default)]
+    struct NullTerminal;
+
+    impl Terminal for NullTerminal {
+        fn start(
+            &mut self,
+            _on_input: Box<dyn FnMut(String) + Send>,
+            _on_resize: Box<dyn FnMut() + Send>,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn stop(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
+
+        fn write(&mut self, _data: &str) {}
+
+        fn columns(&self) -> u16 {
+            120
+        }
+
+        fn rows(&self) -> u16 {
+            40
+        }
+    }
+
+    struct NoopProvider;
+
+    impl RunProvider for NoopProvider {
+        fn profile(&self) -> ProviderProfile {
+            ProviderProfile {
+                provider_id: "test".to_string(),
+                model_id: "test-model".to_string(),
+                thinking_level: None,
+            }
+        }
+
+        fn run(
+            &self,
+            req: RunRequest,
+            _cancel: CancelSignal,
+            _execute_tool: &mut dyn FnMut(
+                crate::provider::ToolCallRequest,
+            ) -> crate::provider::ToolResult,
+            emit: &mut dyn FnMut(RunEvent),
+        ) -> Result<(), String> {
+            emit(RunEvent::Started { run_id: req.run_id });
+            emit(RunEvent::Finished { run_id: req.run_id });
+            Ok(())
+        }
+    }
+
+    fn healthy_debug_stats() -> DebugStats {
+        let mut stats = DebugStats::new();
+        stats.render_timestamps_ms = VecDeque::from(vec![1000, 1100, 1200, 1300]);
+        stats.render_durations_ms = VecDeque::from(vec![1, 2, 2, 3, 4]);
+        stats.last_frame_lines = 80;
+        stats.last_transcript_lines = 60;
+        stats.cache_hits = 99;
+        stats.cache_misses = 1;
+        stats.last_revision = 42;
+        stats.last_mode = Mode::Idle;
+        stats.last_out_bytes = 1200;
+        stats.last_diff_commands = 9;
+        stats.last_input_queue_depth = 0;
+        stats
+    }
+
+    fn startup_debug_stats() -> DebugStats {
+        let mut stats = DebugStats::new();
+        stats.render_timestamps_ms = VecDeque::from(vec![1000]);
+        stats.render_durations_ms = VecDeque::from(vec![1]);
+        stats.last_frame_lines = 7;
+        stats.last_transcript_lines = 0;
+        stats.cache_hits = 1;
+        stats.cache_misses = 2;
+        stats.last_revision = 0;
+        stats.last_mode = Mode::Idle;
+        stats.last_out_bytes = 80;
+        stats.last_diff_commands = 2;
+        stats.last_input_queue_depth = 0;
+        stats
+    }
+
+    #[test]
+    fn debug_band_thresholds_are_stable() {
+        assert_eq!(band_for_rps(8), DebugBand::VeryGood);
+        assert_eq!(band_for_rps(14), DebugBand::Good);
+        assert_eq!(band_for_rps(22), DebugBand::SoSo);
+        assert_eq!(band_for_rps(35), DebugBand::Bad);
+        assert_eq!(band_for_rps(36), DebugBand::VeryBad);
+
+        assert_eq!(band_for_frame(120), DebugBand::VeryGood);
+        assert_eq!(band_for_frame(260), DebugBand::Good);
+        assert_eq!(band_for_frame(500), DebugBand::SoSo);
+        assert_eq!(band_for_frame(900), DebugBand::Bad);
+        assert_eq!(band_for_frame(901), DebugBand::VeryBad);
+
+        assert_eq!(band_for_tr(100), DebugBand::VeryGood);
+        assert_eq!(band_for_tr(250), DebugBand::Good);
+        assert_eq!(band_for_tr(600), DebugBand::SoSo);
+        assert_eq!(band_for_tr(1200), DebugBand::Bad);
+        assert_eq!(band_for_tr(1201), DebugBand::VeryBad);
+
+        assert_eq!(band_for_hit(98), DebugBand::VeryGood);
+        assert_eq!(band_for_hit(92), DebugBand::Good);
+        assert_eq!(band_for_hit(80), DebugBand::SoSo);
+        assert_eq!(band_for_hit(60), DebugBand::Bad);
+        assert_eq!(band_for_hit(59), DebugBand::VeryBad);
+    }
+
+    #[test]
+    fn debug_overall_band_uses_worst_metric() {
+        let result = overall_band(&[
+            DebugBand::VeryGood,
+            DebugBand::Good,
+            DebugBand::SoSo,
+            DebugBand::VeryBad,
+        ]);
+        assert_eq!(result, DebugBand::VeryBad);
+    }
+
+    #[test]
+    fn culprit_metric_label_reports_first_worst_metric() {
+        let culprit = culprit_metric_label(
+            DebugBand::Bad,
+            &[
+                ("rps", DebugBand::SoSo),
+                ("frame", DebugBand::Bad),
+                ("tr", DebugBand::Bad),
+            ],
+        );
+        assert_eq!(culprit, "frame");
+    }
+
+    #[test]
+    fn render_debug_line_contains_core_fields() {
+        let mut stats = DebugStats::new();
+        stats.last_frame_lines = 12;
+        stats.last_transcript_lines = 34;
+        stats.cache_hits = 3;
+        stats.cache_misses = 1;
+        stats.last_revision = 7;
+        stats.last_mode = Mode::Running { run_id: 42 };
+        stats.render_timestamps_ms.push_back(1000);
+        stats.render_timestamps_ms.push_back(1100);
+
+        let line = render_debug_line(200, &stats);
+        assert!(line.contains("rps:"));
+        assert!(line.contains("frame:"));
+        assert!(line.contains("tr:"));
+        assert!(line.contains("hit:"));
+        assert!(line.contains("rev:"));
+        assert!(line.contains("mode:"));
+        assert!(line.contains("ms:"));
+        assert!(line.contains("out:"));
+        assert!(line.contains("cmd:"));
+        assert!(line.contains("inq:"));
+    }
+
+    #[test]
+    fn render_duration_avg_and_p95_are_stable() {
+        let mut stats = DebugStats::new();
+        stats.render_durations_ms = VecDeque::from(vec![1, 2, 3, 10, 20]);
+        assert_eq!(render_duration_avg_and_p95_ms(&stats), (7, 10));
+    }
+
+    #[test]
+    fn render_debug_line_contains_band_prefix() {
+        let line = render_debug_line(200, &healthy_debug_stats());
+        let plain = strip_ansi(&line);
+        assert!(plain.contains("DBG["));
+        assert!(plain.contains("|"));
+    }
+
+    #[test]
+    fn render_debug_line_colorized_tokens_present() {
+        let line = render_debug_line(200, &healthy_debug_stats());
+        assert!(line.contains("\x1b["));
+        assert!(line.contains("rps:"));
+        assert!(line.contains("frame:"));
+        assert!(line.contains("tr:"));
+        assert!(line.contains("hit:"));
+    }
+
+    #[test]
+    fn render_debug_line_truncation_is_ansi_safe() {
+        let line = render_debug_line(10, &healthy_debug_stats());
+        assert!(visible_text_width(&line) <= 10);
+        assert!(line.ends_with("\x1b[0m") || !line.contains("\x1b["));
+    }
+
+    #[test]
+    fn idle_good_case_renders_greenish_prefix() {
+        let line = render_debug_line(200, &healthy_debug_stats());
+        assert!(line.contains("DBG[VG|"));
+        assert!(line.contains("\x1b[32mDBG[VG|"));
+    }
+
+    #[test]
+    fn startup_hit_rate_is_warmup_and_does_not_dominate_overall_band() {
+        let line = render_debug_line(300, &startup_debug_stats());
+        let plain = strip_ansi(&line);
+        assert!(plain.contains("DBG[VG|"));
+        assert!(plain.contains("hit:n/a"));
+    }
+
+    #[test]
+    fn render_debug_line_truncates_to_width() {
+        let mut stats = DebugStats::new();
+        stats.last_mode = Mode::Error("boom".to_string());
+        let line = render_debug_line(12, &stats);
+        assert!(visible_text_width(&line) <= 12);
+    }
+
+    #[test]
+    fn cache_hit_miss_counters_progress() {
+        let app = Arc::new(Mutex::new(App::new()));
+        let runtime = TUI::new(NullTerminal);
+        let host = RuntimeController::new(
+            Arc::clone(&app),
+            runtime.runtime_handle(),
+            Arc::new(NoopProvider),
+        );
+        let mut component = AppComponent::new(
+            app,
+            host,
+            ProviderProfile {
+                provider_id: "test".to_string(),
+                model_id: "test-model".to_string(),
+                thinking_level: None,
+            },
+        );
+
+        let _ = component.render(80);
+        assert_eq!(component.debug_stats.cache_hits, 0);
+        assert_eq!(component.debug_stats.cache_misses, 1);
+
+        let _ = component.render(80);
+        assert_eq!(component.debug_stats.cache_hits, 1);
+        assert_eq!(component.debug_stats.cache_misses, 1);
+    }
+
+    #[test]
+    fn rolling_rps_window_evicts_old_samples() {
+        let mut stats = DebugStats::new();
+        record_render_timestamp_ms(&mut stats, 1000);
+        record_render_timestamp_ms(&mut stats, 1500);
+        record_render_timestamp_ms(&mut stats, 2000);
+
+        assert_eq!(stats.render_timestamps_ms.len(), 3);
+
+        record_render_timestamp_ms(&mut stats, 2501);
+
+        assert_eq!(stats.render_timestamps_ms.len(), 2);
+        assert_eq!(stats.render_timestamps_ms[0], 2000);
+        assert_eq!(stats.render_timestamps_ms[1], 2501);
+    }
 
     #[test]
     fn render_mode_line_is_left_anchored() {

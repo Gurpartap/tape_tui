@@ -104,7 +104,16 @@ impl OutputGate {
         self.cmds.clear();
     }
 
-    fn encoded_len(cmd: &TerminalCmd) -> usize {
+    /// Returns the encoded byte length of currently queued commands.
+    pub fn encoded_len(&self) -> usize {
+        let mut total_len = 0usize;
+        for cmd in &self.cmds {
+            total_len = total_len.saturating_add(Self::encoded_len_for_cmd(cmd));
+        }
+        total_len
+    }
+
+    fn encoded_len_for_cmd(cmd: &TerminalCmd) -> usize {
         match cmd {
             TerminalCmd::Bytes(data) => data.len(),
             TerminalCmd::BytesStatic(data) => data.len(),
@@ -213,10 +222,7 @@ impl OutputGate {
             return;
         }
 
-        let mut total_len = 0usize;
-        for cmd in &self.cmds {
-            total_len = total_len.saturating_add(Self::encoded_len(cmd));
-        }
+        let total_len = self.encoded_len();
 
         if total_len > OUTPUT_GATE_STREAM_THRESHOLD_BYTES {
             self.flush_streaming(term);
@@ -525,5 +531,22 @@ mod tests {
         }
         assert_eq!(term.output, "\x1b]0;tape\x07");
         assert_eq!(term.write_calls, 1);
+    }
+
+    #[test]
+    fn encoded_len_matches_emitted_bytes_length() {
+        let mut gate = OutputGate::new();
+        gate.extend([
+            TerminalCmd::HideCursor,
+            TerminalCmd::Bytes("abc".to_string()),
+            TerminalCmd::MoveDown(2),
+            TerminalCmd::ShowCursor,
+        ]);
+
+        let expected = gate.encoded_len();
+        let mut term = RecordingTerminal::default();
+        gate.flush(&mut term);
+
+        assert_eq!(expected, term.output.len());
     }
 }

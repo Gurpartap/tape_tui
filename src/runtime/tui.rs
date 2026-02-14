@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::env;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -122,6 +122,7 @@ pub struct TuiRuntime<T: Terminal> {
     cell_size_query_pending: bool,
     kitty_keyboard_enabled: bool,
     kitty_enable_pending: bool,
+    render_telemetry: Arc<RuntimeRenderTelemetry>,
     #[cfg(all(unix, not(test)))]
     signal_hook_guard: Option<crate::platform::SignalHookGuard>,
     #[cfg(all(unix, not(test)))]
@@ -539,6 +540,19 @@ struct RuntimeWakeState {
     stop_requested: bool,
 }
 
+#[derive(Debug, Default)]
+struct RuntimeRenderTelemetry {
+    last_render_output_bytes: AtomicUsize,
+    last_diff_command_count: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RuntimeRenderTelemetrySnapshot {
+    pub out_bytes: usize,
+    pub diff_commands: usize,
+    pub pending_input_depth: usize,
+}
+
 #[derive(Default)]
 struct RuntimeWake {
     state: Mutex<RuntimeWakeState>,
@@ -627,6 +641,14 @@ impl RuntimeWake {
             Err(poisoned) => poisoned.into_inner(),
         };
         std::mem::take(&mut state.pending_inputs)
+    }
+
+    fn pending_input_depth(&self) -> usize {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_inputs.len()
     }
 
     fn drain_commands(&self) -> VecDeque<Command> {
@@ -737,6 +759,7 @@ impl RuntimeWake {
 #[derive(Clone)]
 pub struct RuntimeHandle {
     wake: Arc<RuntimeWake>,
+    render_telemetry: Arc<RuntimeRenderTelemetry>,
 }
 
 impl RuntimeHandle {
@@ -746,6 +769,20 @@ impl RuntimeHandle {
 
     pub fn alloc_surface_id(&self) -> SurfaceId {
         self.wake.alloc_surface_id()
+    }
+
+    pub fn render_telemetry_snapshot(&self) -> RuntimeRenderTelemetrySnapshot {
+        RuntimeRenderTelemetrySnapshot {
+            out_bytes: self
+                .render_telemetry
+                .last_render_output_bytes
+                .load(Ordering::SeqCst),
+            diff_commands: self
+                .render_telemetry
+                .last_diff_command_count
+                .load(Ordering::SeqCst),
+            pending_input_depth: self.wake.pending_input_depth(),
+        }
     }
 
     /// Queue showing a surface from a background/context handle.
@@ -984,6 +1021,7 @@ impl<T: Terminal> TuiRuntime<T> {
             cell_size_query_pending: false,
             kitty_keyboard_enabled: false,
             kitty_enable_pending: false,
+            render_telemetry: Arc::new(RuntimeRenderTelemetry::default()),
             #[cfg(all(unix, not(test)))]
             signal_hook_guard: None,
             #[cfg(all(unix, not(test)))]
@@ -1023,6 +1061,7 @@ impl<T: Terminal> TuiRuntime<T> {
     pub fn runtime_handle(&self) -> RuntimeHandle {
         RuntimeHandle {
             wake: Arc::clone(&self.wake),
+            render_telemetry: Arc::clone(&self.render_telemetry),
         }
     }
 
@@ -1758,6 +1797,9 @@ impl<T: Terminal> TuiRuntime<T> {
         let render_cmds =
             self.renderer
                 .render(frame, width, height, self.clear_on_shrink, has_surfaces);
+        self.render_telemetry
+            .last_diff_command_count
+            .store(render_cmds.len(), Ordering::SeqCst);
         self.output.extend(render_cmds);
 
         let (updated_row, cursor_cmds) = position_hardware_cursor(
@@ -2011,8 +2053,15 @@ impl<T: Terminal> TuiRuntime<T> {
 
     fn flush_output(&mut self) {
         if self.output.is_empty() {
+            self.render_telemetry
+                .last_render_output_bytes
+                .store(0, Ordering::SeqCst);
             return;
         }
+        let out_bytes = self.output.encoded_len();
+        self.render_telemetry
+            .last_render_output_bytes
+            .store(out_bytes, Ordering::SeqCst);
         self.output.flush(&mut self.terminal);
         if self.kitty_enable_pending {
             self.kitty_keyboard_enabled = true;

@@ -704,6 +704,10 @@ impl RuntimeController {
         }
     }
 
+    pub fn render_telemetry_snapshot(&self) -> tape_tui::runtime::RuntimeRenderTelemetrySnapshot {
+        self.runtime_handle.render_telemetry_snapshot()
+    }
+
     fn lock_active_run(&self) -> MutexGuard<'_, Option<ActiveRun>> {
         lock_unpoisoned(&self.active_run)
     }
