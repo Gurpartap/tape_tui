@@ -93,7 +93,6 @@ pub enum SessionEntryKind {
     },
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum JsonLine {
