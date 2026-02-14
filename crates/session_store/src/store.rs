@@ -13,12 +13,9 @@ use crate::schema::{JsonLine, SessionEntry, SessionHeader};
 
 pub struct SessionStore {
     pub(crate) path: PathBuf,
-    #[allow(dead_code)]
     pub(crate) file: File,
     pub(crate) header: SessionHeader,
-    #[allow(dead_code)]
     pub(crate) entries: Vec<SessionEntry>,
-    #[allow(dead_code)]
     pub(crate) index_by_id: HashMap<String, usize>,
     pub(crate) current_leaf_id: Option<String>,
 }
@@ -150,8 +147,49 @@ impl SessionStore {
         })
     }
 
-    pub fn append(&mut self, _entry: SessionEntry) -> Result<(), SessionStoreError> {
-        todo!("not implemented yet")
+    pub fn append(&mut self, entry: SessionEntry) -> Result<(), SessionStoreError> {
+        let line_number = self.entries.len() + 2;
+        validate_entry_line(&self.path, line_number, &entry)?;
+
+        if self.index_by_id.contains_key(&entry.id) {
+            return Err(SessionStoreError::DuplicateEntryId {
+                path: self.path.clone(),
+                line: line_number,
+                id: entry.id,
+            });
+        }
+
+        if let Some(parent_id) = &entry.parent_id {
+            if !self.index_by_id.contains_key(parent_id) {
+                return Err(SessionStoreError::DanglingParentId {
+                    path: self.path.clone(),
+                    line: line_number,
+                    entry_id: entry.id,
+                    parent_id: parent_id.clone(),
+                });
+            }
+        }
+
+        let entry_id = entry.id.clone();
+        let entry_json = serde_json::to_string(&entry)
+            .map_err(|source| SessionStoreError::json_serialize(&self.path, source))?;
+
+        self.file
+            .write_all(entry_json.as_bytes())
+            .map_err(|source| SessionStoreError::io("writing session entry", &self.path, source))?;
+        self.file.write_all(b"\n").map_err(|source| {
+            SessionStoreError::io("writing session entry newline", &self.path, source)
+        })?;
+        self.file
+            .sync_data()
+            .map_err(|source| SessionStoreError::io("syncing session entry", &self.path, source))?;
+
+        let next_index = self.entries.len();
+        self.entries.push(entry);
+        self.index_by_id.insert(entry_id.clone(), next_index);
+        self.current_leaf_id = Some(entry_id);
+
+        Ok(())
     }
 
     #[must_use]
